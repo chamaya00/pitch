@@ -1,5 +1,5 @@
 import { BackendStatus } from "@/components/backend-status";
-import { Button } from "@/components/ui/button";
+import { UploadPanel } from "@/components/upload/upload-panel";
 
 const PLANNED_METRICS = [
   {
@@ -22,36 +22,22 @@ const PLANNED_METRICS = [
 
 export default function Home() {
   return (
-    <div className="mx-auto max-w-5xl px-6">
-      <section className="py-20 sm:py-28">
+    <div className="mx-auto max-w-3xl px-6">
+      <section className="pt-16 pb-10 sm:pt-24 sm:pb-12">
         <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
           Understand your voice.
         </h1>
-        <p className="mt-4 max-w-xl text-lg text-muted">
+        <p className="mt-4 max-w-xl text-lg leading-relaxed text-muted">
           Upload a recording and discover your pitch, range, stability and vocal
           patterns.
         </p>
-
-        <div className="mt-8 flex flex-wrap gap-3">
-          <Button disabled aria-describedby="phase-note">
-            Upload audio
-          </Button>
-          <Button variant="secondary" disabled aria-describedby="phase-note">
-            Record voice
-          </Button>
-        </div>
-
-        <p id="phase-note" className="mt-3 text-sm text-muted">
-          Audio upload and recording arrive in the next phase. The project
-          foundation is in place — nothing here is simulated.
-        </p>
-
-        <div className="mt-8">
-          <BackendStatus />
-        </div>
       </section>
 
-      <section className="border-t border-border py-14">
+      <BackendStatus />
+
+      <UploadPanel />
+
+      <section className="border-t border-border py-14 mt-16">
         <h2 className="text-sm font-medium uppercase tracking-wide text-muted">
           What VocalLens will measure
         </h2>
@@ -68,7 +54,7 @@ export default function Home() {
             </li>
           ))}
         </ul>
-        <p className="mt-6 max-w-2xl text-sm leading-relaxed text-muted">
+        <p className="mt-6 text-sm leading-relaxed text-muted">
           Every number shown in VocalLens comes from deterministic audio
           analysis. AI is used only to explain those measurements — never to
           invent them.

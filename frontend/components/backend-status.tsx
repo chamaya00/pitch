@@ -2,37 +2,31 @@
 
 import { useBackendHealth } from "@/hooks/use-backend-health";
 
-const DOT = "inline-block h-2 w-2 rounded-full";
-
 /**
- * Small connectivity indicator. In Phase 0 it is the only live link between the
- * frontend and the API, and it doubles as a smoke test during development.
+ * Connection notice.
+ *
+ * Renders nothing while the API is reachable: a permanent "online" badge is
+ * developer chrome, not product. It appears only when the API cannot be
+ * reached, where it explains why uploading is about to fail.
  */
 export function BackendStatus() {
   const health = useBackendHealth();
 
-  if (health.status === "loading") {
-    return (
-      <p className="flex items-center gap-2 text-sm text-muted">
-        <span className={`${DOT} animate-pulse bg-muted`} aria-hidden />
-        Checking API…
-      </p>
-    );
-  }
-
-  if (health.status === "offline") {
-    return (
-      <p className="flex items-center gap-2 text-sm text-danger" role="status">
-        <span className={`${DOT} bg-danger`} aria-hidden />
-        API unavailable — {health.message}
-      </p>
-    );
-  }
+  if (health.status !== "offline") return null;
 
   return (
-    <p className="flex items-center gap-2 text-sm text-muted" role="status">
-      <span className={`${DOT} bg-positive`} aria-hidden />
-      API online · v{health.data.version} · {health.data.environment}
+    <p
+      role="status"
+      className="mb-4 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/5 px-4 py-3 text-sm text-warning"
+    >
+      <span
+        aria-hidden
+        className="mt-1.5 inline-block h-2 w-2 shrink-0 rounded-full bg-warning"
+      />
+      <span>
+        VocalLens can&apos;t reach its analysis service right now, so uploads
+        will fail. Please try again shortly.
+      </span>
     </p>
   );
 }

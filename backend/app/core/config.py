@@ -4,12 +4,13 @@ All configuration is read from the environment (or a local ``.env`` file).
 Secrets must never be hardcoded — see ``.env.example`` at the repository root.
 """
 
+import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -43,14 +44,22 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
 
     # --- CORS --------------------------------------------------------------
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    #: ``NoDecode`` is required: without it pydantic-settings JSON-decodes any
+    #: complex field read from the environment, so the documented
+    #: comma-separated form raises before the validator below ever runs.
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:3000"]
+    )
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors_origins(cls, value: object) -> object:
-        """Allow ``CORS_ORIGINS`` to be given as a comma-separated string."""
+        """Accept ``CORS_ORIGINS`` as a comma-separated string or a JSON list."""
         if isinstance(value, str):
-            return [origin.strip() for origin in value.split(",") if origin.strip()]
+            text = value.strip()
+            if text.startswith("["):
+                return json.loads(text)
+            return [origin.strip() for origin in text.split(",") if origin.strip()]
         return value
 
     @property
