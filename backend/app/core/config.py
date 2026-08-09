@@ -5,6 +5,7 @@ Secrets must never be hardcoded — see ``.env.example`` at the repository root.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
     # --- Audio limits (enforced from Phase 1 onwards) ----------------------
     max_audio_size_mb: int = Field(default=50, ge=1, le=500)
     max_audio_duration_seconds: int = Field(default=300, ge=1, le=3600)
+
+    # --- Storage -----------------------------------------------------------
+    #: Root directory for uploaded recordings. A relative path resolves against
+    #: the process working directory, which suits local development; deployments
+    #: set an absolute path pointing at a mounted volume.
+    storage_root: Path = Path("storage")
 
     # --- Integrations ------------------------------------------------------
     # Optional in Phase 0; required once the relevant phase is implemented.

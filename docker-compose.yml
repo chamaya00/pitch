@@ -27,8 +27,13 @@ services:
       MAX_AUDIO_SIZE_MB: ${MAX_AUDIO_SIZE_MB:-50}
       MAX_AUDIO_DURATION_SECONDS: ${MAX_AUDIO_DURATION_SECONDS:-300}
       CORS_ORIGINS: http://localhost:3000
+      STORAGE_ROOT: /var/lib/vocallens
     ports:
       - "8000:8000"
+    volumes:
+      # Recordings must outlive the container; without this they vanish on
+      # every rebuild.
+      - recordings:/var/lib/vocallens
     depends_on:
       db:
         condition: service_healthy
@@ -51,3 +56,4 @@ services:
 
 volumes:
   db_data:
+  recordings:
