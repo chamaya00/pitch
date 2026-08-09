@@ -1,0 +1,6 @@
+# Runtime dependencies for the VocalLens backend.
+# Phase 0 deliberately keeps this minimal: no audio, DB or LLM dependencies yet.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
