@@ -55,6 +55,21 @@ class ErrorCode(StrEnum):
     # AI feedback (Phase 6)
     AI_UNAVAILABLE = "AI_UNAVAILABLE"
 
+    # Speech analysis (Phase 7)
+    #: No provider is configured, so nothing can be transcribed. This is a
+    #: deployment state, not a failure of the recording.
+    ANALYSIS_NOT_CONFIGURED = "ANALYSIS_NOT_CONFIGURED"
+    #: A configured provider could not be reached at all.
+    ANALYSIS_PROVIDER_UNAVAILABLE = "ANALYSIS_PROVIDER_UNAVAILABLE"
+    #: A provider was reached but did not answer within the allowed time.
+    ANALYSIS_PROVIDER_TIMEOUT = "ANALYSIS_PROVIDER_TIMEOUT"
+    #: A provider refused the request because of its own rate limits.
+    ANALYSIS_RATE_LIMITED = "ANALYSIS_RATE_LIMITED"
+    #: A provider answered, but with an error or an unusable response.
+    ANALYSIS_PROVIDER_ERROR = "ANALYSIS_PROVIDER_ERROR"
+    #: Transcription succeeded and found no speech. Not an error on our side.
+    TRANSCRIPT_EMPTY = "TRANSCRIPT_EMPTY"
+
 
 #: Default HTTP status for each code. Every member of ``ErrorCode`` must appear
 #: here; ``test_errors.py`` enforces that so a new code cannot be added without
@@ -75,6 +90,12 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.RECORDING_NOT_FOUND: 404,
     ErrorCode.INSUFFICIENT_PITCH_SIGNAL: 422,
     ErrorCode.AI_UNAVAILABLE: 503,
+    ErrorCode.ANALYSIS_NOT_CONFIGURED: 503,
+    ErrorCode.ANALYSIS_PROVIDER_UNAVAILABLE: 503,
+    ErrorCode.ANALYSIS_PROVIDER_TIMEOUT: 504,
+    ErrorCode.ANALYSIS_RATE_LIMITED: 429,
+    ErrorCode.ANALYSIS_PROVIDER_ERROR: 502,
+    ErrorCode.TRANSCRIPT_EMPTY: 422,
 }
 
 _STATUS_FALLBACK: Final[dict[int, ErrorCode]] = {

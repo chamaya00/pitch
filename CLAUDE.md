@@ -14,7 +14,8 @@ Never present mock data as real analysis.
 
 - `frontend/` — Next.js 16 (App Router), TypeScript, Tailwind CSS 4
 - `backend/` — FastAPI, Python 3.11
-- `docs/` — architecture, API, audio analysis, AI layer, limitations, roadmap
+- `docs/` — architecture, API, audio analysis, speech analysis, AI layer,
+  limitations, roadmap
 - `scripts/check.sh` — runs every check
 
 See [docs/architecture.md](docs/architecture.md) for conventions.

@@ -112,5 +112,22 @@ Handled failures use a stable envelope:
 | `INSUFFICIENT_PITCH_SIGNAL` | Too few reliably voiced frames to analyse |
 | `AI_UNAVAILABLE` | LLM provider not configured or unreachable |
 
+Speech analysis (Phase 7) adds the following. The HTTP status is listed because
+these separate "our deployment is not set up", "the provider is having a bad
+day" and "the recording had nothing in it", which callers retry differently.
+
+| `error_code` | HTTP | Meaning |
+| --- | --- | --- |
+| `ANALYSIS_NOT_CONFIGURED` | 503 | No speech-to-text provider is configured on this server |
+| `ANALYSIS_PROVIDER_UNAVAILABLE` | 503 | The provider could not be reached |
+| `ANALYSIS_PROVIDER_TIMEOUT` | 504 | The provider did not answer in time |
+| `ANALYSIS_RATE_LIMITED` | 429 | The provider refused the request under its own rate limits |
+| `ANALYSIS_PROVIDER_ERROR` | 502 | The provider answered with an error or an unusable response |
+| `TRANSCRIPT_EMPTY` | 422 | Transcription succeeded and found no speech |
+
+A provider's own error text never reaches a client. Each code carries our
+wording; the vendor's exception class or status is logged as a short `reason`
+and goes no further. See `backend/app/services/ai/errors.py`.
+
 Codes are added as the phases that raise them land; the list above is the
 planned vocabulary.
