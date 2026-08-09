@@ -40,6 +40,7 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
     # Audio upload (Phase 1)
+    INVALID_FILENAME = "INVALID_FILENAME"
     UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     AUDIO_TOO_SHORT = "AUDIO_TOO_SHORT"
@@ -63,6 +64,7 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.HTTP_ERROR: 400,
     ErrorCode.INTERNAL_ERROR: 500,
+    ErrorCode.INVALID_FILENAME: 400,
     ErrorCode.UNSUPPORTED_FORMAT: 415,
     ErrorCode.FILE_TOO_LARGE: 413,
     ErrorCode.AUDIO_TOO_SHORT: 422,
