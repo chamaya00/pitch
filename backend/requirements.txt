@@ -9,3 +9,6 @@ pydantic-settings>=2.3,<3.0
 # decoding audio, so hostile input never reaches a native decoder. No DB or LLM
 # dependencies yet; no decoding stack until Phase 2 chooses one.
 mutagen>=1.47,<2.0
+
+# Required by FastAPI to accept multipart/form-data uploads.
+python-multipart>=0.0.9,<1.0

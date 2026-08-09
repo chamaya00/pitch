@@ -10,6 +10,7 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.middleware import MaxBodySizeMiddleware
 from app.schemas.health import HealthResponse
 from app.version import __version__
 
@@ -43,6 +44,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Registered after CORS so it runs *inside* it: an oversized upload still
+    # gets the headers a browser needs to read the error.
+    app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_audio_size_bytes)
 
     register_exception_handlers(app)
 

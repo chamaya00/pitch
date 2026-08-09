@@ -43,6 +43,33 @@ def write_wav(
     return path
 
 
+#: Bytes of RIFF/fmt/data headers written by :mod:`wave` for PCM audio.
+WAV_HEADER_BYTES: Final = 44
+
+
+def write_wav_of_exact_size(path: Path, total_bytes: int, *, sample_rate: int = 8000) -> Path:
+    """Write a genuinely valid mono 16-bit WAV occupying exactly ``total_bytes``.
+
+    Needed for size-limit boundary tests, where "one byte over" has to be a real
+    audio file rather than padding that would fail content validation first.
+    ``total_bytes`` must be even and leave room for the header.
+    """
+    payload = total_bytes - WAV_HEADER_BYTES
+    if payload < 0 or payload % 2:
+        raise ValueError("total_bytes must be even and at least the header size")
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(b"\x00\x00" * (payload // 2))
+
+    actual = path.stat().st_size
+    if actual != total_bytes:  # pragma: no cover - guards the header assumption
+        raise AssertionError(f"expected {total_bytes} bytes, wrote {actual}")
+    return path
+
+
 # --- MP3 -------------------------------------------------------------------
 #
 # A minimal but genuinely valid MPEG-1 Layer III stream. Each 32-bit frame
