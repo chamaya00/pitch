@@ -476,3 +476,106 @@ def test_the_breakdown_is_a_short_response_whatever_the_timeline_length(
     breakdown = client.get(notes_url(recording_id)).json()
     assert breakdown["total_frames"] > 300
     assert len(breakdown["notes"]) <= 3
+
+
+# --- Audio feedback --------------------------------------------------------
+
+
+def feedback_url(recording_id: str) -> str:
+    return f"{audio_url(recording_id)}/feedback"
+
+
+def test_feedback_is_generated_only_when_asked(client: TestClient, recording_id: str) -> None:
+    client.post(audio_url(recording_id))
+
+    before = client.get(feedback_url(recording_id))
+    assert before.status_code == 200
+    assert before.json()["status"] == "not_requested"
+    assert before.json()["feedback"] is None
+
+    started = client.post(feedback_url(recording_id))
+    assert started.status_code == 202
+    assert client.get(feedback_url(recording_id)).json()["status"] == "completed"
+
+
+def test_completed_feedback_renders_every_section_it_produced(
+    client: TestClient, recording_id: str
+) -> None:
+    client.post(audio_url(recording_id))
+    client.post(feedback_url(recording_id))
+
+    feedback = client.get(feedback_url(recording_id)).json()["feedback"]
+    assert feedback["summary"]
+    assert feedback["pitch_observations"]
+    assert feedback["range_observations"]
+    assert feedback["provenance"]["is_mock"] is True
+
+
+def test_feedback_never_states_a_measurement_it_was_not_given(
+    client: TestClient, recording_id: str
+) -> None:
+    """The mock is the executable version of the prompt's first rule."""
+    client.post(audio_url(recording_id))
+    client.post(feedback_url(recording_id))
+
+    body = client.get(feedback_url(recording_id)).json()
+    text = str(body["feedback"]).lower()
+
+    for forbidden in ("score", "grade", "rating", "singing ability"):
+        assert forbidden not in text
+    for label in ("bright", "dark", "breathy", "nasal", "healthy"):
+        assert label not in text
+
+
+def test_repeating_the_request_returns_the_existing_feedback(
+    client: TestClient, recording_id: str
+) -> None:
+    client.post(audio_url(recording_id))
+    first = client.post(feedback_url(recording_id))
+    second = client.post(feedback_url(recording_id))
+
+    assert first.status_code == 202
+    assert second.status_code == 200
+    assert second.json()["status"] == "completed"
+
+
+def test_silence_is_refused_rather_than_interpreted(client: TestClient, tmp_path: Path) -> None:
+    """A recording with no reliable pitch must not produce a vocal assessment."""
+    source = write_signal_wav(
+        tmp_path / "silence.wav",
+        silence_samples(seconds=2.0, sample_rate=SAMPLE_RATE),
+        sample_rate=SAMPLE_RATE,
+    )
+    recording_id = upload(client, source)
+    client.post(audio_url(recording_id))
+
+    response = client.post(feedback_url(recording_id))
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "INSUFFICIENT_PITCH_SIGNAL"
+    assert "not enough reliable pitch" in response.json()["message"]
+
+
+def test_an_unanalysed_recording_is_refused(client: TestClient, recording_id: str) -> None:
+    response = client.post(feedback_url(recording_id))
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "AUDIO_ANALYSIS_NOT_FOUND"
+
+
+def test_feedback_does_not_disturb_the_measurements(client: TestClient, recording_id: str) -> None:
+    client.post(audio_url(recording_id))
+    before = client.get(audio_url(recording_id)).json()
+    client.post(feedback_url(recording_id))
+    after = client.get(audio_url(recording_id)).json()
+
+    assert before["summary"] == after["summary"]
+    assert after["status"] == "completed"
+    assert client.get(notes_url(recording_id)).json()["notes"]
+
+
+def test_the_feedback_response_never_leaks_internals(client: TestClient, recording_id: str) -> None:
+    client.post(audio_url(recording_id))
+    client.post(feedback_url(recording_id))
+    text = client.get(feedback_url(recording_id)).text
+
+    for leak in ("Traceback", "/tmp", "api_key", "sk-ant", "anthropic", "system", "prompt"):
+        assert leak not in text

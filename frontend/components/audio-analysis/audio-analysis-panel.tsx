@@ -71,6 +71,7 @@ export function AudioAnalysisPanel({ recordingId }: AudioAnalysisPanelProps) {
           timelineError={timelineError}
           breakdown={breakdown}
           breakdownError={breakdownError}
+          recordingId={recordingId}
         />
       )}
 

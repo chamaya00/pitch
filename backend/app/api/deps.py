@@ -12,8 +12,16 @@ from fastapi import Depends
 
 from app.core.config import Settings, get_settings
 from app.services.ai.errors import ProviderError
-from app.services.ai.factory import build_feedback_provider, build_speech_to_text_provider
-from app.services.ai.protocols import FeedbackProvider, SpeechToTextProvider
+from app.services.ai.factory import (
+    build_audio_feedback_provider,
+    build_feedback_provider,
+    build_speech_to_text_provider,
+)
+from app.services.ai.protocols import (
+    AudioFeedbackProvider,
+    FeedbackProvider,
+    SpeechToTextProvider,
+)
 from app.services.analysis.repository import AnalysisRepository, JsonFileAnalysisRepository
 from app.services.audio.storage import RecordingStorage
 from app.services.audio_analysis.analyzer import AudioAnalyzer, SignalAudioAnalyzer
@@ -67,6 +75,19 @@ def get_feedback_provider(settings: SettingsDep) -> FeedbackProvider:
         raise exc.to_api_error() from exc
 
 
+def get_audio_feedback_provider(settings: SettingsDep) -> AudioFeedbackProvider:
+    """Return the configured provider, seen through the audio protocol.
+
+    The same adapter ``get_feedback_provider`` returns — one credential, one
+    client — so a deployment cannot have real feedback on one half of the
+    product and demo data on the other.
+    """
+    try:
+        return build_audio_feedback_provider(settings)
+    except ProviderError as exc:
+        raise exc.to_api_error() from exc
+
+
 def get_analysis_repository(settings: SettingsDep) -> AnalysisRepository:
     """Return the active analysis repository, annotated as the protocol."""
     return JsonFileAnalysisRepository(settings.storage_root)
@@ -97,6 +118,7 @@ AudioAnalysisRepositoryDep = Annotated[
     AudioAnalysisRepository, Depends(get_audio_analysis_repository)
 ]
 AudioAnalyzerDep = Annotated[AudioAnalyzer, Depends(get_audio_analyzer)]
+AudioFeedbackProviderDep = Annotated[AudioFeedbackProvider, Depends(get_audio_feedback_provider)]
 
 
 def get_analysis_service(
@@ -131,18 +153,21 @@ def get_audio_analysis_service(
     storage: RecordingStorageDep,
     analyses: AudioAnalysisRepositoryDep,
     analyzer: AudioAnalyzerDep,
+    feedback: AudioFeedbackProviderDep,
 ) -> AudioAnalysisService:
     """Assemble the audio-analysis workflow from the configured pieces.
 
-    Note what is absent: no speech-to-text provider and no feedback provider.
-    This pipeline measures the signal and needs neither, which is why a
-    deployment with no AI credentials at all can still analyse audio.
+    Note what is absent: a speech-to-text provider. Measuring the signal needs
+    no transcription, which is why a deployment with no AI credentials can still
+    analyse audio — the feedback provider is used only when someone asks for an
+    interpretation of the measurements.
     """
     return AudioAnalysisService(
         recordings=recordings,
         storage=storage,
         analyses=analyses,
         analyzer=analyzer,
+        feedback=feedback,
         stale_after_seconds=settings.analysis_stale_after_seconds,
     )
 

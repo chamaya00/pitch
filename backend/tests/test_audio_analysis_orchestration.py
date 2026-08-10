@@ -15,6 +15,8 @@ import anyio
 import pytest
 
 from app.core.errors import ApiError, ErrorCode
+from app.services.ai.mock import MockFeedbackProvider
+from app.services.ai.protocols import AudioFeedbackProvider
 from app.services.audio.storage import RecordingStorage
 from app.services.audio_analysis.analyzer import (
     AudioAnalysisResult,
@@ -154,6 +156,7 @@ def build(
     storage: RecordingStorage,
     analyses: JsonFileAudioAnalysisRepository,
     analyzer: AudioAnalyzer,
+    feedback: AudioFeedbackProvider | None = None,
     stale_after_seconds: float = 900,
 ) -> AudioAnalysisService:
     return AudioAnalysisService(
@@ -161,6 +164,9 @@ def build(
         storage=storage,
         analyses=analyses,
         analyzer=analyzer,
+        # The measurement tests below never reach it; feedback generation has
+        # its own suite.
+        feedback=feedback or MockFeedbackProvider(),
         stale_after_seconds=stale_after_seconds,
     )
 

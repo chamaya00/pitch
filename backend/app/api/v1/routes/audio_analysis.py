@@ -27,10 +27,11 @@ from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
 from app.schemas.audio_analysis import (
     AudioAnalysisResponse,
+    AudioFeedbackStateResponse,
     NoteBreakdownResponse,
     PitchTimelineResponse,
 )
-from app.services.audio_analysis.models import AudioAnalysisStatus
+from app.services.audio_analysis.models import AudioAnalysisStatus, AudioFeedbackStatus
 
 router = APIRouter(prefix="/recordings", tags=["audio-analysis"])
 
@@ -231,6 +232,91 @@ async def get_note_breakdown(
             "That recording's audio analysis has not finished yet.",
         )
     return NoteBreakdownResponse.from_domain(analysis, notes)
+
+
+@router.post(
+    "/{recording_id}/audio-analysis/feedback",
+    response_model=AudioFeedbackStateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Explain the audio measurements",
+    description=(
+        "Ask a language model to explain this recording's measured audio in "
+        "plain language.\n\n"
+        "**The model is not given the recording.** It receives a structured set "
+        "of measurements the analysis already computed, and nothing else — no "
+        "audio, no path, no filename, no recording id. It explains numbers; it "
+        "does not produce them, and it is instructed never to state one that was "
+        "not supplied.\n\n"
+        "**Nothing is generated automatically.** This is an explicit request, "
+        "and repeating it is safe: feedback already written or already being "
+        "written is returned as-is, so a client cannot run up a provider bill by "
+        "re-rendering.\n\n"
+        "**Requires a completed analysis.** A recording whose audio analysis "
+        "failed with `INSUFFICIENT_PITCH_SIGNAL` — ordinary speech, a whisper, a "
+        "noisy room — is refused with that code rather than handed to a model, "
+        "which is what stops a vocal assessment being invented from a recording "
+        "that contained no singing.\n\n"
+        "Returns `202` while generation runs; poll `GET` on the same path."
+    ),
+    responses={
+        status.HTTP_200_OK: {
+            "model": AudioFeedbackStateResponse,
+            "description": "Feedback for this analysis had already been written.",
+        },
+        **error_responses(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            ErrorCode.INSUFFICIENT_PITCH_SIGNAL,
+            ErrorCode.RECORDING_NOT_FOUND,
+            ErrorCode.ANALYSIS_NOT_CONFIGURED,
+            ErrorCode.VALIDATION_ERROR,
+            ErrorCode.INTERNAL_ERROR,
+        ),
+    },
+)
+async def start_audio_feedback(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+    background_tasks: BackgroundTasks,
+    response: Response,
+) -> AudioFeedbackStateResponse:
+    """Claim the analysis for feedback and schedule the provider call."""
+    analysis = await service.start_feedback(recording_id)
+
+    if analysis.feedback_status is AudioFeedbackStatus.GENERATING:
+        background_tasks.add_task(service.run_feedback, analysis.audio_analysis_id)
+    else:
+        response.status_code = status.HTTP_200_OK
+
+    return AudioFeedbackStateResponse.from_domain(analysis)
+
+
+@router.get(
+    "/{recording_id}/audio-analysis/feedback",
+    response_model=AudioFeedbackStateResponse,
+    summary="Get the audio feedback",
+    description=(
+        "The current state of this recording's audio feedback.\n\n"
+        "**A failed generation is a successful response**: `200` with "
+        '`status: "failed"` and an `error_code`. The measurements are unaffected '
+        "— they were computed without a model and a provider outage costs the "
+        "prose and nothing else.\n\n"
+        "`provenance.is_mock` on the feedback says whether it came from a "
+        "development stand-in. Content marked `true` is demo data and must never "
+        "be presented as a real interpretation."
+    ),
+    responses=error_responses(
+        ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+        ErrorCode.RECORDING_NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def get_audio_feedback(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+) -> AudioFeedbackStateResponse:
+    """Return the recording's audio feedback and its state."""
+    return AudioFeedbackStateResponse.from_domain(_require_analysis(service, recording_id))
 
 
 def _require_analysis(service: AudioAnalysisServiceDep, recording_id: str):  # type: ignore[no-untyped-def]

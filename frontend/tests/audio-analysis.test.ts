@@ -574,3 +574,11 @@ test("no note-breakdown label reads as a grade", () => {
     assert.ok(!text.includes(word), `a note row mentioned "${word}"`);
   }
 });
+
+test("the runner keeps polling while feedback is generating", () => {
+  // A status missing from the active list stops the loop silently, which is
+  // the worst possible failure: the UI waits forever and never asks again.
+  assert.equal(isActiveStatus("generating"), true);
+  assert.equal(isTerminalStatus("generating"), false);
+  assert.equal(isActiveStatus("not_requested"), false);
+});

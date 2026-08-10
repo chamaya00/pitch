@@ -5,8 +5,17 @@
  * in the warning colour, in plain words. Not a tooltip, not a footnote: a user
  * must not be able to read these numbers as measurements of their speech
  * without also reading this.
+ *
+ * The body is a prop because the two places this appears are standing in for
+ * different things: the speech result has no real transcript, while the audio
+ * feedback card has real measurements and only borrowed prose. Saying "this was
+ * not transcribed" over a genuine measurement would be its own small untruth.
  */
-export function MockDataBanner() {
+interface MockDataBannerProps {
+  children?: React.ReactNode;
+}
+
+export function MockDataBanner({ children }: MockDataBannerProps) {
   return (
     <div
       role="note"
@@ -34,9 +43,13 @@ export function MockDataBanner() {
           Demo data — not real analysis
         </p>
         <p className="mt-1 text-sm leading-relaxed text-muted">
-          No speech-to-text provider is configured, so this recording was not
-          transcribed. The transcript, numbers and feedback below come from a
-          development stand-in and describe nothing about your voice.
+          {children ?? (
+            <>
+              No speech-to-text provider is configured, so this recording was not
+              transcribed. The transcript, numbers and feedback below come from a
+              development stand-in and describe nothing about your voice.
+            </>
+          )}
         </p>
       </div>
     </div>

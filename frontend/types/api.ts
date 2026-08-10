@@ -286,3 +286,38 @@ export interface NoteBreakdown {
   /** Longest first, lower note first on a tie. Empty means none were detected. */
   notes: NoteSummary[];
 }
+
+/** Where a recording's audio feedback has got to. */
+export type AudioFeedbackStatus =
+  | "not_requested"
+  | "generating"
+  | "completed"
+  | "failed";
+
+/**
+ * A language model's interpretation of the measured audio.
+ *
+ * Note what has no field here: a score, a grade, a timbre label. Nothing in
+ * this type could hold one, which is the cheapest way to guarantee none is
+ * shown.
+ */
+export interface AudioFeedback {
+  summary: string;
+  strengths: string[];
+  areas_to_improve: string[];
+  pitch_observations: string[];
+  range_observations: string[];
+  note_observations: string[];
+  audio_observations: string[];
+  exercises: string[];
+  practice_plan: string[];
+  provenance: Provenance;
+}
+
+export interface AudioFeedbackState {
+  recording_id: string;
+  audio_analysis_id: string;
+  status: AudioFeedbackStatus;
+  error_code: string | null;
+  feedback: AudioFeedback | null;
+}

@@ -26,6 +26,12 @@ from typing import Final, Self
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.core.errors import ErrorCode
+
+# Provenance is shared with the speech analysis rather than redefined: "which
+# provider produced this, and was it a mock" means the same thing whichever
+# half of the product asked, and two copies would be two places for the
+# is_mock guarantee to drift.
+from app.services.analysis.models import Provenance
 from app.services.recordings.models import utc_now
 
 #: ``uuid4().hex``, the same shape every other identifier in this system uses.
@@ -280,6 +286,80 @@ class AudioMetrics(BaseModel):
         return self.pitch is not None
 
 
+class AudioFeedbackRequest(BaseModel):
+    """Exactly what an AI provider is given about a recording's audio.
+
+    A typed object rather than a loose dictionary, and a **selection** rather
+    than a dump: it carries the measurements that have an interpretation worth
+    reading and leaves out the ones that do not. Building it is the only way
+    audio measurements reach a model, so what is absent here cannot be
+    mentioned there.
+
+    Two things are deliberately *not* in it: the recording, in any form, and any
+    identifier. A provider given this object has no audio, no path, no filename
+    and no recording id — the same restriction the speech feedback protocol
+    imposes, for the same reason.
+
+    Optional fields stay ``None`` when the signal did not support them.
+    Serialising them as absent is the payload builder's job, not this model's.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    duration_seconds: float = Field(gt=0)
+    #: The threshold ``in_tune_ratio`` was measured against. Sent so a provider
+    #: can state the definition rather than guess at one.
+    in_tune_threshold_cents: float = Field(gt=0)
+
+    pitch: VocalRange | None = None
+    stability: PitchStability
+    loudness: Loudness
+    spectral: SpectralFeatures | None = None
+    #: Longest first. Capped by the builder; a provider does not need forty rows
+    #: to say where the time went.
+    notes: tuple[NoteSummary, ...] = ()
+
+
+class AudioFeedback(BaseModel):
+    """A provider's interpretation of measured audio.
+
+    Sections are separate fields rather than one blob of prose so the UI can
+    omit what is empty and never has to parse Markdown to find a heading.
+
+    Note what has no field here: a score, a grade, a rating, a timbre label, or
+    anything about vocal health. There is nowhere to put one, which is the
+    cheapest way to guarantee none is shown.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    summary: str = Field(min_length=1)
+    strengths: tuple[str, ...] = ()
+    areas_to_improve: tuple[str, ...] = ()
+    pitch_observations: tuple[str, ...] = ()
+    range_observations: tuple[str, ...] = ()
+    note_observations: tuple[str, ...] = ()
+    audio_observations: tuple[str, ...] = ()
+    exercises: tuple[str, ...] = ()
+    practice_plan: tuple[str, ...] = ()
+    provenance: Provenance
+
+
+class AudioFeedbackStatus(StrEnum):
+    """Where a recording's audio feedback has got to.
+
+    Stored on the analysis record rather than in a second machine of its own.
+    ``UNAVAILABLE`` is deliberately absent: a recording with no completed
+    analysis has no record to store a status on, so "unavailable" is derived by
+    the API from the analysis it could not find.
+    """
+
+    NOT_REQUESTED = "not_requested"
+    GENERATING = "generating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class AudioAnalysisStatus(StrEnum):
     """Lifecycle of one audio-analysis run.
 
@@ -326,6 +406,14 @@ class AudioAnalysis(BaseModel):
     metrics: AudioMetrics | None = None
     pitch_points: tuple[PitchPoint, ...] = ()
 
+    #: Generated prose about the measurements. Optional in every sense: an
+    #: analysis is complete without it, and a provider outage costs the prose
+    #: and nothing else.
+    feedback: AudioFeedback | None = None
+    feedback_status: AudioFeedbackStatus = AudioFeedbackStatus.NOT_REQUESTED
+    #: Why feedback generation failed, when it did.
+    feedback_error_code: ErrorCode | None = None
+
     @model_validator(mode="after")
     def _check_invariants(self) -> Self:
         if self.status is AudioAnalysisStatus.FAILED:
@@ -339,6 +427,17 @@ class AudioAnalysis(BaseModel):
 
         if self.pitch_points and self.metrics is None:
             raise ValueError("pitch points cannot exist without the metrics describing them")
+
+        # The same rule the speech analysis keeps: prose is never stored
+        # without the numbers it describes.
+        if self.feedback is not None and self.metrics is None:
+            raise ValueError("feedback cannot be attached without the metrics it describes")
+        if (self.feedback is not None) != (self.feedback_status is AudioFeedbackStatus.COMPLETED):
+            raise ValueError("completed feedback and stored feedback must agree")
+        if (self.feedback_error_code is not None) != (
+            self.feedback_status is AudioFeedbackStatus.FAILED
+        ):
+            raise ValueError("a failed feedback run must record exactly one error code")
 
         if self.completed_at is not None and self.status not in TERMINAL_STATUSES:
             raise ValueError("completed_at is only valid once the analysis has finished")

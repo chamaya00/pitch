@@ -18,7 +18,11 @@ from app.services.ai.claude import ClaudeFeedbackProvider
 from app.services.ai.deepgram import DeepgramSpeechToTextProvider
 from app.services.ai.errors import ProviderNotConfiguredError
 from app.services.ai.mock import MockFeedbackProvider, MockSpeechToTextProvider
-from app.services.ai.protocols import FeedbackProvider, SpeechToTextProvider
+from app.services.ai.protocols import (
+    AudioFeedbackProvider,
+    FeedbackProvider,
+    SpeechToTextProvider,
+)
 
 logger = get_logger(__name__)
 
@@ -54,11 +58,30 @@ def build_speech_to_text_provider(settings: Settings) -> SpeechToTextProvider:
 
 
 def build_feedback_provider(settings: Settings) -> FeedbackProvider:
-    """Return the configured feedback provider.
+    """Return the configured feedback provider for speech metrics.
 
     Raises:
         ProviderNotConfiguredError: the selected provider has no credentials.
     """
+    return _feedback_provider(settings)
+
+
+def build_audio_feedback_provider(settings: Settings) -> AudioFeedbackProvider:
+    """Return the configured feedback provider for audio measurements.
+
+    The *same* adapter as :func:`build_feedback_provider`, seen through the
+    other protocol. Both concrete providers implement both, so one credential,
+    one client and one timeout serve both halves of the product — and a
+    deployment cannot end up with real feedback on one and demo data on the
+    other without noticing.
+
+    Raises:
+        ProviderNotConfiguredError: the selected provider has no credentials.
+    """
+    return _feedback_provider(settings)
+
+
+def _feedback_provider(settings: Settings) -> ClaudeFeedbackProvider | MockFeedbackProvider:
     if settings.feedback_provider == "mock":
         logger.info("provider_selected", extra={"role": "feedback", "provider": "mock"})
         return MockFeedbackProvider()

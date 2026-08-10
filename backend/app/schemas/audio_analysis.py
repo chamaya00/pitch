@@ -22,10 +22,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.schemas.analysis import ProvenanceResponse
 from app.services.audio_analysis.models import (
     IN_TUNE_CENTS,
     AnalysisSettings,
     AudioAnalysis,
+    AudioFeedback,
     AudioMetrics,
     Loudness,
     NoteSummary,
@@ -243,6 +245,79 @@ class AudioAnalysisResponse(BaseModel):
                 AudioSummaryResponse.from_domain(analysis.metrics) if analysis.metrics else None
             ),
             pitch_point_count=len(analysis.pitch_points),
+        )
+
+
+class AudioFeedbackResponse(BaseModel):
+    """A language model's interpretation of the measurements.
+
+    Kept structurally apart from every measured value in this module. The
+    numbers above were computed by the analysis pipeline; this is prose about
+    them, it carries its own provenance including `is_mock`, and nothing here
+    was measured.
+
+    Sections are separate lists so a client can omit what is empty rather than
+    render a heading with nothing under it. There is no field for a score, a
+    grade or a timbre label — a model cannot return what the schema has nowhere
+    to put.
+    """
+
+    summary: str
+    strengths: list[str] = Field(default_factory=list)
+    areas_to_improve: list[str] = Field(default_factory=list)
+    pitch_observations: list[str] = Field(default_factory=list)
+    range_observations: list[str] = Field(default_factory=list)
+    note_observations: list[str] = Field(default_factory=list)
+    audio_observations: list[str] = Field(default_factory=list)
+    exercises: list[str] = Field(default_factory=list)
+    practice_plan: list[str] = Field(default_factory=list)
+    provenance: ProvenanceResponse
+
+    @classmethod
+    def from_domain(cls, feedback: AudioFeedback) -> "AudioFeedbackResponse":
+        return cls(
+            summary=feedback.summary,
+            strengths=list(feedback.strengths),
+            areas_to_improve=list(feedback.areas_to_improve),
+            pitch_observations=list(feedback.pitch_observations),
+            range_observations=list(feedback.range_observations),
+            note_observations=list(feedback.note_observations),
+            audio_observations=list(feedback.audio_observations),
+            exercises=list(feedback.exercises),
+            practice_plan=list(feedback.practice_plan),
+            provenance=ProvenanceResponse.from_domain(feedback.provenance),
+        )
+
+
+class AudioFeedbackStateResponse(BaseModel):
+    """Where a recording's audio feedback has got to, and the feedback itself.
+
+    `status` is one of `not_requested`, `generating`, `completed` or `failed`.
+    A recording with no completed analysis has no record to carry a status, so
+    "unavailable" surfaces as a `404` with a specific `error_code` rather than
+    as a fifth value here.
+    """
+
+    recording_id: str
+    audio_analysis_id: str
+    status: str
+    error_code: str | None = Field(default=None, description="Set only when `status` is `failed`.")
+    feedback: AudioFeedbackResponse | None = Field(
+        default=None, description="Present once generation has completed."
+    )
+
+    @classmethod
+    def from_domain(cls, analysis: AudioAnalysis) -> "AudioFeedbackStateResponse":
+        return cls(
+            recording_id=analysis.recording_id,
+            audio_analysis_id=analysis.audio_analysis_id,
+            status=analysis.feedback_status.value,
+            error_code=(
+                analysis.feedback_error_code.value if analysis.feedback_error_code else None
+            ),
+            feedback=(
+                AudioFeedbackResponse.from_domain(analysis.feedback) if analysis.feedback else None
+            ),
         )
 
 

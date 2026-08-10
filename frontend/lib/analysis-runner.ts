@@ -32,8 +32,21 @@ export interface Pollable {
   error_code: string | null;
 }
 
-/** Statuses that mean work is still going on. Shared by both pipelines. */
-const ACTIVE_STATUSES: readonly string[] = ["pending", "transcribing", "analyzing"];
+/**
+ * Statuses that mean work is still going on, across all three things this
+ * runner drives: the speech analysis, the audio analysis, and audio feedback.
+ *
+ * One list rather than one per pipeline. A status missing from it stops the
+ * polling loop silently — the caller sees "running" forever and no request is
+ * ever made again — so the failure mode of splitting this is worse than the
+ * cost of a shared list.
+ */
+const ACTIVE_STATUSES: readonly string[] = [
+  "pending",
+  "transcribing",
+  "analyzing",
+  "generating",
+];
 
 export function isTerminalStatus(status: string): boolean {
   return status === "completed" || status === "failed";

@@ -1,5 +1,6 @@
 "use client";
 
+import { AudioFeedbackCard } from "@/components/audio-analysis/audio-feedback-card";
 import { NoteBreakdown } from "@/components/audio-analysis/note-breakdown";
 import { PitchGraph } from "@/components/audio-analysis/pitch-graph";
 import {
@@ -22,6 +23,8 @@ interface AudioAnalysisResultProps {
   timelineError: string | null;
   breakdown: NoteBreakdownData | null;
   breakdownError: string | null;
+  /** The recording the AI card asks about. Measurements never leave this page. */
+  recordingId: string;
 }
 
 /**
@@ -42,6 +45,7 @@ export function AudioAnalysisResult({
   timelineError,
   breakdown,
   breakdownError,
+  recordingId,
 }: AudioAnalysisResultProps) {
   const range = rangeLabel(summary.range);
   const consistency = summary.stability.in_tune_ratio;
@@ -120,6 +124,8 @@ export function AudioAnalysisResult({
         rows={spectralRows(summary.spectral)}
         note="Raw measurable characteristics of the signal. VocalLens does not turn these into words like “bright” or “breathy” — that needs a validated classifier, and there isn't one here."
       />
+
+      <AudioFeedbackCard recordingId={recordingId} />
 
       <p className="px-1 text-xs leading-relaxed text-muted">
         An audio-based estimate from one recording, measured at{" "}

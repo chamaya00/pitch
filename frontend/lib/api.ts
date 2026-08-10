@@ -3,6 +3,7 @@ import type {
   AnalysisResponse,
   ApiErrorBody,
   AudioAnalysisResponse,
+  AudioFeedbackState,
   HealthResponse,
   NoteBreakdown,
   PitchTimeline,
@@ -288,4 +289,32 @@ export function getNoteBreakdown(
     signal,
     cache: "no-store",
   });
+}
+
+/* --- Audio feedback -------------------------------------------------------- */
+
+/**
+ * Ask for an interpretation of a recording's measured audio.
+ *
+ * Safe to repeat: feedback already written, or already being written, comes
+ * back as-is rather than starting a second provider call.
+ */
+export function startAudioFeedback(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<AudioFeedbackState> {
+  return apiFetch<AudioFeedbackState>(
+    `/recordings/${recordingId}/audio-analysis/feedback`,
+    { method: "POST", signal },
+  );
+}
+
+export function getAudioFeedback(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<AudioFeedbackState> {
+  return apiFetch<AudioFeedbackState>(
+    `/recordings/${recordingId}/audio-analysis/feedback`,
+    { signal, cache: "no-store" },
+  );
 }

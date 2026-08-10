@@ -246,6 +246,67 @@ tie, so the same analysis always renders the same way.
 Available only once the analysis has completed; otherwise `404`
 `AUDIO_ANALYSIS_NOT_FOUND`.
 
+### `POST /api/v1/recordings/{recording_id}/audio-analysis/feedback`
+
+Ask a language model to explain the measured audio in plain language.
+
+**The model is not given the recording.** It receives a structured set of
+measurements the analysis already computed and nothing else — no audio, no
+path, no filename, no recording id. It explains numbers; it does not produce
+them, and it is instructed never to state one that was not supplied. See
+[ai.md](ai.md).
+
+**Nothing is generated automatically.** This is an explicit request, and
+repeating it is safe: feedback already written, or already being written, is
+returned as-is, so a client cannot run up a provider bill by re-rendering.
+
+Returns `202` while generation runs and `200` when feedback already existed.
+Poll `GET` on the same path.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| No reliable pitch in the recording | 422 | `INSUFFICIENT_PITCH_SIGNAL` |
+| No completed audio analysis | 404 | `AUDIO_ANALYSIS_NOT_FOUND` |
+| No feedback provider configured | 503 | `ANALYSIS_NOT_CONFIGURED` |
+
+`INSUFFICIENT_PITCH_SIGNAL` here is the guard that matters: ordinary speech, a
+whisper or a noisy room is **refused before a provider is called**, so a vocal
+assessment can never be invented from a recording that contained no singing.
+
+### `GET /api/v1/recordings/{recording_id}/audio-analysis/feedback`
+
+```json
+{
+  "status": "completed",
+  "error_code": null,
+  "feedback": {
+    "summary": "…",
+    "strengths": ["…"],
+    "areas_to_improve": [],
+    "pitch_observations": ["…"],
+    "range_observations": ["…"],
+    "note_observations": [],
+    "audio_observations": [],
+    "exercises": [],
+    "practice_plan": [],
+    "provenance": { "provider": "mock", "model": null, "is_mock": true }
+  }
+}
+```
+
+`status` is `not_requested`, `generating`, `completed` or `failed`. A recording
+with no completed analysis has no record to carry a status, so "unavailable"
+surfaces as a `404` with a specific `error_code` rather than as a fifth value.
+
+**A failed generation is a successful response**: `200` with
+`status: "failed"` and an `error_code`. The measurements are unaffected — they
+were computed without a model, and a provider outage costs the prose and
+nothing else.
+
+An empty section means the model had nothing to say about it, and should be
+omitted rather than rendered as "none". `provenance.is_mock` marks demo data;
+it must never be presented as a real interpretation.
+
 ---
 
 ## Planned

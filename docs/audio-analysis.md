@@ -169,6 +169,26 @@ could render differently between runs.
 timeline; `_sustained` and `_vocal_range` are untouched, and the range remains
 the authoritative one.
 
+### AI interpretation (Step 7L)
+
+A completed audio analysis can optionally be explained in plain language. The
+architecture is the same one the speech half uses and the boundary is the point
+of it:
+
+```
+audio → deterministic analysis → structured measurements → model → prose
+```
+
+**The model never sees the audio**, and never performs the first arrow. Every
+number in the prose came from this pipeline. What it is given, what is withheld
+and what the prompt forbids are documented in [ai.md](ai.md).
+
+Two guards live on the audio side specifically. A recording whose analysis
+failed with `INSUFFICIENT_PITCH_SIGNAL` is refused before a provider is
+constructed — ordinary speech must not come back as a vocal assessment — and
+the payload builder omits unavailable measurements entirely rather than sending
+`null`, so an absent value cannot be filled in or read as zero.
+
 ### Conversions and smoothing
 
 Conversions live in `frontend/lib/pitch.ts` and use the same reference as the
@@ -436,6 +456,26 @@ could render differently between runs.
 **The range is not affected.** The breakdown is a separate view over the same
 timeline; `_sustained` and `_vocal_range` are untouched, and the range remains
 the authoritative one.
+
+### AI interpretation (Step 7L)
+
+A completed audio analysis can optionally be explained in plain language. The
+architecture is the same one the speech half uses and the boundary is the point
+of it:
+
+```
+audio → deterministic analysis → structured measurements → model → prose
+```
+
+**The model never sees the audio**, and never performs the first arrow. Every
+number in the prose came from this pipeline. What it is given, what is withheld
+and what the prompt forbids are documented in [ai.md](ai.md).
+
+Two guards live on the audio side specifically. A recording whose analysis
+failed with `INSUFFICIENT_PITCH_SIGNAL` is refused before a provider is
+constructed — ordinary speech must not come back as a vocal assessment — and
+the payload builder omits unavailable measurements entirely rather than sending
+`null`, so an absent value cannot be filled in or read as zero.
 
 ### Conversions
 

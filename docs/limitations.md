@@ -180,6 +180,28 @@ It is not an objective statement about whether someone can sing a song. Tessitur
 (where a melody sits most of the time), breath demands, register transitions and
 stylistic technique are not captured by range overlap.
 
+## AI vocal feedback
+
+The interpretation of the audio measurements is prose about numbers, and its
+limits are the numbers' limits plus the model's:
+
+- **It cannot hear the recording.** It is given measurements and nothing else,
+  so it cannot notice anything the pipeline did not measure.
+- **It cannot tell you your vocal range.** It may only describe the range
+  detected in one recording. No single recording establishes a physiological
+  limit.
+- **It does not score you.** `in_tune_ratio` is reported with its definition
+  attached; there is no field in the response that could hold an overall grade.
+- **It does not describe your timbre.** The spectral measurements do not
+  establish "bright", "dark", "breathy" or any other label, and the prompt
+  forbids deriving one.
+- **It is not a vocal-health or professional assessment**, and makes no claim
+  about anatomy, technique quality or ability.
+- **Demo output is marked.** With no provider configured the feedback comes
+  from a development stand-in and says so in a banner.
+- **A model can still be wrong.** It can phrase things imprecisely or
+  over-generalise from thin data. The measurements above it are the record.
+
 ## AI feedback
 
 The feedback layer explains measurements; it never generates them. It can still

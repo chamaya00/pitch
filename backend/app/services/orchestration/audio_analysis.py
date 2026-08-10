@@ -33,12 +33,16 @@ from typing import Any, Final
 
 from app.core.errors import ApiError, ErrorCode
 from app.core.logging import get_logger
+from app.services.ai.errors import ProviderError
+from app.services.ai.protocols import AudioFeedbackProvider
 from app.services.audio.storage import RecordingStorage, StorageError
 from app.services.audio_analysis.analyzer import AudioAnalyzer
 from app.services.audio_analysis.errors import AudioAnalysisError
+from app.services.audio_analysis.feedback_payload import build_request
 from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
+    AudioFeedbackStatus,
     NoteSummary,
     new_audio_analysis_id,
 )
@@ -96,12 +100,14 @@ class AudioAnalysisService:
         storage: RecordingStorage,
         analyses: AudioAnalysisRepository,
         analyzer: AudioAnalyzer,
+        feedback: AudioFeedbackProvider,
         stale_after_seconds: float,
     ) -> None:
         self._recordings = recordings
         self._storage = storage
         self._analyses = analyses
         self._analyzer = analyzer
+        self._feedback = feedback
         self._stale_after = timedelta(seconds=stale_after_seconds)
 
     # --- Entry points ------------------------------------------------------
@@ -159,6 +165,148 @@ class AudioAnalysisService:
                 settings.hop_length_samples, settings.sample_rate_hz
             ),
         )
+
+    async def start_feedback(self, recording_id: str) -> AudioAnalysis:
+        """Claim a completed analysis for feedback generation.
+
+        Returns the record to work with. ``feedback_status`` says what happened:
+        ``generating`` means this call claimed it and the caller should schedule
+        :meth:`run_feedback`; anything else means it was already claimed,
+        already written, or is being retried after a failure.
+
+        Raises:
+            ApiError: the recording is unknown, has no completed audio analysis,
+                or the analysis found no reliable pitch. **A provider is never
+                called for a recording with nothing to interpret** — that is how
+                ordinary speech avoids being handed back a vocal assessment.
+        """
+        analysis = self._require_completed(recording_id)
+
+        if analysis.feedback_status in (
+            AudioFeedbackStatus.COMPLETED,
+            AudioFeedbackStatus.GENERATING,
+        ):
+            return analysis
+
+        claimed = self._save(
+            _revalidated(
+                analysis,
+                feedback_status=AudioFeedbackStatus.GENERATING,
+                feedback=None,
+                feedback_error_code=None,
+            )
+        )
+        logger.info(
+            "audio_feedback_started",
+            extra={
+                "audio_analysis_id": claimed.audio_analysis_id,
+                "recording_id": recording_id,
+                "provider": self._feedback.name,
+            },
+        )
+        return claimed
+
+    async def run_feedback(self, audio_analysis_id: str) -> AudioAnalysis:
+        """Generate the feedback for a claimed analysis.
+
+        Never raises for a provider failure: it is recorded on the record and
+        the record returned, so a background task cannot take the process down
+        — and the measurements stay exactly where they were. A failure here
+        costs the prose and nothing else.
+        """
+        analysis = self._analyses.get(audio_analysis_id)
+        if analysis is None or analysis.metrics is None:
+            raise ApiError(ErrorCode.AUDIO_ANALYSIS_NOT_FOUND, "That analysis could not be found.")
+        if analysis.feedback_status is not AudioFeedbackStatus.GENERATING:
+            # Already written, or never claimed. Either way there is nothing to
+            # do, and doing it anyway would be a second paid provider call.
+            return analysis
+
+        notes = self.notes(analysis.recording_id) or ()
+        request = build_request(analysis.metrics, notes)
+
+        try:
+            feedback = await self._feedback.interpret_audio(request)
+        except ProviderError as exc:
+            return self._fail_feedback(analysis, exc.error_code, **exc.log_context())
+        except asyncio.CancelledError:
+            self._fail_feedback(analysis, ErrorCode.INTERNAL_ERROR, reason="cancelled")
+            raise
+        except Exception as exc:  # noqa: BLE001 - a background task must not die
+            return self._fail_feedback(
+                analysis, ErrorCode.INTERNAL_ERROR, reason=type(exc).__name__
+            )
+
+        completed = self._save(
+            _revalidated(
+                self._latest(analysis),
+                feedback=feedback.model_dump(),
+                feedback_status=AudioFeedbackStatus.COMPLETED,
+                feedback_error_code=None,
+            )
+        )
+        logger.info(
+            "audio_feedback_completed",
+            extra={
+                "audio_analysis_id": completed.audio_analysis_id,
+                "recording_id": completed.recording_id,
+                "provider": feedback.provenance.provider,
+                "is_mock": feedback.provenance.is_mock,
+            },
+        )
+        return completed
+
+    def _require_completed(self, recording_id: str) -> AudioAnalysis:
+        """The completed analysis to interpret, or a documented refusal."""
+        analysis = self.current(recording_id)
+        if analysis is None:
+            raise ApiError(
+                ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+                "That recording's audio has not been analysed yet.",
+            )
+        if analysis.status is AudioAnalysisStatus.FAILED:
+            code = analysis.error_code or ErrorCode.AUDIO_ANALYSIS_FAILED
+            if code is ErrorCode.INSUFFICIENT_PITCH_SIGNAL:
+                raise ApiError(
+                    ErrorCode.INSUFFICIENT_PITCH_SIGNAL,
+                    "Audio feedback is unavailable because there was not enough "
+                    "reliable pitch information in this recording.",
+                )
+            raise ApiError(code, "This recording's audio could not be analysed.")
+        if analysis.status is not AudioAnalysisStatus.COMPLETED or analysis.metrics is None:
+            raise ApiError(
+                ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+                "That recording's audio analysis has not finished yet.",
+            )
+        return analysis
+
+    def _fail_feedback(
+        self, analysis: AudioAnalysis, code: ErrorCode, **context: str
+    ) -> AudioAnalysis:
+        """Record a feedback failure. The measurements are never touched."""
+        failed = _revalidated(
+            self._latest(analysis),
+            feedback=None,
+            feedback_status=AudioFeedbackStatus.FAILED,
+            feedback_error_code=code,
+        )
+        try:
+            failed = self._save(failed)
+        except AudioAnalysisRepositoryError:
+            logger.error(
+                "audio_feedback_failure_not_persisted",
+                extra={"audio_analysis_id": failed.audio_analysis_id, "error_code": code.value},
+            )
+        logger.warning(
+            "audio_feedback_failed",
+            extra={
+                "audio_analysis_id": failed.audio_analysis_id,
+                "recording_id": failed.recording_id,
+                "error_code": code.value,
+                **context,
+            },
+        )
+        return failed
 
     async def start(self, recording_id: str) -> StartedAudioAnalysis:
         """Return the analysis to work with, creating one only if needed.

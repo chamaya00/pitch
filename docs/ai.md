@@ -4,6 +4,27 @@
 > This environment has no Anthropic credentials, so no request from this adapter
 > has been answered. See *Verification status* below.
 
+## Two interpretations, one provider
+
+The AI layer serves both halves of the product:
+
+| | Input | Output |
+| --- | --- | --- |
+| **Speech feedback** (7C) | transcript + `SpeechMetrics` | `Feedback` |
+| **Audio feedback** (7L) | `AudioFeedbackRequest` | `AudioFeedback` |
+
+Two protocols, **one adapter**. `ClaudeFeedbackProvider` implements both, as
+does `MockFeedbackProvider`, so there is one client, one timeout, one error
+vocabulary and one credential behind them. `build_feedback_provider` and
+`build_audio_feedback_provider` return the same object seen through the two
+protocols — a deployment cannot end up with real prose on one half and demo
+data on the other.
+
+Two protocols rather than one method taking both, because the inputs are
+genuinely different: one is handed words and speaking rates, the other pitch
+and amplitude. A single signature would force every caller to carry the half it
+does not use.
+
 ## Role
 
 The LLM explains measurements. It does not produce them.
@@ -15,9 +36,20 @@ The LLM explains measurements. It does not produce them.
 | Pause count and durations | Pattern description |
 | Filler-word counts, when measurable | Practical suggestions |
 
-If a number appears in the UI it came from `services/analysis/metrics.py`. The
-prompt supplies an already-computed payload, and the response is validated
-before anything is stored or shown.
+For audio the same table reads:
+
+| Deterministic analysis | Claude |
+| --- | --- |
+| Detected range, semitone span | What a range is, and what this one is not |
+| Voiced ratio, in-tune ratio, cents deviation | What the numbers describe |
+| Note breakdown | Where the pitched time went |
+| RMS, peak, clipping | Whether the recording limits the analysis |
+| Spectral measurements | What they represent — and that they do not classify a voice |
+
+**Claude does not calculate audio measurements.** If a number appears in the UI
+it came from `services/analysis/metrics.py` or
+`services/audio_analysis/`. The prompt supplies an already-computed payload, and
+the response is validated before anything is stored or shown.
 
 ## Boundary
 
@@ -41,6 +73,60 @@ or any other service's credentials.
 Retention is provider-dependent and has **not** been verified for this project —
 do not describe Anthropic's retention behaviour to users until it has been
 confirmed against the provider's documentation and your account settings.
+
+## Audio feedback payload
+
+`services/audio_analysis/feedback_payload.py` is the entire surface between
+measurement and interpretation. A provider sees what it assembles and nothing
+else — no audio, no path, no filename, no recording id — so anything left out
+cannot be commented on.
+
+**Selection, not a dump.** Two computed metrics are deliberately withheld:
+
+* `semitone_variance` — semitones squared has no plain-language reading, and
+  `cents_std` already answers "how much did it move" in units a person can
+  picture.
+* `unstable_sections` — a timestamped list reads as a fault list, and vibrato,
+  slides and blues intonation all land in it. Interpreting it safely needs a
+  musical judgement the measurement does not support.
+
+Both stay in the API for a client that wants them.
+
+**Absent stays absent.** The serialiser omits keys whose value is `None` rather
+than writing `null`. A key with a null value invites a model to fill it in; a
+missing key reads as a subject that was never raised. That is what makes the
+prompt's "say nothing about it" rule enforceable rather than aspirational, and
+it is why an unavailable measurement can never become a zero.
+
+**Definitions travel with the numbers.** The payload carries a `definitions`
+block stating what `in_tune_ratio`, `voiced_ratio`, `detected_range` and
+`percentage_of_voiced_time` mean, including that the range is *not*
+physiological. A model cannot state a definition it was never given.
+
+## Audio prompt constraints
+
+`AUDIO_SYSTEM_PROMPT` in `services/ai/claude.py`. Beyond the rules the speech
+prompt already carries, it forbids specifically:
+
+* stating a **physiological** vocal range — only "the range detected in this
+  recording";
+* turning a metric into a **skill score** — "the in-tune ratio is 82% under the
+  definition given", never "your singing ability is 82%";
+* deriving a **timbre label** from the spectral measurements — bright, dark,
+  warm, breathy, nasal, thin, rich, powerful or weak. Centroid, bandwidth,
+  rolloff, zero-crossing rate and flatness do not establish any of them;
+* treating **amplitude as ability** — RMS and peak are signal levels, not
+  projection or support;
+* calling the longest note the **best** note. Duration measures frequency, not
+  quality.
+
+It is also required to keep observation, interpretation and recommendation
+distinguishable, and to say so and stop when the measurements are too sparse.
+
+`MockFeedbackProvider.interpret_audio` is the executable statement of these
+rules: every sentence it can produce is guarded by the measurement it
+describes, and the tests assert that it never emits a timbre label, a score, or
+a claim about a measurement it was not given.
 
 ## Configuration
 
@@ -174,7 +260,7 @@ logged and truncated; it never reaches a client.
 
 | Check | Result |
 | --- | --- |
-| Live Claude request | **Not verified** — no credentials in this environment (`api.anthropic.com` is reachable and answers 401) |
+| Live Claude request | **Not verified** — no credentials in this environment (`api.anthropic.com` is reachable and answers 401). True for speech feedback (7C) and audio feedback (7L) alike |
 | Request construction | Verified against the installed SDK's `messages.parse` signature |
 | Response parsing | Verified through the SDK's own `parse_response`, the same function the real client runs |
 | Failure translation | Verified for every documented error class |
@@ -188,4 +274,11 @@ the standing disclaimer:
 > clinical or educational assessment.
 
 A mock result must never be presented as genuine analysis — provenance carries
-`is_mock` for exactly that reason.
+`is_mock` for exactly that reason, and the UI renders a prominent banner rather
+than a footnote.
+
+**A model is never asked to interpret a recording with nothing to interpret.**
+An audio analysis that failed with `INSUFFICIENT_PITCH_SIGNAL` — ordinary
+speech, a whisper, a noisy room — is refused at the service boundary before any
+provider is constructed. That is what stops a vocal assessment being invented
+from a recording that contained no singing.

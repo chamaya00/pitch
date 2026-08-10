@@ -30,12 +30,20 @@ from app.services.analysis.models import (
     Transcript,
     TranscriptWord,
 )
+from app.services.audio_analysis.models import (
+    AudioFeedback,
+    AudioFeedbackRequest,
+)
 
 MOCK_PROVIDER_NAME: Final = "mock"
 
 #: Every mock result carries this. Nothing above this layer needs to know how a
 #: mock is detected — it checks ``is_mock``.
 MOCK_PROVENANCE: Final = Provenance(provider=MOCK_PROVIDER_NAME, model=None, is_mock=True)
+
+#: Above this share of in-tune frames the mock calls the pitch steady. A mock's
+#: threshold for a mock's prose; a real provider makes its own judgement.
+_STEADY_IN_TUNE_RATIO: Final = 0.75
 
 #: Demo scripts. Each one says what it is in its first sentence, so a mock
 #: transcript that somehow reached a screen would still read as a mock. They
@@ -249,5 +257,100 @@ class MockFeedbackProvider:
             strengths=tuple(strengths),
             areas_to_improve=tuple(improvements),
             next_action=("Configure a real speech-to-text provider to replace this demo feedback."),
+            provenance=MOCK_PROVENANCE,
+        )
+
+    async def interpret_audio(self, request: AudioFeedbackRequest) -> AudioFeedback:
+        """Deterministic audio feedback, assembled from the measurements given.
+
+        Every sentence is guarded by the measurement it describes, so an
+        unavailable measurement simply produces no sentence — the same rule a
+        real provider is held to, pinned down here where it can be tested
+        without a model.
+
+        Note what it never says: no timbre label from the spectral numbers, no
+        physiological range, no score. The mock is the executable statement of
+        what the prompt asks Claude for.
+        """
+        stability = request.stability
+        summary = [
+            _MOCK_NOTICE,
+            f"This recording is {request.duration_seconds:.1f} seconds long, and "
+            f"{stability.voiced_frames} of {stability.total_frames} analysed frames "
+            "carried a reliable pitch.",
+        ]
+
+        strengths: list[str] = []
+        improvements: list[str] = []
+        pitch_observations: list[str] = []
+        range_observations: list[str] = []
+        note_observations: list[str] = []
+        audio_observations: list[str] = []
+
+        if stability.in_tune_ratio is not None:
+            share = round(stability.in_tune_ratio * 100)
+            pitch_observations.append(
+                f"{share}% of the pitched frames sat within "
+                f"{request.in_tune_threshold_cents:.0f} cents of the nearest note, under "
+                "the definition this analysis uses."
+            )
+            if stability.in_tune_ratio >= _STEADY_IN_TUNE_RATIO:
+                strengths.append("Most of the pitched time sat close to a note.")
+            else:
+                improvements.append(
+                    "A large share of the pitched time sat away from the nearest note."
+                )
+
+        if stability.mean_cents_deviation is not None:
+            direction = "flat" if stability.mean_cents_deviation < 0 else "sharp"
+            pitch_observations.append(
+                f"On average the pitch sat {abs(stability.mean_cents_deviation):.1f} cents "
+                f"{direction} of the nearest note."
+            )
+
+        if request.pitch is not None:
+            range_observations.append(
+                f"The range detected in this recording runs from {request.pitch.lowest_note} "
+                f"to {request.pitch.highest_note}, a span of {request.pitch.semitone_span} "
+                "semitones. That is what this recording contained, not the limit of your voice."
+            )
+
+        if request.notes:
+            longest = request.notes[0]
+            note_observations.append(
+                f"Most of the pitched time — {longest.percentage_of_voiced_time:.0f}% — was "
+                f"spent around {longest.note_name}. That makes it the most frequent note here, "
+                "which is not the same as the best one."
+            )
+
+        if request.loudness.clipped_sample_ratio > 0:
+            audio_observations.append(
+                "Some samples reached full scale, which can reduce how reliable parts of "
+                "this analysis are."
+            )
+        if request.spectral is not None:
+            audio_observations.append(
+                "Spectral characteristics were measured, but those numbers alone are not "
+                "enough to describe the character of a voice."
+            )
+
+        if not strengths:
+            strengths.append("The recording carried enough pitch for the analysis to run.")
+        if not improvements:
+            improvements.append("Nothing measurable stood out as needing attention.")
+
+        return AudioFeedback(
+            summary=" ".join(summary),
+            strengths=tuple(strengths),
+            areas_to_improve=tuple(improvements),
+            pitch_observations=tuple(pitch_observations),
+            range_observations=tuple(range_observations),
+            note_observations=tuple(note_observations),
+            audio_observations=tuple(audio_observations),
+            exercises=(
+                "Hold one comfortable note for five seconds and watch the live tuner "
+                "while you do it.",
+            ),
+            practice_plan=("Configure a real feedback provider to replace this demo response.",),
             provenance=MOCK_PROVENANCE,
         )
