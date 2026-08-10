@@ -11,11 +11,82 @@ model's role, which is to explain what is measured here and nothing else.
 Implemented (Step 7B): the domain model, the metrics, the provider boundary and
 mock providers.
 
-Not implemented: real speech-to-text, real feedback generation, orchestration,
-persistence, API routes, and the analysis UI. **No real transcription runs
-today.** The only providers that exist are the mocks in
-`backend/app/services/ai/mock.py`, and everything they produce is flagged
-`is_mock`.
+Implemented (Step 7C): real provider adapters for Deepgram and Claude, the
+configuration and factory that select between them, and error translation.
+
+Not implemented: orchestration, persistence, API routes, and the analysis UI.
+
+**No real transcription has been executed.** The adapters exist and are covered
+by tests at the SDK boundary, but this development environment has no provider
+credentials and its network policy blocks the Deepgram host outright, so no
+request has ever reached either service from here. See *Verification status*
+below.
+
+## Providers
+
+| Role | Real provider | Mock |
+| --- | --- | --- |
+| Speech to text | Deepgram (`services/ai/deepgram.py`) | `MockSpeechToTextProvider` |
+| Qualitative feedback | Anthropic Claude (`services/ai/claude.py`) | `MockFeedbackProvider` |
+
+Two vendors, because one cannot do both jobs — Claude has no audio input.
+
+Selection is configuration, resolved once in `services/ai/factory.py`:
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `SPEECH_TO_TEXT_PROVIDER` | `mock`, `deepgram` | `mock` |
+| `FEEDBACK_PROVIDER` | `mock`, `claude` | `mock` |
+| `DEEPGRAM_API_KEY` | — | unset |
+| `DEEPGRAM_MODEL` | — | `nova-3` |
+| `DEEPGRAM_FILLER_WORDS` | `true`, `false` | `false` |
+| `ANTHROPIC_API_KEY` | — | unset |
+| `ANTHROPIC_MODEL` | — | `claude-opus-5` |
+| `ANALYSIS_PROVIDER_TIMEOUT_SECONDS` | — | `120` |
+
+`mock` is the default so a fresh checkout runs without credentials. It is not a
+quiet default: the active provider names appear in the startup log and in
+`Settings.public_config()`, and a `mock_analysis_providers_active` warning is
+logged on boot.
+
+**There is no fallback.** Selecting `deepgram` without `DEEPGRAM_API_KEY` (or
+`claude` without `ANTHROPIC_API_KEY`) raises `ANALYSIS_NOT_CONFIGURED`. A
+configured provider that is unavailable produces the matching error code. Under
+no circumstances does a real provider degrade into a mock — an operator who
+asked for Deepgram and received demo data labelled as a result would have no way
+to tell.
+
+## What leaves the application
+
+| Destination | Sent | Never sent |
+| --- | --- | --- |
+| Deepgram | The recording's audio bytes | Filename, recording id, user identity, any other key |
+| Claude | The transcript text (capped at 12,000 characters) and the computed metrics | Audio, any path, filename, recording id, user identity, any other key |
+
+Claude never receives audio. That is enforced by the `FeedbackProvider`
+protocol, whose signature takes a transcript and metrics and has no path or
+bytes in it at all.
+
+**Retention is provider-dependent and has not been verified for this project.**
+Whether Deepgram or Anthropic retains a submitted recording or transcript, and
+for how long, depends on the account, plan and contract in force — none of which
+could be checked from this environment. Do not describe either provider's
+retention behaviour to users until it has been confirmed against the provider's
+own documentation and your account settings.
+
+## Verification status
+
+| Check | Result |
+| --- | --- |
+| Deepgram request against the live API | **Not verified** — no credentials, and the host is blocked by this environment's network policy (403 at the proxy on CONNECT) |
+| Claude request against the live API | **Not verified** — no credentials (`api.anthropic.com` is reachable and answers 401) |
+| Request construction | Verified against the installed SDKs' real signatures |
+| Response mapping | Verified through the SDKs' own response models and parsers |
+| Failure translation | Verified for every documented failure class |
+
+The adapter tests fake the SDK boundary — one callable each — so everything on
+this side of the wire is the real code path. What they cannot show is that a
+live provider returns what the fixtures contain.
 
 ## Shape of the pipeline
 
@@ -129,6 +200,23 @@ transcript would report "no fillers" for a recording full of them. A transcript
 therefore carries `includes_disfluencies`, defaulting to `False`, and filler
 statistics are omitted entirely unless a provider sets it.
 
+### How Deepgram sets that flag
+
+Deepgram accepts a `filler_words` option but does not echo back whether it
+applied it, so the flag cannot come from a single response field. The adapter
+requires two things before marking a transcript verbatim:
+
+1. `DEEPGRAM_FILLER_WORDS=true` — an operator asserting that the configured
+   model and plan support the option.
+2. The model Deepgram reports having actually run (`metadata.model_info`) is one
+   known to honour it. A request routed elsewhere logs
+   `disfluencies_requested_but_unconfirmed` and the transcript is marked
+   non-verbatim.
+
+Either check failing means filler statistics are omitted. That is the safe
+direction: the cost of being wrong here is telling someone they said no filler
+words when they said many.
+
 ## Provenance
 
 Every piece of generated content carries a `Provenance`: the provider's short
@@ -191,7 +279,7 @@ produce is guarded by the metric it describes, so a metric that was not
 measurable produces no sentence — the same rule a real feedback provider has to
 follow.
 
-## Notes for whoever adds a real provider
+## Notes for whoever adds another provider
 
 - Set `includes_disfluencies` only if the provider genuinely returns verbatim
   output. Most do not by default.
@@ -203,3 +291,8 @@ follow.
 - Never fall back from a real provider to a mock. A failure is a failure; a mock
   result silently substituted for a real one is the one outcome this design
   exists to prevent.
+- Stream the recording rather than reading it into memory: uploads are allowed
+  up to 50 MB.
+- One attempt per call, and `max_retries=0` on the vendor client. Whether a
+  failed analysis is retried is orchestration's decision, and authentication and
+  invalid-request failures must never be retried automatically.

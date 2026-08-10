@@ -12,3 +12,9 @@ mutagen>=1.47,<2.0
 
 # Required by FastAPI to accept multipart/form-data uploads.
 python-multipart>=0.0.9,<1.0
+
+# Phase 7C — speech analysis providers. One SDK per role, both official:
+# Deepgram transcribes, Claude explains the resulting numbers. No second STT
+# vendor is installed, and neither is reachable from the development sandbox.
+deepgram-sdk>=7.6,<8.0
+anthropic>=0.121,<1.0

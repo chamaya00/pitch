@@ -22,6 +22,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     logger.info("api_started", extra={"version": __version__, **settings.public_config()})
+    if settings.uses_mock_providers:
+        # Loud on purpose: a deployment must never look like it is producing
+        # real analysis while a mock is wired in.
+        logger.warning(
+            "mock_analysis_providers_active",
+            extra={
+                "speech_to_text_provider": settings.speech_to_text_provider,
+                "feedback_provider": settings.feedback_provider,
+                "detail": "analysis output will be demo data, not real analysis",
+            },
+        )
     yield
     logger.info("api_stopped")
 

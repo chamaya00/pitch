@@ -129,5 +129,21 @@ A provider's own error text never reaches a client. Each code carries our
 wording; the vendor's exception class or status is logged as a short `reason`
 and goes no further. See `backend/app/services/ai/errors.py`.
 
+Both real adapters translate at their own boundary — no Deepgram or Anthropic
+exception class escapes into the application:
+
+| Situation | Deepgram | Claude | Code |
+| --- | --- | --- | --- |
+| Provider selected, no API key | — | — | `ANALYSIS_NOT_CONFIGURED` |
+| 401 / 403 | `ApiError` | `AuthenticationError`, `PermissionDeniedError` | `ANALYSIS_NOT_CONFIGURED` |
+| 429 | `ApiError` | `RateLimitError` | `ANALYSIS_RATE_LIMITED` |
+| Timeout | `httpx.TimeoutException`, 408 | `APITimeoutError` | `ANALYSIS_PROVIDER_TIMEOUT` |
+| Unreachable, 5xx | `httpx.TransportError`, 502/503/504 | `APIConnectionError`, 5xx | `ANALYSIS_PROVIDER_UNAVAILABLE` |
+| Other 4xx, unusable response | `BadRequestError`, `ParsingError` | other 4xx, schema mismatch, refusal | `ANALYSIS_PROVIDER_ERROR` |
+| Success with no speech | empty transcript | — | `TRANSCRIPT_EMPTY` |
+
+`GET /api/v1/config` never exposes `DEEPGRAM_API_KEY`, `ANTHROPIC_API_KEY`, or
+the configured model names.
+
 Codes are added as the phases that raise them land; the list above is the
 planned vocabulary.

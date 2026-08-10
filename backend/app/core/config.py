@@ -42,6 +42,38 @@ class Settings(BaseSettings):
     # Optional in Phase 0; required once the relevant phase is implemented.
     database_url: str | None = None
     anthropic_api_key: str | None = None
+    deepgram_api_key: str | None = None
+
+    # --- Speech analysis providers -----------------------------------------
+    #: Which adapter serves each half of the analysis. ``mock`` is a
+    #: deterministic development stand-in that transcribes nothing; the startup
+    #: log and ``public_config`` both name the active choice so a deployment
+    #: cannot quietly be running on demo data. Selecting a real provider without
+    #: its credentials is a configuration error, never a silent downgrade — see
+    #: ``services/ai/factory.py``.
+    speech_to_text_provider: Literal["mock", "deepgram"] = "mock"
+    feedback_provider: Literal["mock", "claude"] = "mock"
+
+    #: Deepgram transcription model. Configurable because the option set below
+    #: is model-dependent.
+    deepgram_model: str = "nova-3"
+    #: Request verbatim disfluencies ("um", "uh") from Deepgram.
+    #:
+    #: Off by default and deliberately opt-in. Deepgram does not report back
+    #: whether it honoured the option, so enabling it is an operator's
+    #: assertion that the configured model and plan support it. With it off,
+    #: transcripts are marked as non-verbatim and filler statistics are omitted
+    #: rather than reported as zero.
+    deepgram_filler_words: bool = False
+
+    #: Claude model used for qualitative feedback. Configurable, with a default
+    #: that has not been exercised against the live API from this environment —
+    #: see ``docs/ai.md``.
+    anthropic_model: str = "claude-opus-5"
+
+    #: Wall-clock budget for a single provider call. Applies to both adapters.
+    #: One attempt each: retry policy is Phase 7D's decision, not this layer's.
+    analysis_provider_timeout_seconds: int = Field(default=120, ge=1, le=900)
 
     # --- CORS --------------------------------------------------------------
     #: ``NoDecode`` is required: without it pydantic-settings JSON-decodes any
@@ -66,12 +98,25 @@ class Settings(BaseSettings):
     def max_audio_size_bytes(self) -> int:
         return self.max_audio_size_mb * 1024 * 1024
 
+    @property
+    def uses_mock_providers(self) -> bool:
+        """``True`` if any analysis output would be produced by a mock."""
+        return "mock" in (self.speech_to_text_provider, self.feedback_provider)
+
     def public_config(self) -> dict[str, object]:
-        """Non-sensitive configuration safe to expose to clients and logs."""
+        """Non-sensitive configuration safe to expose to clients and logs.
+
+        Provider *names* are included on purpose: the startup log has to make a
+        mock deployment obvious. API keys are never returned from here, and the
+        selected model names are also withheld — they are operational detail
+        that clients have no use for.
+        """
         return {
             "environment": self.environment,
             "max_audio_size_mb": self.max_audio_size_mb,
             "max_audio_duration_seconds": self.max_audio_duration_seconds,
+            "speech_to_text_provider": self.speech_to_text_provider,
+            "feedback_provider": self.feedback_provider,
         }
 
 
