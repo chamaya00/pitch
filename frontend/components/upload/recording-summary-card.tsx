@@ -12,18 +12,24 @@ import type { Recording } from "@/types/api";
 interface RecordingSummaryCardProps {
   recording: Recording;
   onUploadAnother: () => void;
+  /** Starts the speech analysis. Omitted when analysis is unavailable. */
+  onAnalyse?: () => void;
+  /** Hides the action once an analysis is under way or finished. */
+  analysisStarted?: boolean;
 }
 
 /**
- * What the server actually measured, and nothing else.
+ * What the server actually measured about the file, and nothing else.
  *
- * Every value here comes from the upload response. No pitch, key, range or
- * score appears — those are not computed yet, and showing a placeholder for
- * them would misrepresent what the product currently does.
+ * Every value here comes from the upload response — container facts, not
+ * speech. Nothing about how the person spoke appears until the analysis has
+ * actually run.
  */
 export function RecordingSummaryCard({
   recording,
   onUploadAnother,
+  onAnalyse,
+  analysisStarted = false,
 }: RecordingSummaryCardProps) {
   const facts: { label: string; value: string }[] = [
     { label: "Duration", value: formatDuration(recording.duration_seconds) },
@@ -76,12 +82,28 @@ export function RecordingSummaryCard({
       </dl>
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border p-5">
-        <p className="text-xs text-muted">
-          Pitch analysis coming next — this recording is stored and ready.
-        </p>
-        <Button variant="secondary" onClick={onUploadAnother}>
-          Upload another
-        </Button>
+        {onAnalyse && !analysisStarted ? (
+          <>
+            <p className="text-xs text-muted">
+              Transcribe this recording and measure how you spoke.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={onAnalyse}>Analyse this recording</Button>
+              <Button variant="secondary" onClick={onUploadAnother}>
+                Upload another
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-muted">
+              This recording is stored and ready.
+            </p>
+            <Button variant="secondary" onClick={onUploadAnother}>
+              Upload another
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

@@ -1,22 +1,22 @@
 import { BackendStatus } from "@/components/backend-status";
 import { UploadPanel } from "@/components/upload/upload-panel";
 
-const PLANNED_METRICS = [
+const MEASURED = [
   {
-    title: "Pitch over time",
-    body: "Fundamental frequency per frame, converted to MIDI notes and cents deviation.",
+    title: "Speaking rate",
+    body: "Words per minute across the recording, and articulation rate with pauses removed.",
   },
   {
-    title: "Vocal range",
-    body: "Lowest and highest reliably detected notes, and the span in semitones.",
+    title: "Pauses",
+    body: "How many gaps cleared the threshold, how long they ran, and the longest one.",
   },
   {
-    title: "Pitch stability",
-    body: "Voiced ratio, pitch variance and average cents deviation across the recording.",
+    title: "Filler words",
+    body: "Hesitations counted separately from ordinary words that only sometimes act as fillers — and omitted entirely when the transcript cannot support the count.",
   },
   {
-    title: "Loudness & timbre",
-    body: "RMS, peak amplitude and spectral features measured directly from the signal.",
+    title: "Transcript",
+    body: "What was said, with per-word timings wherever the provider supplies them.",
   },
 ];
 
@@ -25,11 +25,11 @@ export default function Home() {
     <div className="mx-auto max-w-3xl px-6">
       <section className="pt-16 pb-10 sm:pt-24 sm:pb-12">
         <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
-          Understand your voice.
+          Hear how you speak.
         </h1>
         <p className="mt-4 max-w-xl text-lg leading-relaxed text-muted">
-          Upload a recording and discover your pitch, range, stability and vocal
-          patterns.
+          Upload a recording to see it transcribed, measure your pace and
+          pauses, and get feedback on how it lands.
         </p>
       </section>
 
@@ -39,10 +39,10 @@ export default function Home() {
 
       <section className="border-t border-border py-14 mt-16">
         <h2 className="text-sm font-medium uppercase tracking-wide text-muted">
-          What VocalLens will measure
+          What VocalLens measures
         </h2>
         <ul className="mt-6 grid gap-4 sm:grid-cols-2">
-          {PLANNED_METRICS.map((metric) => (
+          {MEASURED.map((metric) => (
             <li
               key={metric.title}
               className="rounded-lg border border-border bg-surface p-5"
@@ -55,9 +55,10 @@ export default function Home() {
           ))}
         </ul>
         <p className="mt-6 text-sm leading-relaxed text-muted">
-          Every number shown in VocalLens comes from deterministic audio
-          analysis. AI is used only to explain those measurements — never to
-          invent them.
+          Every number shown in VocalLens is counted from the transcript. AI is
+          used only to explain those measurements — never to invent them, and
+          never to produce a score. A measurement that could not be taken says
+          so rather than showing a zero.
         </p>
       </section>
     </div>

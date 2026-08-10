@@ -1,7 +1,7 @@
 "use client";
 
+import { AnalysisPanel } from "@/components/analysis/analysis-panel";
 import { FileDropzone } from "@/components/upload/file-dropzone";
-import { RecordingSummaryCard } from "@/components/upload/recording-summary-card";
 import { SelectedFileCard } from "@/components/upload/selected-file-card";
 import { UploadProgressCard } from "@/components/upload/upload-progress-card";
 import { Button } from "@/components/ui/button";
@@ -69,7 +69,13 @@ export function UploadPanel() {
       )}
 
       {state.status === "success" && (
-        <RecordingSummaryCard recording={state.recording} onUploadAnother={clear} />
+        <AnalysisPanel
+          // A new recording gets a new panel, so no analysis state survives
+          // from the previous one.
+          key={state.recording.recording_id}
+          recording={state.recording}
+          onUploadAnother={clear}
+        />
       )}
 
       {state.status === "error" && (

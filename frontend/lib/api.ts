@@ -1,5 +1,6 @@
 import { API_V1 } from "@/lib/config";
 import type {
+  AnalysisResponse,
   ApiErrorBody,
   HealthResponse,
   PublicConfig,
@@ -39,7 +40,12 @@ export async function apiFetch<T>(
       ...init,
       headers: { Accept: "application/json", ...init?.headers },
     });
-  } catch {
+  } catch (cause) {
+    // An aborted request is a caller's own decision — a poller cleaning up on
+    // unmount, say — not a failure to report to the user.
+    if (init?.signal?.aborted || (cause as Error | null)?.name === "AbortError") {
+      throw new ApiError("The request was cancelled.", 0, "REQUEST_ABORTED");
+    }
     throw new ApiError(
       "Could not reach the VocalLens API.",
       0,
@@ -67,6 +73,40 @@ export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
 
 export function getPublicConfig(signal?: AbortSignal): Promise<PublicConfig> {
   return apiFetch<PublicConfig>("/config", { signal, cache: "no-store" });
+}
+
+/**
+ * Ask the server to analyse a stored recording.
+ *
+ * Returns as soon as the analysis record exists — transcription runs in the
+ * background — so the response is normally `pending`. Repeating the call is
+ * safe: the server returns an analysis that is already running or finished
+ * rather than starting a second one.
+ */
+export function startAnalysis(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<AnalysisResponse> {
+  return apiFetch<AnalysisResponse>(`/recordings/${recordingId}/analysis`, {
+    method: "POST",
+    signal,
+  });
+}
+
+/**
+ * Read a recording's analysis: its progress while it runs, its results after.
+ *
+ * A *failed* analysis resolves normally with `status: "failed"` — the request
+ * succeeded, the analysis did not. Only a genuine request failure rejects.
+ */
+export function getAnalysis(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<AnalysisResponse> {
+  return apiFetch<AnalysisResponse>(`/recordings/${recordingId}/analysis`, {
+    signal,
+    cache: "no-store",
+  });
 }
 
 export interface UploadHandle {

@@ -15,9 +15,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VocalLens — Understand your voice",
+  title: "VocalLens — Hear how you speak",
   description:
-    "Upload a recording and discover your pitch, range, stability and vocal patterns.",
+    "Upload a recording to see it transcribed, measure your pace and pauses, and get feedback on how it lands.",
 };
 
 export default function RootLayout({
