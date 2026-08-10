@@ -35,6 +35,9 @@ echo "==> frontend: eslint"
 echo "==> frontend: tsc --noEmit"
 (cd "$ROOT/frontend" && npm run --silent typecheck)
 
+echo "==> frontend: node --test"
+(cd "$ROOT/frontend" && npm run --silent test >/dev/null)
+
 echo "==> frontend: next build"
 (cd "$ROOT/frontend" && npm run --silent build >/dev/null)
 
