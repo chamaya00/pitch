@@ -2,7 +2,9 @@ import { API_V1 } from "@/lib/config";
 import type {
   AnalysisResponse,
   ApiErrorBody,
+  AudioAnalysisResponse,
   HealthResponse,
+  PitchTimeline,
   PublicConfig,
   Recording,
 } from "@/types/api";
@@ -221,5 +223,51 @@ function isRecording(value: unknown): value is Recording {
     typeof candidate.sample_rate === "number" &&
     typeof candidate.channels === "number" &&
     typeof candidate.size_bytes === "number"
+  );
+}
+
+/* --- Deterministic audio analysis ------------------------------------------ */
+
+/**
+ * Start measuring a recording's audio, or return the measurement that exists.
+ *
+ * Separate from `startAnalysis`, which transcribes. Both are safe to repeat:
+ * the server returns an analysis already queued, running or finished rather
+ * than starting a second one.
+ */
+export function startAudioAnalysis(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<AudioAnalysisResponse> {
+  return apiFetch<AudioAnalysisResponse>(`/recordings/${recordingId}/audio-analysis`, {
+    method: "POST",
+    signal,
+  });
+}
+
+export function getAudioAnalysis(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<AudioAnalysisResponse> {
+  return apiFetch<AudioAnalysisResponse>(`/recordings/${recordingId}/audio-analysis`, {
+    signal,
+    cache: "no-store",
+  });
+}
+
+/**
+ * The pitch timeline, decimated server-side to `maxPoints`.
+ *
+ * A graph a few hundred pixels wide cannot show thirteen thousand points, and
+ * asking for them all would cost a megabyte to draw the same line.
+ */
+export function getPitchTimeline(
+  recordingId: string,
+  maxPoints: number,
+  signal?: AbortSignal,
+): Promise<PitchTimeline> {
+  return apiFetch<PitchTimeline>(
+    `/recordings/${recordingId}/audio-analysis/pitch?max_points=${maxPoints}`,
+    { signal, cache: "no-store" },
   );
 }

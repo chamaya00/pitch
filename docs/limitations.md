@@ -14,6 +14,50 @@ Standing disclaimer:
 > This analysis is only an audio-based estimate and is not a medical or
 > professional vocal assessment.
 
+## Audio analysis of a saved recording
+
+Everything VocalLens reports about pitch, range, stability, loudness and
+spectrum is an **audio-based estimate from one recording**. Specifically:
+
+- **It is monophonic.** One voice at a time. Two speakers, a voice over music,
+  or an instrument in the room produce a pitch belonging to none of them, and
+  nothing detects that this has happened.
+- **It is not the live estimate**, and the two will not agree exactly. Different
+  algorithm, different window, different thresholds, different definitions of
+  range and stability. Neither validates the other.
+- **The measurement depends on the recording**, not only the voice. Microphone,
+  room, input level, distance and lossy compression all move these numbers.
+- **`INSUFFICIENT_PITCH_SIGNAL` is common and normal.** A whisper, a noisy room,
+  a spoken monotone or an instrumental recording will produce no reliable pitch,
+  and the honest answer is "not measured".
+- **Detection has limits of its own.** Frames at a note boundary can resolve to
+  a sub-harmonic; the range guards against this with outlier rejection and a
+  held-pitch rule, and the timeline still shows the raw measurement. Below 65 Hz
+  and above 1100 Hz nothing is searched for at all.
+- **Nothing here has been validated against reference pitch data.** It is an
+  engineering MVP measured against synthetic signals with known fundamentals,
+  not a system benchmarked on annotated recordings of real voices.
+
+### Pitch consistency
+
+`Pitch consistency` is the **share of voiced frames within 25 cents of the
+nearest equal-tempered semitone**, and that definition travels with the number
+everywhere it is shown. It is not a singing-ability score. There is no reference
+melody, so it cannot say whether the note was the right one — only how close the
+pitch sat to *some* note. Slides, vibrato, blues bends and non-Western
+intonation systems all lower it without anything being wrong.
+
+### Loudness and spectrum
+
+RMS and peak are amplitude measurements, **not LUFS**: no loudness weighting, no
+gating, no reference level. Dynamic range is an estimate from percentiles of
+frame level, not a loudness range (LRA).
+
+Spectral centroid, bandwidth, rolloff, zero-crossing rate and flatness are
+reported as raw numbers. VocalLens does **not** turn them into words like
+"bright", "dark", "breathy" or "nasal". Those are classifications and would need
+a validated classifier trained on labelled data; none exists in this project.
+
 ## Live pitch (browser)
 
 The live readout in the recorder is a **browser-side estimate**, labelled "Live

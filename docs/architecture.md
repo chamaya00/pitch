@@ -24,6 +24,33 @@ The hard boundary in this system is between **measurement** and
 - `services/ai` receives an already-computed, structured payload and returns
   language. It is never asked to compute or estimate a measurement.
 
+## Two analyses, never one
+
+A recording can be analysed twice, independently:
+
+```
+                     ┌── Speech analysis ──→ STT → transcript metrics → Claude
+Recording / upload ──┤
+                     └── Audio analysis ───→ pitch → notes → range → stability
+```
+
+They answer different questions. Speech analysis needs a transcript and a
+provider; audio analysis needs neither and works on a deployment with no
+credentials at all. Either can be re-run without touching the other, and either
+can fail without affecting the other.
+
+**Nothing combines them.** There is no "voice score", no combined grade and no
+type anywhere that could hold one. A speaking rate and a pitch range are
+measurements of different things, and averaging them would produce a number
+nobody could act on. The API keeps them at separate paths with separate records;
+the UI keeps them in separate sections with separate headings.
+
+The live microphone readout is a *third* thing: a browser-local estimate of the
+same kind of quantity the audio analysis measures, taken by a different
+algorithm over a shorter window for latency reasons. It is labelled "Live
+recording estimate" and is never presented as agreeing with the backend result.
+See [audio-analysis.md](audio-analysis.md).
+
 ## Backend layout
 
 | Path | Responsibility |
@@ -31,11 +58,16 @@ The hard boundary in this system is between **measurement** and
 | `app/main.py` | App factory, CORS, router mounting, lifespan logging |
 | `app/version.py` | Single source of truth for the backend version |
 | `app/api/v1/router.py` | Aggregates versioned routers |
-| `app/api/v1/routes/` | One module per resource (`health`, later `audio`, `analysis`) |
+| `app/api/v1/routes/` | One module per resource (`health`, `recordings`, `analysis`, `audio_analysis`) |
 | `app/core/config.py` | Environment-backed settings (`get_settings`, cached) |
 | `app/core/logging.py` | JSON log formatter, stdlib only |
 | `app/schemas/` | Pydantic request/response models — the API contract |
 | `app/models/` | Database models (Phase 7) |
+| `app/services/audio/` | Upload validation, metadata, filesystem storage |
+| `app/services/analysis/` | Speech domain: transcript, metrics, records |
+| `app/services/audio_analysis/` | Audio domain: pitch maths, detector, features, analyzer |
+| `app/services/ai/` | Provider adapters behind protocols |
+| `app/services/orchestration/` | The two workflows, one module each |
 | `app/services/` | Business logic, framework-independent |
 | `tests/` | pytest suite mirroring the app layout |
 
@@ -99,6 +131,25 @@ finished file, plus a clock that only changes on the whole second.
 
 No realtime backend was added for this: no WebSocket, no Redis, no queue, and
 no per-frame storage anywhere.
+
+### Adding a second analysis pipeline
+
+`services/audio_analysis/` and `services/orchestration/audio_analysis.py`
+deliberately mirror their speech-analysis counterparts: the same
+protocol-first shape, the same `start`/`run` split, the same idempotency rules,
+the same staleness sweep and the same atomic-write repository discipline. Two
+differences follow from there being no provider involved — the work is CPU-bound
+so it runs in a worker thread rather than on the event loop, and there is no
+partial success, because there is no optional second provider to lose.
+
+The measurement itself sits behind an `AudioAnalyzer` protocol, so orchestration
+imports neither numpy nor a decoder and a test can drive the whole workflow with
+a stub in microseconds.
+
+This is now the **third** copy of the JSON-document write discipline
+(recordings, analyses, audio analyses). That duplication is deliberate and
+temporary: the store is a stopgap, a real database replaces all three, and a
+generic document-store abstraction built now would be a layer to delete later.
 
 ## Design system
 

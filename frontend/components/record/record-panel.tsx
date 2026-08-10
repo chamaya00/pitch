@@ -6,11 +6,19 @@ import { MicrophoneError } from "@/components/record/microphone-error";
 import { PitchTrace } from "@/components/record/pitch-trace";
 import { RecordingControls } from "@/components/record/recording-controls";
 import { Button } from "@/components/ui/button";
-import { useMicrophoneRecorder } from "@/hooks/use-microphone-recorder";
+import type { MicrophoneRecorder } from "@/hooks/use-microphone-recorder";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { WAV_MIME_TYPE } from "@/lib/wav";
 
 interface RecordPanelProps {
+  /**
+   * The recorder, owned by the panel above.
+   *
+   * Lifted deliberately: the source switch up there can destroy a take, so the
+   * component that renders the switch has to be able to see that a take exists
+   * and ask before throwing it away.
+   */
+  recorder: MicrophoneRecorder;
   /** Hand the finished recording to the upload flow. */
   onAnalyse: (file: File) => void;
   maxDurationSeconds?: number;
@@ -29,8 +37,11 @@ interface RecordPanelProps {
  * page until the person presses the button. Recording and analysing are two
  * separate acts, and nothing is sent because a recording happened to end.
  */
-export function RecordPanel({ onAnalyse, maxDurationSeconds }: RecordPanelProps) {
-  const recorder = useMicrophoneRecorder(maxDurationSeconds);
+export function RecordPanel({
+  recorder,
+  onAnalyse,
+  maxDurationSeconds,
+}: RecordPanelProps) {
   const {
     state,
     errorCode,

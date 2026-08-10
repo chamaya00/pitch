@@ -1,0 +1,98 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ApiError,
+  getAudioAnalysis,
+  getPitchTimeline,
+  startAudioAnalysis,
+} from "@/lib/api";
+import { messageForAudioAnalysisError } from "@/lib/audio-analysis-errors";
+import {
+  createAnalysisRunner,
+  type AudioAnalysisRunner,
+  type AudioRunState,
+} from "@/lib/analysis-runner";
+import type { PitchPoint } from "@/types/api";
+
+/**
+ * React wrapper around the audio-analysis runner.
+ *
+ * The same runner the speech analysis uses — polling, backoff, not starting
+ * twice, stopping cleanly — parameterised by the response type. Two copies of
+ * that logic would be two places for the overlapping-request bug to live.
+ *
+ * The timeline is fetched once, after the analysis completes, and only if
+ * something asked for it. It is the largest thing this API returns and a caller
+ * showing only a range should not pay for it.
+ */
+
+/** Points requested for the graph. More than a chart can draw is waste. */
+export const GRAPH_POINTS = 600;
+
+export interface AudioAnalysisController {
+  state: AudioRunState;
+  /** Start measuring. Ignored while a measurement is already in flight. */
+  start: () => void;
+  /** The timeline, once fetched. `null` until then. */
+  timeline: PitchPoint[] | null;
+  timelineError: string | null;
+}
+
+function describeError(error: unknown): string {
+  if (typeof error === "string" || error === null || error === undefined) {
+    // An `error_code` taken straight off a failed analysis record.
+    return messageForAudioAnalysisError(error ?? undefined);
+  }
+  if (error instanceof ApiError) {
+    return messageForAudioAnalysisError(error.code);
+  }
+  return messageForAudioAnalysisError(undefined);
+}
+
+export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
+  const [state, setState] = useState<AudioRunState>({ status: "idle" });
+  const [timeline, setTimeline] = useState<PitchPoint[] | null>(null);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
+  const runnerRef = useRef<AudioAnalysisRunner | null>(null);
+
+  useEffect(() => {
+    const runner = createAnalysisRunner({
+      recordingId,
+      api: { start: startAudioAnalysis, get: getAudioAnalysis },
+      onState: setState,
+      describeError,
+    });
+    runnerRef.current = runner;
+
+    return () => {
+      runner.stop();
+      runnerRef.current = null;
+    };
+  }, [recordingId]);
+
+  // Fetched when — and only when — a measurement finishes with points to draw.
+  const completed = state.status === "completed";
+  const pointCount = state.status === "completed" ? state.analysis.pitch_point_count : 0;
+
+  useEffect(() => {
+    if (!completed || pointCount === 0) return;
+
+    const controller = new AbortController();
+    getPitchTimeline(recordingId, GRAPH_POINTS, controller.signal)
+      .then((response) => setTimeline(response.points))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        // The graph is an extra; losing it must not take the numbers with it.
+        setTimelineError(describeError(error));
+      });
+
+    return () => controller.abort();
+  }, [recordingId, completed, pointCount]);
+
+  const start = useCallback(() => {
+    runnerRef.current?.start();
+  }, []);
+
+  return { state, start, timeline, timelineError };
+}

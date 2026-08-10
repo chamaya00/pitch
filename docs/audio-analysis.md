@@ -1,18 +1,18 @@
 # Audio analysis
 
-> **Status.** Two separate things live under this heading, and they must not be
-> confused with each other.
+> **Status.** Two things live under this heading, both implemented, and they
+> must not be confused with each other.
 >
-> - **Live pitch in the browser — implemented (Step 7H).** Real code, real
->   parameters, documented below.
-> - **Backend audio analysis — design notes only.** No backend pitch code
->   exists. Everything from "Planned pipeline" onwards is a plan for Phase 2 and
->   must be updated with the *actual* parameters once that code lands.
+> - **Live pitch in the browser (Step 7H)** — real-time, local, latency-bound.
+> - **Backend analysis of uploaded recordings (Step 7I)** — offline, over the
+>   whole saved file, with more measurements and stricter aggregation.
 >
-> The two share a musical reference (A4 = 440 Hz) and nothing else. They do not
-> share an algorithm, a sample rate, a frame size or a definition of any
-> reported value, so their outputs are not comparable and are never presented
-> side by side.
+> They share the musical reference below (A4 = 440 Hz) and nothing else: a
+> different frame length, a different clarity threshold, a different smoothing
+> rule, and — crucially — different definitions for range and stability. **Their
+> numbers are not comparable and are never presented side by side.** The live
+> readout is labelled "Live recording estimate" wherever it appears; the backend
+> result is labelled "Audio analysis".
 
 ## Principles
 
@@ -116,7 +116,7 @@ invented confidence score.
 ### Conversions and smoothing
 
 Conversions live in `frontend/lib/pitch.ts` and use the same reference as the
-planned backend pipeline (A4 = 440 Hz, MIDI 69) — see "Conversions" below.
+backend (A4 = 440 Hz, MIDI 69) — see "Conversions" below.
 MIDI is kept **fractional**: rounding before measuring the cents deviation
 would throw away the thing being measured. Anything that cannot be a pitch —
 0 Hz, a negative, `NaN`, `Infinity`, `null`, or a frequency outside 20–5000 Hz
@@ -135,48 +135,139 @@ recording estimate"** everywhere it appears, and the UI states that it is not
 the speech analysis. Detected range is what the recording contained, never a
 physiological maximum.
 
-## Planned pipeline
+## Implemented: backend analysis of uploaded recordings
+
+`backend/app/services/audio_analysis/`. Runs on the stored file after upload,
+in the background, and produces the measurements the API exposes at
+`/recordings/{id}/audio-analysis`.
 
 ```
-file → decode → mono → resample → trim/normalise → frame
-     → pitch detection → confidence filter → Hz→MIDI→note→cents
-     → aggregates (range, stability, loudness, spectral)
+stored file → streamed frames → per-frame pitch + features
+            → clarity gate → outlier rejection → held-pitch filter
+            → range · stability · loudness · spectrum
 ```
 
 ### Decoding and preprocessing
 
-- Decode with `librosa.load` (soundfile/audioread backend).
-- Convert to mono; stereo channels are averaged.
-- Target sample rate: **22050 Hz** — comfortably above twice the highest
-  fundamental a human voice produces (~1100 Hz for C6), and cheaper than 44.1k.
-  Spectral features are computed at the same rate so the values stay comparable
-  across recordings.
-- Amplitude is *not* normalised before loudness measurement, or RMS and peak
-  become meaningless.
+- **`soundfile` (libsndfile)** reads WAV and MP3 — the two formats upload
+  accepts — with no ffmpeg process and no temporary files.
+- Channels are averaged to mono. A stereo recording of one voice is one voice.
+- **No resampling.** Analysis runs at the file's own sample rate. A resampler is
+  a dependency and a second source of error, and pitch detection gains nothing
+  from discarding samples: a higher rate gives *finer* lag resolution. Frame and
+  hop are therefore defined in **seconds** and converted per file, so the time
+  resolution of a result is the same whatever the recording's rate.
+- Amplitude is **not** normalised. Normalising before measuring RMS and peak
+  would make both meaningless.
+- Frames arrive from `soundfile.blocks` one at a time with the overlap built in.
+  A 50 MB recording is never held in memory as floats.
 
-### Pitch detection
-
-Start with **`librosa.pyin`**:
-
-- Probabilistic YIN; returns per-frame `f0`, a voiced flag and a voiced
-  probability, which is exactly the confidence signal the UI needs.
-- Pure Python/NumPy — no ML runtime, no model download, no GPU.
-- Well suited to monophonic vocals, which is the MVP input.
-
-CREPE is the fallback if pyin proves insufficient on real recordings. It is more
-accurate on noisy input but pulls in TensorFlow and a model download, so it is
-not the starting point. Any switch must be justified by a documented failure
-case, per §36 of the specification.
-
-Planned defaults (to be validated in Phase 2):
+### Actual parameters
 
 | Parameter | Value | Rationale |
 | --- | --- | --- |
-| `fmin` | 65 Hz (C2) | Below typical bass range, above most room rumble |
-| `fmax` | 1050 Hz (C6) | Above typical soprano range |
-| `frame_length` | 2048 samples (~93 ms @ 22050) | pyin needs several periods of the lowest expected pitch |
-| `hop_length` | 256 samples (~11.6 ms) | ~86 pitch points/second — smooth graphs at reasonable cost |
-| Confidence threshold | 0.5 voiced probability | Starting point; tune against real recordings and record the result |
+| Sample rate | the file's own | No resampler; see above |
+| Frame length | 0.0929 s (2048 samples @ 22.05 kHz) | Holds two periods of 65 Hz with room to spare |
+| Hop | 0.0232 s (~43 frames/s) | A quarter of the frame; finer buys resolution nothing uses and multiplies the timeline |
+| `fmin` | 65 Hz | Below typical bass range, above most room rumble |
+| `fmax` | 1100 Hz | Above typical soprano range |
+| Clarity threshold | **0.80** | Measured against noise — see below |
+| Silence gate | RMS < 0.005 | Skips the arithmetic on silent frames |
+| Peak acceptance | 0.85 × global max | The octave fix |
+| Outlier rejection | > 6 semitones from a 5-frame median | Removes transient artefacts |
+| Held-pitch rule | ≥ 5 consecutive frames within 1 semitone | Range only |
+| In-tune threshold | 25 cents | Definition of `in_tune_ratio` |
+| Minimum duration | 0.25 s | Below this there is no usable frame |
+
+**The clarity threshold was chosen against evidence, not taste.** On a
+five-harmonic 196 Hz tone with added noise, 0.85 and 0.90 both rejected *every*
+frame at 12 dB SNR — a realistic room — while 0.80 kept 98% of them. The strict
+values looked safer and would have made the feature useless on real recordings.
+
+### Detector: NSDF (McLeod), not pyin
+
+The same algorithm as the browser, and for the same reason — see
+["Detector: NSDF (McLeod), not autocorrelation"](#detector-nsdf-mcleod-not-autocorrelation)
+above for why plain autocorrelation reports a voice an octave low.
+
+**What was planned and is not used: `librosa.pyin`.** The reason is dependency
+weight, not quality: librosa pulls in numba, scikit-learn and soxr for one
+function, where what is actually needed is a decoder and ~200 lines of numpy —
+and the browser half of the product had to implement the detector anyway, so
+using the same method means one mathematical contract instead of two. The
+autocorrelation numerator is computed by FFT rather than a double loop; the
+direct form is O(n²) per frame, which at a few thousand frames is the difference
+between seconds and minutes.
+
+pyin or CREPE get reconsidered when a real recording defeats this, with the
+failure case written down first. Not on a hunch.
+
+### Voiced/unvoiced handling
+
+A frame is voiced when the detector resolves a frequency in range **and** the
+measured clarity reaches the threshold. Everything else is unvoiced and
+contributes nothing but a denominator.
+
+**Unvoiced frames are omitted from the timeline, not stored as nulls.** Two
+reasons: a point that exists is a point that was measured, so nothing has to
+filter before plotting; and `stability.voiced_ratio` already states exactly how
+much was left out. A gap between consecutive timestamps therefore means silence
+— the UI draws it as a gap and never interpolates across it.
+
+### What didn't work: raw min/max for the range
+
+The first implementation took the extremes of every voiced frame. On a test
+signal of exactly two notes — 440 Hz then 261.6 Hz — it reported **F2 to A4, a
+span of 28 semitones**, where the truth is C4 to A4 and 9.
+
+The cause was a single frame straddling the boundary between the two notes: it
+contains both, and resolved to a sub-harmonic. One frame in 255. A range is
+exactly the statistic where one bad frame does maximum damage.
+
+Two rules fixed it, and both are load-bearing:
+
+1. **Outlier rejection.** A frame further than 6 semitones from the median of
+   its five-frame neighbourhood is discarded. A median, not a mean, so the
+   outlier being tested cannot drag its own reference. This brought the range to
+   A3–A4.
+2. **The held-pitch rule.** Only frames in a run of ≥ 5 consecutive frames
+   staying within 1 semitone (~116 ms) contribute to the range. The reasoning is
+   musical rather than statistical: a frequency touched for 23 ms while crossing
+   between two notes is not a note anyone sang. This brought the range to C4–A4,
+   which is correct.
+
+A percentile bound was the documented plan and was rejected: it hides a genuine
+low note in a short recording, where these two rules remove the artefacts a
+percentile was meant to hide without discarding real content.
+
+Both rules apply to the **range only**. The timeline keeps every voiced frame at
+the frequency it was measured at, including the transient — so the graph shows
+what happened and the range describes what was sung.
+
+### Aggregates, as implemented
+
+- **Detected range** — lowest and highest held pitch, as frequency, note and
+  whole-semitone span. This is the range *in this recording*, never a
+  physiological limit.
+- **Pitch stability** — voiced ratio, signed and absolute mean cents deviation,
+  cents standard deviation, semitone variance, `in_tune_ratio` (share of voiced
+  frames within 25 cents), and unstable sections. A section is a run of ≥ 0.25 s
+  whose rolling 5-frame cents standard deviation exceeds 35 cents; runs are
+  broken by gaps, so a section never spans silence. **None of these is a skill
+  score.**
+- **Loudness** — RMS, peak, crest factor, clipped-sample ratio, and a dynamic
+  range *estimate* (95th minus 5th percentile of per-frame RMS, in dB —
+  percentiles rather than max-minus-min so one clipped sample cannot define it).
+  These are **not LUFS**: no loudness weighting, no gating, no reference level.
+- **Spectral** — centroid, bandwidth, 85% rolloff, zero-crossing rate and
+  flatness, averaged over frames above the silence gate. Reported as raw
+  measurable characteristics. **No timbre label is derived from them anywhere**
+  — "bright", "dark", "breathy", "nasal" are classifications, and no validated
+  classifier exists in this project.
+
+Every one of these is `null` when the signal could not support it. A recording
+with nothing voiced has no range and no deviation; it does not have a range of
+zero semitones.
 
 ### Conversions
 
@@ -192,19 +283,17 @@ octave = round(midi) // 12 - 1             # MIDI 60 → C4
 Checks: 440 Hz → A4 (MIDI 69, 0 cents); 261.626 Hz → C4 (MIDI 60, 0 cents).
 Tests use tolerances, never floating-point equality.
 
-### Aggregates
+**This is the one contract the two implementations share.** It is written down
+in `backend/app/services/audio_analysis/pitch.py` and implemented again in
+`frontend/lib/pitch.ts`, because the live display needs it at frame rate in the
+page. The implementations are separate on purpose and the mathematics is not;
+the same reference cases are asserted in `tests/test_audio_pitch_math.py` and in
+`frontend/tests/pitch.test.ts`.
 
-- **Vocal range** — lowest/highest note across frames passing the confidence
-  filter, plus the span in semitones. Outlier frames (octave errors) must be
-  handled; a percentile-based bound is likely more honest than a raw min/max,
-  and whichever is chosen gets documented here.
-- **Pitch stability** — voiced ratio, pitch variance, mean and standard
-  deviation of cents deviation, and identification of unstable sections.
-- **Loudness** — RMS and peak amplitude, plus an approximate dynamic range.
-  These are *not* LUFS. Nothing in the UI may imply broadcast-standard loudness
-  measurement unless a real LUFS implementation is added.
-- **Spectral** — centroid, bandwidth, rolloff, zero-crossing rate, flatness.
-  Reported as raw measurable characteristics.
+Both keep MIDI **fractional** until the last moment — the cents deviation *is*
+the distance to the nearest semitone, and rounding first throws away the
+measurement — and both return nothing for a value that cannot be a pitch: zero,
+a negative, a NaN, an infinity, or a frequency outside 20–5000 Hz.
 
 ## Pitch accuracy
 
@@ -224,5 +313,25 @@ unsupported formats · corrupted files · multiple simultaneous voices ·
 instrumental-heavy mixes.
 
 Each returns a documented error code rather than an exception escaping to the
-client. Test fixtures will cover silence, a synthetic pure tone with a known
-frequency, a very short clip, and a corrupted file.
+client:
+
+| Case | Code |
+| --- | --- |
+| Undecodable, truncated or missing file | `AUDIO_UNSUPPORTED` |
+| Shorter than 0.25 s, or than one frame | `AUDIO_TOO_SHORT` |
+| Decoded fine, no frame cleared the clarity gate | `INSUFFICIENT_PITCH_SIGNAL` |
+| Anything else | `AUDIO_ANALYSIS_FAILED` |
+
+`INSUFFICIENT_PITCH_SIGNAL` is a **normal outcome**, not a bug: a whisper, a
+noisy room, a spoken monotone or an instrumental recording all produce it. The
+UI shows it as "Not measured" rather than as an error.
+
+Clipping and multiple simultaneous voices do not fail. Clipping is reported as a
+ratio and the recording is measured anyway; a polyphonic recording produces a
+pitch belonging to none of the voices, which is a documented limitation rather
+than a detectable error.
+
+Test fixtures cover silence, near-silence, white noise, a pure tone, harmonic
+tones at eight fundamentals, clipped audio, a DC offset, four sample rates,
+stereo, a very short clip, a truncated file and a missing file. A failure
+message is asserted never to contain a filesystem path.

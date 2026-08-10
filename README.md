@@ -2,10 +2,12 @@
 
 **Hear how you speak.**
 
-Record from your microphone or upload a file. VocalLens transcribes the
-recording, measures how you spoke — pace, pauses, filler words — and uses an LLM
-to explain those measurements in plain language. While you record, it shows the
-pitch of your voice live, detected in your browser.
+Record from your microphone or upload a file. VocalLens measures the recording
+two ways — what you *said* and how you said it (transcript, pace, pauses, filler
+words), and what the *audio* was (pitch, detected range, pitch stability,
+loudness, spectrum) — then uses an LLM to explain the speech numbers in plain
+language. While you record, it shows the pitch of your voice live, detected in
+your browser.
 
 > **Core principle:** every number comes from deterministic audio analysis.
 > The LLM interprets measurements; it never invents them.
@@ -17,25 +19,41 @@ vocal assessment and makes no claims about vocal health.
 
 ## Status
 
-Working end to end today:
+Implemented and working end to end:
 
+- **Microphone recording** — captured as raw PCM in the browser and written as a
+  WAV, uploaded only when you ask.
+- **Live browser pitch detection** — note, cents deviation and frequency while
+  you record, computed locally. Audio never leaves the page during recording.
 - **Upload** — WAV/MP3, validated by content rather than by filename, stored
   with server-generated names.
 - **Speech analysis** — transcription, then deterministic metrics counted from
   the transcript: speaking time, words per minute, articulation rate, pauses,
   and filler words split into hesitations and discourse markers.
-- **AI feedback** — an LLM explaining those measurements. It never produces a
-  number and never produces a score.
-- **Live pitch** — while recording, the note and cents deviation of your voice,
-  detected in the browser. See
-  [docs/audio-analysis.md](docs/audio-analysis.md).
+- **Audio analysis of an uploaded recording** — per-frame pitch with note
+  conversion and cents deviation, detected range, pitch stability, loudness
+  (RMS, peak, dynamic-range estimate, clipping) and spectral characteristics
+  (centroid, bandwidth, rolloff, zero-crossing rate, flatness), plus a pitch
+  timeline for the graph.
+- **AI feedback** — an LLM explaining the speech measurements. It never produces
+  a number and never produces a score.
 
-Providers are selected by configuration. With `mock` selected the output is
-demo data, and the UI says so in a banner rather than passing it off as
-analysis.
+The speech and audio analyses are **separate**: separate endpoints, separate
+records, separate sections in the UI. There is no combined "voice score", and
+none is planned — see [docs/architecture.md](docs/architecture.md).
 
-Backend pitch/loudness/spectral analysis of the stored audio is **not**
-implemented; see [docs/roadmap.md](docs/roadmap.md).
+Providers are selected by configuration and are only needed for speech analysis;
+audio analysis works on a deployment with no credentials at all. With `mock`
+selected the speech output is demo data, and the UI says so in a banner rather
+than passing it off as analysis.
+
+**Not implemented yet:** vocal/instrument separation, song melody extraction,
+song key estimation, song compatibility, transpose recommendation, and progress
+tracking across recordings. See [docs/roadmap.md](docs/roadmap.md).
+
+Every result is an **audio-based estimate from one recording**. Nothing here has
+been validated against annotated reference data; see
+[docs/limitations.md](docs/limitations.md).
 
 ### Recording in the browser
 

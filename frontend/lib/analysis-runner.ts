@@ -12,24 +12,38 @@
  * progress bar.
  */
 
-import type { AnalysisResponse, AnalysisStatus } from "../types/api";
+import type {
+  AnalysisResponse,
+  AnalysisStatus,
+  AudioAnalysisResponse,
+  AudioAnalysisStatus,
+} from "../types/api";
 
-/** Statuses that mean the analysis is still being worked on. */
-const ACTIVE_STATUSES: readonly AnalysisStatus[] = [
-  "pending",
-  "transcribing",
-  "analyzing",
-];
+/**
+ * Anything this runner can drive.
+ *
+ * Both backend pipelines — speech and audio — report the same lifecycle in the
+ * same shape, so they get the same polling engine rather than two copies of the
+ * parts that are easy to get wrong. What differs between them is the *content*
+ * of a finished record, and that is the type parameter.
+ */
+export interface Pollable {
+  status: string;
+  error_code: string | null;
+}
 
-export function isTerminalStatus(status: AnalysisStatus): boolean {
+/** Statuses that mean work is still going on. Shared by both pipelines. */
+const ACTIVE_STATUSES: readonly string[] = ["pending", "transcribing", "analyzing"];
+
+export function isTerminalStatus(status: string): boolean {
   return status === "completed" || status === "failed";
 }
 
-export function isActiveStatus(status: AnalysisStatus): boolean {
+export function isActiveStatus(status: string): boolean {
   return ACTIVE_STATUSES.includes(status);
 }
 
-/** What the user is told while each stage runs. */
+/** What the user is told while each stage of the *speech* analysis runs. */
 export const STAGE_MESSAGES: Readonly<Record<AnalysisStatus, string>> = {
   pending: "Preparing your recording…",
   transcribing: "Transcribing your speech…",
@@ -40,6 +54,21 @@ export const STAGE_MESSAGES: Readonly<Record<AnalysisStatus, string>> = {
 
 export function stageMessage(status: AnalysisStatus): string {
   return STAGE_MESSAGES[status];
+}
+
+/**
+ * The *audio* analysis stages. Shorter, because there is no provider to wait
+ * on: the server decodes the file and measures it, and that is the whole job.
+ */
+export const AUDIO_STAGE_MESSAGES: Readonly<Record<AudioAnalysisStatus, string>> = {
+  pending: "Preparing your recording…",
+  analyzing: "Measuring pitch and loudness…",
+  completed: "Measurement complete.",
+  failed: "Measurement failed.",
+};
+
+export function audioStageMessage(status: AudioAnalysisStatus): string {
+  return AUDIO_STAGE_MESSAGES[status];
 }
 
 /**
@@ -57,27 +86,34 @@ export function pollDelay(attempt: number): number {
   return Math.round(Math.min(delay, MAX_POLL_DELAY_MS));
 }
 
-export type AnalysisRunState =
+export type RunState<T extends Pollable> =
   | { status: "idle" }
   /** The `POST` is in flight; no analysis record is known yet. */
   | { status: "starting" }
-  /** Queued, transcribing or analyzing. */
-  | { status: "running"; analysis: AnalysisResponse }
-  | { status: "completed"; analysis: AnalysisResponse }
+  /** Queued or being worked on. */
+  | { status: "running"; analysis: T }
+  | { status: "completed"; analysis: T }
   /** The analysis itself failed. The request that reported it did not. */
-  | { status: "failed"; analysis: AnalysisResponse; message: string }
+  | { status: "failed"; analysis: T; message: string }
   /** The request failed — network, 404, an unreadable response. */
   | { status: "error"; message: string };
 
-export interface AnalysisApi {
-  start(recordingId: string, signal?: AbortSignal): Promise<AnalysisResponse>;
-  get(recordingId: string, signal?: AbortSignal): Promise<AnalysisResponse>;
+export interface RunnerApi<T extends Pollable> {
+  start(recordingId: string, signal?: AbortSignal): Promise<T>;
+  get(recordingId: string, signal?: AbortSignal): Promise<T>;
 }
 
-export interface RunnerOptions {
+/** The speech pipeline's specialisations, named as they always were. */
+export type AnalysisRunState = RunState<AnalysisResponse>;
+export type AnalysisApi = RunnerApi<AnalysisResponse>;
+/** And the audio pipeline's. */
+export type AudioRunState = RunState<AudioAnalysisResponse>;
+export type AudioAnalysisApi = RunnerApi<AudioAnalysisResponse>;
+
+export interface RunnerOptions<T extends Pollable> {
   recordingId: string;
-  api: AnalysisApi;
-  onState: (state: AnalysisRunState) => void;
+  api: RunnerApi<T>;
+  onState: (state: RunState<T>) => void;
   /** Maps an error to presentable copy. Components never see a raw error. */
   describeError: (error: unknown) => string;
   /** Injectable so tests can drive time instead of waiting for it. */
@@ -85,15 +121,20 @@ export interface RunnerOptions {
   clearTimer?: (handle: number) => void;
 }
 
-export interface AnalysisRunner {
+export interface Runner<T extends Pollable> {
   /** Begin an analysis. A no-op while one is already in flight. */
   start: () => void;
   /** Stop polling and abort any in-flight request. Safe to call repeatedly. */
   stop: () => void;
-  getState: () => AnalysisRunState;
+  getState: () => RunState<T>;
 }
 
-export function createAnalysisRunner(options: RunnerOptions): AnalysisRunner {
+export type AnalysisRunner = Runner<AnalysisResponse>;
+export type AudioAnalysisRunner = Runner<AudioAnalysisResponse>;
+
+export function createAnalysisRunner<T extends Pollable>(
+  options: RunnerOptions<T>,
+): Runner<T> {
   const {
     recordingId,
     api,
@@ -104,13 +145,13 @@ export function createAnalysisRunner(options: RunnerOptions): AnalysisRunner {
     clearTimer = (handle) => clearTimeout(handle),
   } = options;
 
-  let state: AnalysisRunState = { status: "idle" };
+  let state: RunState<T> = { status: "idle" };
   let stopped = false;
   let timer: number | null = null;
   let controller: AbortController | null = null;
   let attempt = 0;
 
-  function publish(next: AnalysisRunState): void {
+  function publish(next: RunState<T>): void {
     // After `stop()` nothing may reach the caller — that is what keeps a
     // React wrapper from setting state on an unmounted component.
     if (stopped) return;
@@ -125,7 +166,7 @@ export function createAnalysisRunner(options: RunnerOptions): AnalysisRunner {
     }
   }
 
-  function settle(analysis: AnalysisResponse): void {
+  function settle(analysis: T): void {
     if (analysis.status === "completed") {
       publish({ status: "completed", analysis });
       return;
@@ -208,7 +249,7 @@ export function createAnalysisRunner(options: RunnerOptions): AnalysisRunner {
       controller = null;
     },
 
-    getState(): AnalysisRunState {
+    getState(): RunState<T> {
       return state;
     },
   };

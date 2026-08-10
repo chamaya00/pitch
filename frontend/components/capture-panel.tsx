@@ -7,6 +7,7 @@ import { FileDropzone } from "@/components/upload/file-dropzone";
 import { SelectedFileCard } from "@/components/upload/selected-file-card";
 import { UploadProgressCard } from "@/components/upload/upload-progress-card";
 import { Button } from "@/components/ui/button";
+import { useMicrophoneRecorder } from "@/hooks/use-microphone-recorder";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { useUpload, type UploadState } from "@/hooks/use-upload";
 import { formatDurationLimit } from "@/lib/format";
@@ -30,6 +31,28 @@ export function CapturePanel() {
   const { state, selectFile, clear, startUpload, uploadFile, cancelUpload } =
     useUpload(config);
   const [source, setSource] = useState<Source>("upload");
+  const recorder = useMicrophoneRecorder(config?.max_audio_duration_seconds);
+  /** Set when a switch would destroy a take and is waiting to be confirmed. */
+  const [pendingSource, setPendingSource] = useState<Source | null>(null);
+
+  // A recording in progress, or one finished and not yet uploaded, is the only
+  // copy that exists — it lives in this tab and nowhere else.
+  const hasUnsavedTake = recorder.state !== "idle" || recorder.recording !== null;
+
+  const chooseSource = (next: Source) => {
+    if (next === source) return;
+    if (source === "record" && hasUnsavedTake) {
+      setPendingSource(next);
+      return;
+    }
+    setSource(next);
+  };
+
+  const discardAndSwitch = () => {
+    recorder.discard();
+    if (pendingSource) setSource(pendingSource);
+    setPendingSource(null);
+  };
 
   const formats = (config?.supported_extensions ?? [".mp3", ".wav"])
     .map((extension) => extension.replace(".", "").toUpperCase())
@@ -73,7 +96,7 @@ export function CapturePanel() {
               key={value}
               type="button"
               aria-pressed={source === value}
-              onClick={() => setSource(value)}
+              onClick={() => chooseSource(value)}
               className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
                 source === value
                   ? "bg-accent text-accent-foreground"
@@ -83,6 +106,26 @@ export function CapturePanel() {
               {label}
             </button>
           ))}
+        </div>
+      )}
+
+      {choosing && pendingSource !== null && (
+        <div
+          role="alert"
+          className="rounded-xl border border-warning/40 bg-warning/5 p-5"
+        >
+          <p className="text-sm font-medium">Discard this recording?</p>
+          <p className="mt-1 max-w-prose text-sm leading-relaxed text-muted">
+            {recorder.recording === null
+              ? "You are still recording. Switching stops it and throws the audio away."
+              : "This take only exists in your browser. It has not been uploaded, and switching will throw it away."}
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setPendingSource(null)}>
+              Keep recording
+            </Button>
+            <Button onClick={discardAndSwitch}>Discard and switch</Button>
+          </div>
         </div>
       )}
 
@@ -96,7 +139,13 @@ export function CapturePanel() {
 
       {choosing && source === "record" && (
         <RecordPanel
-          onAnalyse={uploadFile}
+          recorder={recorder}
+          onAnalyse={(file) => {
+            uploadFile(file);
+            // The take is now the upload's problem. Releasing it here stops a
+            // stale recording reappearing if the person starts over.
+            recorder.discard();
+          }}
           maxDurationSeconds={config?.max_audio_duration_seconds}
         />
       )}

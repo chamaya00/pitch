@@ -147,3 +147,117 @@ export interface AnalysisResponse {
   feedback: Feedback | null;
   provenance: AnalysisProvenance;
 }
+
+/* --- Deterministic audio analysis ------------------------------------------
+ *
+ * Mirrors `backend/app/schemas/audio_analysis.py`. Kept apart from the speech
+ * types above because the two describe different measurements of the same
+ * recording: one counts words, the other measures the signal. Nothing in the
+ * UI combines them, and there is no type here that could hold a combined score.
+ *
+ * Every optional field is `number | null` for the same reason as everywhere
+ * else: `null` means the signal did not support the measurement, and rendering
+ * it as `0` would state something the server did not.
+ */
+
+export type AudioAnalysisStatus = "pending" | "analyzing" | "completed" | "failed";
+
+/** The parameters a result was measured with. Published so it stays readable. */
+export interface AudioAnalysisSettings {
+  sample_rate_hz: number;
+  frame_length_samples: number;
+  hop_length_samples: number;
+  min_frequency_hz: number;
+  max_frequency_hz: number;
+  clarity_threshold: number;
+  silence_rms: number;
+}
+
+/** The range **detected in this recording**. Never a physiological limit. */
+export interface DetectedRange {
+  lowest_frequency_hz: number;
+  highest_frequency_hz: number;
+  lowest_note: string;
+  highest_note: string;
+  semitone_span: number;
+}
+
+export interface UnstableSection {
+  start_seconds: number;
+  end_seconds: number;
+  cents_std: number;
+}
+
+export interface PitchStabilityMetrics {
+  voiced_ratio: number;
+  total_frames: number;
+  voiced_frames: number;
+  mean_cents_deviation: number | null;
+  mean_abs_cents_deviation: number | null;
+  cents_std: number | null;
+  semitone_variance: number | null;
+  /** Share of voiced frames within 25 cents of a note. Not a grade. */
+  in_tune_ratio: number | null;
+  unstable_sections: UnstableSection[];
+}
+
+/** Amplitude measurements. Not LUFS. */
+export interface LoudnessMetrics {
+  rms: number;
+  peak: number;
+  dynamic_range_db: number | null;
+  crest_factor_db: number | null;
+  clipped_sample_ratio: number;
+}
+
+/** Raw spectral shape. No timbre label is derived from these, anywhere. */
+export interface SpectralMetrics {
+  centroid_hz: number;
+  bandwidth_hz: number;
+  rolloff_hz: number;
+  zero_crossing_rate: number;
+  flatness: number;
+}
+
+export interface AudioSummary {
+  duration_seconds: number;
+  settings: AudioAnalysisSettings;
+  /** `null` when no pitch was held long enough to define a range. */
+  range: DetectedRange | null;
+  stability: PitchStabilityMetrics;
+  loudness: LoudnessMetrics;
+  spectral: SpectralMetrics | null;
+}
+
+export interface AudioAnalysisResponse {
+  audio_analysis_id: string;
+  recording_id: string;
+  status: AudioAnalysisStatus;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_code: string | null;
+  summary: AudioSummary | null;
+  /** The timeline lives on its own path; this is only its length. */
+  pitch_point_count: number;
+}
+
+/** One voiced frame. Unvoiced frames are omitted from the timeline entirely. */
+export interface PitchPoint {
+  timestamp_seconds: number;
+  frequency_hz: number;
+  midi_note: number;
+  note_name: string;
+  cents: number;
+  confidence: number;
+}
+
+export interface PitchTimeline {
+  recording_id: string;
+  audio_analysis_id: string;
+  total_points: number;
+  returned_points: number;
+  /** 1 when every point is present; n when every n-th was taken. */
+  decimation: number;
+  points: PitchPoint[];
+}

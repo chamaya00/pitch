@@ -101,6 +101,102 @@ pronunciation.
 | Unknown recording | 404 | `RECORDING_NOT_FOUND` |
 | Malformed recording id | 422 | `VALIDATION_ERROR` |
 
+### `POST /api/v1/recordings/{recording_id}/audio-analysis`
+
+Starts the **deterministic audio analysis** of a stored recording: pitch,
+detected range, pitch stability, loudness and spectral characteristics, measured
+from the signal.
+
+This is a different resource from `/analysis` above, not a variant of it. That
+one transcribes and counts words; this one measures audio, needs no provider and
+no credentials, and runs independently. Neither affects the other, and nothing
+combines their results — see [architecture.md](architecture.md).
+
+Returns `202` with `status: "pending"` when work is queued, `200` when an
+already-finished analysis is handed back. The measurement runs in the
+background, so a measurement failure never appears here.
+
+### `GET /api/v1/recordings/{recording_id}/audio-analysis`
+
+```json
+{
+  "audio_analysis_id": "…",
+  "recording_id": "…",
+  "status": "completed",
+  "error_code": null,
+  "pitch_point_count": 431,
+  "summary": {
+    "duration_seconds": 10.4,
+    "settings": { "sample_rate_hz": 44100, "frame_length_samples": 4096, "…": "…" },
+    "range": {
+      "lowest_note": "G2", "highest_note": "C5", "semitone_span": 29,
+      "lowest_frequency_hz": 98.0, "highest_frequency_hz": 523.25
+    },
+    "stability": {
+      "voiced_ratio": 0.74, "voiced_frames": 320, "total_frames": 431,
+      "mean_cents_deviation": -17.2, "cents_std": 21.4, "in_tune_ratio": 0.82,
+      "unstable_sections": []
+    },
+    "loudness": { "rms": 0.18, "peak": 0.92, "dynamic_range_db": 14.2 },
+    "spectral": { "centroid_hz": 1420.5, "flatness": 0.031, "…": "…" }
+  }
+}
+```
+
+Which fields are populated by `status`:
+
+| `status` | `summary` | `error_code` |
+| --- | --- | --- |
+| `pending`, `analyzing` | `null` | `null` |
+| `completed` | present | `null` |
+| `failed` | `null` | present |
+
+**A `null` measurement means the signal did not support it, never zero.** A
+recording with nothing voiced has `range: null` — not a range of zero semitones.
+
+`settings` is published because the numbers are only interpretable against it: a
+range measured at a 0.80 clarity threshold is not the same measurement as one
+taken at 0.90.
+
+There is deliberately no score, no grade, and no timbre label.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Recording exists, audio never analysed | 404 | `AUDIO_ANALYSIS_NOT_FOUND` |
+| Decoded fine, no reliable pitch | 200, `status: "failed"` | `INSUFFICIENT_PITCH_SIGNAL` |
+| Undecodable file | 200, `status: "failed"` | `AUDIO_UNSUPPORTED` |
+| Too short to measure | 200, `status: "failed"` | `AUDIO_TOO_SHORT` |
+
+### `GET /api/v1/recordings/{recording_id}/audio-analysis/pitch`
+
+The pitch timeline, for the graph.
+
+```json
+{
+  "total_points": 431,
+  "returned_points": 431,
+  "decimation": 1,
+  "points": [
+    { "timestamp_seconds": 1.42, "frequency_hz": 440.12, "midi_note": 69,
+      "note_name": "A4", "cents": 0.47, "confidence": 0.96 }
+  ]
+}
+```
+
+**Only voiced frames appear.** Unvoiced audio — silence, noise, consonants,
+anything below the clarity threshold — produces no point at all rather than a
+point with null fields, so every point returned was measured. A gap between
+consecutive timestamps is therefore meaningful: draw it as a gap and never
+interpolate across it. The share of the recording that was voiced is
+`stability.voiced_ratio` on the summary.
+
+`max_points` (default 1000, max 50000) caps the response by taking every n-th
+point; `decimation` reports the factor used. A five-minute recording produces
+around 13 000 voiced frames, which no graph can draw.
+
+Available only once the analysis has completed; otherwise `404`
+`AUDIO_ANALYSIS_NOT_FOUND`.
+
 ---
 
 ## Planned
@@ -150,11 +246,6 @@ Starts analysis in the background.
 
 `status` is one of `processing`, `completed`, `failed`.
 
-### `GET /api/v1/analysis/{analysis_id}/pitch` — Phase 3
-
-Pitch timeline for the graph: `timestamp`, `frequency`, `midi_note`,
-`note_name`, `cents`, `confidence` per frame.
-
 ### `POST /api/v1/analysis/{analysis_id}/ai-feedback` — Phase 6
 
 Generates the LLM interpretation of an existing analysis. Returns the structured
@@ -181,6 +272,9 @@ Handled failures use a stable envelope:
 | `AUDIO_TOO_LONG` | Exceeds `MAX_AUDIO_DURATION_SECONDS` |
 | `CORRUPTED_AUDIO` | File could not be decoded |
 | `INSUFFICIENT_PITCH_SIGNAL` | Too few reliably voiced frames to analyse |
+| `AUDIO_UNSUPPORTED` | The stored file could not be decoded |
+| `AUDIO_ANALYSIS_FAILED` | Audio analysis failed with no more specific cause |
+| `AUDIO_ANALYSIS_NOT_FOUND` | The recording exists but its audio has never been analysed |
 | `AI_UNAVAILABLE` | LLM provider not configured or unreachable |
 
 Speech analysis (Phase 7) adds the following. The HTTP status is listed because

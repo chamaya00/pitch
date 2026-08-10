@@ -23,6 +23,16 @@ export function AnalysisResult({ analysis }: AnalysisResultProps) {
     <div className="fade-in space-y-4">
       {analysis.provenance.is_mock && <MockDataBanner />}
 
+      {/* Named, because a recording also has an audio analysis below and the
+          two measure different things. An unlabelled block of numbers invites
+          the reader to average them into an impression neither supports. */}
+      <div>
+        <h3 className="text-sm font-medium">Speech analysis</h3>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+          What was said, and how it was paced — counted from the transcript.
+        </p>
+      </div>
+
       {analysis.transcript && (
         <AnalysisTranscript transcript={analysis.transcript} />
       )}
