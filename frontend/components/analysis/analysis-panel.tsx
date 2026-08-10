@@ -17,7 +17,7 @@ interface AnalysisPanelProps {
  * Everything that happens after a successful upload.
  *
  * Owns the analysis state machine and renders exactly one state at a time,
- * mirroring how `UploadPanel` works — including the single polite live region,
+ * mirroring how `CapturePanel` works — including the single polite live region,
  * so a screen reader hears each stage change once rather than on every poll.
  *
  * The action lives on the recording card because that is where the user

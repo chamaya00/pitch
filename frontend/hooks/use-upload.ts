@@ -30,6 +30,14 @@ export interface UploadController {
   selectFile: (file: File) => void;
   clear: () => void;
   startUpload: () => void;
+  /**
+   * Validate and upload a file in one step, without waiting for a render.
+   *
+   * For sources that have already had their confirmation step — a recording
+   * the person has just listened back to and chosen to analyse. Choosing a
+   * file from disk still goes through `selectFile` and `startUpload`.
+   */
+  uploadFile: (file: File) => void;
   cancelUpload: () => void;
 }
 
@@ -73,15 +81,7 @@ export function useUpload(config: PublicConfig | null): UploadController {
     setState({ status: "idle" });
   }, []);
 
-  const startUpload = useCallback(() => {
-    const file =
-      state.status === "selected"
-        ? state.file
-        : state.status === "error"
-          ? state.file
-          : null;
-    if (!file) return;
-
+  const beginUpload = useCallback((file: File) => {
     setState({ status: "uploading", file, progress: 0 });
 
     const handle = uploadRecording(file, (fraction) => {
@@ -120,11 +120,42 @@ export function useUpload(config: PublicConfig | null): UploadController {
           errorKind: "server",
         });
       });
-  }, [state]);
+  }, []);
+
+  const startUpload = useCallback(() => {
+    const file =
+      state.status === "selected"
+        ? state.file
+        : state.status === "error"
+          ? state.file
+          : null;
+    if (!file) return;
+    beginUpload(file);
+  }, [state, beginUpload]);
+
+  const uploadFile = useCallback(
+    (file: File) => {
+      const verdict = validateFileForUpload(file, {
+        supportedExtensions: config?.supported_extensions,
+        maxBytes: config?.max_audio_size_bytes,
+      });
+      if (!verdict.ok) {
+        setState({
+          status: "error",
+          file: null,
+          message: messageForErrorCode(verdict.reason),
+          errorKind: "validation",
+        });
+        return;
+      }
+      beginUpload(file);
+    },
+    [config, beginUpload],
+  );
 
   const cancelUpload = useCallback(() => {
     handleRef.current?.cancel();
   }, []);
 
-  return { state, selectFile, clear, startUpload, cancelUpload };
+  return { state, selectFile, clear, startUpload, uploadFile, cancelUpload };
 }

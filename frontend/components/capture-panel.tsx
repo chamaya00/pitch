@@ -1,25 +1,35 @@
 "use client";
 
+import { useState } from "react";
 import { AnalysisPanel } from "@/components/analysis/analysis-panel";
+import { RecordPanel } from "@/components/record/record-panel";
 import { FileDropzone } from "@/components/upload/file-dropzone";
 import { SelectedFileCard } from "@/components/upload/selected-file-card";
 import { UploadProgressCard } from "@/components/upload/upload-progress-card";
 import { Button } from "@/components/ui/button";
 import { usePublicConfig } from "@/hooks/use-public-config";
-import { useUpload } from "@/hooks/use-upload";
+import { useUpload, type UploadState } from "@/hooks/use-upload";
 import { formatDurationLimit } from "@/lib/format";
 
+type Source = "upload" | "record";
+
 /**
- * Owns the upload state machine and renders exactly one state at a time.
+ * Where a recording comes from, and everything that happens to it after.
+ *
+ * A file can arrive two ways — chosen from disk, or recorded here — and from
+ * the moment it exists both paths are identical: the same upload, the same
+ * analysis, the same results. Only the first step differs, so only the first
+ * step is switched.
  *
  * Limits come from the API so the copy cannot drift from what the server
  * enforces; when they are unavailable the wording stays general rather than
  * asserting a number we cannot verify.
  */
-export function UploadPanel() {
+export function CapturePanel() {
   const config = usePublicConfig();
-  const { state, selectFile, clear, startUpload, cancelUpload } =
+  const { state, selectFile, clear, startUpload, uploadFile, cancelUpload } =
     useUpload(config);
+  const [source, setSource] = useState<Source>("upload");
 
   const formats = (config?.supported_extensions ?? [".mp3", ".wav"])
     .map((extension) => extension.replace(".", "").toUpperCase())
@@ -31,10 +41,14 @@ export function UploadPanel() {
       )}`
     : `${formats} audio files`;
 
+  const choosing =
+    state.status === "idle" ||
+    (state.status === "error" && state.errorKind === "validation");
+
   return (
-    <section aria-labelledby="upload-heading" className="space-y-4">
-      <h2 id="upload-heading" className="sr-only">
-        Upload a recording
+    <section aria-labelledby="capture-heading" className="space-y-4">
+      <h2 id="capture-heading" className="sr-only">
+        Add a recording
       </h2>
 
       {/* One polite live region for the whole flow, so a screen reader hears
@@ -43,12 +57,47 @@ export function UploadPanel() {
         {statusAnnouncement(state)}
       </p>
 
-      {(state.status === "idle" ||
-        (state.status === "error" && state.errorKind === "validation")) && (
+      {choosing && (
+        <div
+          role="group"
+          aria-label="Choose how to add a recording"
+          className="inline-flex rounded-lg border border-border bg-surface p-1"
+        >
+          {(
+            [
+              ["upload", "Upload audio"],
+              ["record", "Record voice"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={source === value}
+              onClick={() => setSource(value)}
+              className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+                source === value
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted hover:text-foreground"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {choosing && source === "upload" && (
         <FileDropzone
           onFileSelected={selectFile}
           supportedExtensions={config?.supported_extensions}
           hint={hint}
+        />
+      )}
+
+      {choosing && source === "record" && (
+        <RecordPanel
+          onAnalyse={uploadFile}
+          maxDurationSeconds={config?.max_audio_duration_seconds}
         />
       )}
 
@@ -78,38 +127,44 @@ export function UploadPanel() {
         />
       )}
 
-      {state.status === "error" && (
+      {state.status === "error" && state.errorKind === "server" && (
         <div
           role="alert"
           className="fade-in rounded-xl border border-danger/40 bg-danger/5 p-5"
         >
-          <p className="text-sm font-medium text-danger">
-            {state.errorKind === "validation"
-              ? "That file can't be uploaded"
-              : "Upload failed"}
-          </p>
+          <p className="text-sm font-medium text-danger">Upload failed</p>
           <p className="mt-1 text-sm text-muted">{state.message}</p>
 
           {state.file && (
             <div className="mt-4 flex flex-wrap gap-2">
               <Button onClick={startUpload}>Try again</Button>
               <Button variant="secondary" onClick={clear}>
-                Choose another file
+                Start over
               </Button>
             </div>
           )}
+        </div>
+      )}
+
+      {state.status === "error" && state.errorKind === "validation" && (
+        <div
+          role="alert"
+          className="fade-in rounded-xl border border-danger/40 bg-danger/5 p-5"
+        >
+          <p className="text-sm font-medium text-danger">
+            That file can&apos;t be uploaded
+          </p>
+          <p className="mt-1 text-sm text-muted">{state.message}</p>
         </div>
       )}
     </section>
   );
 }
 
-function statusAnnouncement(
-  state: ReturnType<typeof useUpload>["state"],
-): string {
+function statusAnnouncement(state: UploadState): string {
   switch (state.status) {
     case "idle":
-      return "No file selected.";
+      return "No recording selected.";
     case "selected":
       return `${state.file.name} selected. Ready to upload.`;
     case "uploading":
