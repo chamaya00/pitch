@@ -14,7 +14,9 @@ from app.core.config import Settings, get_settings
 from app.services.ai.errors import ProviderError
 from app.services.ai.factory import build_feedback_provider, build_speech_to_text_provider
 from app.services.ai.protocols import FeedbackProvider, SpeechToTextProvider
+from app.services.analysis.repository import AnalysisRepository, JsonFileAnalysisRepository
 from app.services.audio.storage import RecordingStorage
+from app.services.orchestration.analysis import AnalysisService
 from app.services.recordings.repository import (
     JsonFileRecordingRepository,
     RecordingRepository,
@@ -59,7 +61,39 @@ def get_feedback_provider(settings: SettingsDep) -> FeedbackProvider:
         raise exc.to_api_error() from exc
 
 
+def get_analysis_repository(settings: SettingsDep) -> AnalysisRepository:
+    """Return the active analysis repository, annotated as the protocol."""
+    return JsonFileAnalysisRepository(settings.storage_root)
+
+
 RecordingStorageDep = Annotated[RecordingStorage, Depends(get_recording_storage)]
 RecordingRepositoryDep = Annotated[RecordingRepository, Depends(get_recording_repository)]
 SpeechToTextProviderDep = Annotated[SpeechToTextProvider, Depends(get_speech_to_text_provider)]
 FeedbackProviderDep = Annotated[FeedbackProvider, Depends(get_feedback_provider)]
+AnalysisRepositoryDep = Annotated[AnalysisRepository, Depends(get_analysis_repository)]
+
+
+def get_analysis_service(
+    settings: SettingsDep,
+    recordings: RecordingRepositoryDep,
+    storage: RecordingStorageDep,
+    analyses: AnalysisRepositoryDep,
+    speech_to_text: SpeechToTextProviderDep,
+    feedback: FeedbackProviderDep,
+) -> AnalysisService:
+    """Assemble the analysis workflow from the configured pieces.
+
+    Everything it receives is an interface: swapping a provider or a repository
+    is configuration, and the service is unaware of either choice.
+    """
+    return AnalysisService(
+        recordings=recordings,
+        storage=storage,
+        analyses=analyses,
+        speech_to_text=speech_to_text,
+        feedback=feedback,
+        stale_after_seconds=settings.analysis_stale_after_seconds,
+    )
+
+
+AnalysisServiceDep = Annotated[AnalysisService, Depends(get_analysis_service)]

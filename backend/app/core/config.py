@@ -72,8 +72,15 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-5"
 
     #: Wall-clock budget for a single provider call. Applies to both adapters.
-    #: One attempt each: retry policy is Phase 7D's decision, not this layer's.
+    #: One attempt each; there is no automatic retry.
     analysis_provider_timeout_seconds: int = Field(default=120, ge=1, le=900)
+
+    #: How long an in-flight analysis may go without progress before it is
+    #: treated as abandoned — the process that owned it died, and a new analysis
+    #: of that recording is allowed to start. Must comfortably exceed two
+    #: provider calls, or a slow-but-healthy analysis would be swept while it is
+    #: still running and the recording would be analysed twice.
+    analysis_stale_after_seconds: int = Field(default=900, ge=60, le=86_400)
 
     # --- CORS --------------------------------------------------------------
     #: ``NoDecode`` is required: without it pydantic-settings JSON-decodes any

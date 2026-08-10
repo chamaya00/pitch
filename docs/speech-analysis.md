@@ -14,7 +14,10 @@ mock providers.
 Implemented (Step 7C): real provider adapters for Deepgram and Claude, the
 configuration and factory that select between them, and error translation.
 
-Not implemented: orchestration, persistence, API routes, and the analysis UI.
+Implemented (Step 7D): the orchestration service, analysis persistence, failure
+and idempotency behaviour.
+
+Not implemented: API routes and the analysis UI.
 
 **No real transcription has been executed.** The adapters exist and are covered
 by tests at the SDK boundary, but this development environment has no provider
@@ -111,6 +114,80 @@ documented.
 
 The measurement step sits between them and uses no model at all. Feedback that
 mentions a number is repeating one this layer produced.
+
+## Orchestration
+
+`services/orchestration/analysis.py` is the only place that spans the packages.
+It takes a recording id and nothing else, and it is expressed entirely in terms
+of the protocols — swapping either provider for a mock changes nothing in it.
+
+It is split in two so an API route can answer immediately:
+
+| Method | Does |
+| --- | --- |
+| `start(recording_id)` | Validates the recording, applies the idempotency rules, returns a `pending` record. Fast — no provider call. |
+| `run(analysis_id)` | Executes the pipeline to a terminal state. Slow; intended for a `BackgroundTask`. |
+| `analyze(recording_id)` | Both, for tests and synchronous use. |
+
+**The record is written before every slow step, not after.** A process killed
+mid-analysis leaves a record saying where it got to, rather than vanishing.
+
+### Persistence
+
+One JSON document per analysis at `<storage-root>/analyses/<analysis_id>.json`,
+written temp file → flush → fsync → atomic rename, exactly as recordings are.
+`create` publishes with `link` and so refuses to overwrite; `update` publishes
+with `replace` and requires the record to exist. That distinction matters: a
+`create` that clobbered an in-flight analysis would destroy a transcript that
+cost a paid provider call.
+
+`list_for_recording` is a directory scan, not an index. It is the clearest sign
+that this store is a stopgap — its cost grows with every analysis ever run — and
+it is accepted because the alternative is a database with extra steps.
+
+### Failure
+
+| Situation | Outcome |
+| --- | --- |
+| Recording unknown | `RECORDING_NOT_FOUND`; **no** analysis record is created |
+| Transcription fails | `failed` record carrying the provider's error code |
+| No speech in the recording | `failed` record with `TRANSCRIPT_EMPTY` |
+| Feedback fails | `completed` record, `feedback = None` |
+| Anything unforeseen | `failed` record with `INTERNAL_ERROR` |
+
+`run` never raises for a provider failure — a background task must not be able
+to take the process down. Cancellation is the exception: it is persisted and
+then re-raised, because swallowing it would leave the loop believing the task
+is still running.
+
+**The recording is never deleted or modified because an analysis failed.** A
+failed analysis stays on disk as the record of what went wrong; a retry creates
+a new analysis rather than overwriting it.
+
+A feedback failure degrades an analysis to numbers without prose. Turning a
+successful transcription into a total failure because a language model was
+unavailable would throw away the part of the result that is actually measured.
+The failure is logged; the domain model has no field for a partial failure, and
+inventing one to hold it would be worse than the log line.
+
+### Idempotency
+
+`start` returns an existing analysis rather than beginning a second one:
+
+| Existing analysis | Result |
+| --- | --- |
+| `pending` / `transcribing` / `analyzing` | Returned as-is; no provider call |
+| `completed` | Returned as-is; no provider call |
+| `failed`, or none | A new `pending` record |
+
+An analysis that has been in flight since before
+`ANALYSIS_STALE_AFTER_SECONDS` belongs to a process that is no longer running.
+It is swept to `failed` (`INTERNAL_ERROR`) so the recording does not become
+permanently unanalysable, and it stays inspectable.
+
+The find-or-create decision is serialised process-wide. That is not a
+substitute for a database constraint — with more than one worker process the
+race returns, which is a known limit of the filesystem store.
 
 ## Algorithmic choices
 
