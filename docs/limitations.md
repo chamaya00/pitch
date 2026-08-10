@@ -14,6 +14,33 @@ Standing disclaimer:
 > This analysis is only an audio-based estimate and is not a medical or
 > professional vocal assessment.
 
+## Live pitch (browser)
+
+The live readout in the recorder is a **browser-side estimate**, labelled "Live
+recording estimate" wherever it appears. Specifically:
+
+- **It is not the speech analysis, and the two are not comparable.** They share
+  a musical reference and nothing else — different algorithm, different window,
+  different definitions. Neither one validates the other.
+- **It is monophonic.** One voice at a time. Two people, a voice over music, or
+  an instrument in the room will produce a pitch that belongs to none of them.
+- **Silence and noise deliberately show nothing.** Frames below the clarity
+  threshold display no note rather than a guess, so a quiet or noisy recording
+  will show long gaps. That is the feature working, not failing.
+- **It measures pitch, not singing.** It says which note the detector found, not
+  whether that note was the right one — there is no reference melody.
+- **It depends on the device.** Microphone quality, room noise and whatever the
+  operating system does before the browser sees the signal all affect it. The
+  browser's own processing (echo cancellation, noise suppression, automatic
+  gain) is switched off, but nothing outside the browser can be.
+- **Notes are spelled with sharps only.** Enharmonic spelling needs a key, which
+  live audio does not supply; a sung D♭4 is displayed as C#4.
+- **Range shown is what this recording contained**, exactly as below — never a
+  limit of anyone's voice.
+
+Microphone audio is never uploaded while recording, and no recording is sent
+anywhere unless it is explicitly submitted for analysis.
+
 ## Vocal range
 
 The reported range is the range **detected in this recording** — not a

@@ -56,9 +56,13 @@ Conventions:
 | `app/` | App Router routes, layout, global styles |
 | `components/` | Presentational and container components |
 | `components/ui/` | Primitives (`Button`, …) |
+| `components/record/` | Microphone recorder and the live pitch display |
 | `hooks/` | Client-side state and data-fetching hooks |
 | `lib/config.ts` | Public runtime configuration |
 | `lib/api.ts` | Typed API client and `ApiError` |
+| `lib/pitch*.ts`, `lib/wav.ts` | Browser-side pitch detection and WAV encoding |
+| `lib/live-pitch-engine.ts` | The audio graph: microphone, worklet, cleanup |
+| `public/pcm-capture-worklet.js` | Audio-thread capture; loaded by URL, not bundled |
 | `types/api.ts` | Response types mirroring backend schemas |
 
 Conventions:
@@ -69,6 +73,32 @@ Conventions:
   URL stay in one place.
 - `types/api.ts` mirrors `app/schemas/` by hand. If the surface grows, generate
   it from the OpenAPI schema rather than letting the two drift.
+- Stateful or async logic lives in plain TypeScript modules, not in hooks. The
+  polling engine, the pitch stream and the audio graph are all classes or
+  factories that a test can drive directly with an injected clock or a scripted
+  input; the hooks around them are thin. `node --test` runs them with no test
+  framework and no renderer (see "Checks").
+
+### Live audio
+
+Everything about the microphone runs in the browser and is described in full in
+[audio-analysis.md](audio-analysis.md). Two rules govern it:
+
+- **Microphone audio never leaves the page while recording.** No provider, no
+  model and no VocalLens endpoint receives it. The only thing that can be
+  uploaded is the finished WAV, and only on an explicit press.
+- **Live pitch and backend analysis are separate products.** They share a
+  musical reference and nothing else, so the UI labels the live figures "Live
+  recording estimate" and never places them alongside measured analysis.
+
+Per-frame data does not go through React. Pitch frames arrive ~30 times a
+second and are delivered to subscribers that write to the DOM or a canvas
+directly; re-rendering the tree at that rate to move one number is how a live
+display starts dropping frames. React state holds lifecycle, errors and the
+finished file, plus a clock that only changes on the whole second.
+
+No realtime backend was added for this: no WebSocket, no Redis, no queue, and
+no per-frame storage anywhere.
 
 ## Design system
 

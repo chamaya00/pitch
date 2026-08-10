@@ -1,10 +1,11 @@
 # VocalLens
 
-**Understand your voice. Understand your music.**
+**Hear how you speak.**
 
-VocalLens analyses a vocal recording or a song and reports pitch, musical notes,
-vocal range, stability, loudness and spectral characteristics — then uses an LLM
-to explain those measurements in plain language.
+Record from your microphone or upload a file. VocalLens transcribes the
+recording, measures how you spoke — pace, pauses, filler words — and uses an LLM
+to explain those measurements in plain language. While you record, it shows the
+pitch of your voice live, detected in your browser.
 
 > **Core principle:** every number comes from deterministic audio analysis.
 > The LLM interprets measurements; it never invents them.
@@ -16,13 +17,35 @@ vocal assessment and makes no claims about vocal health.
 
 ## Status
 
-**Phase 0 — project foundation (complete).**
-Repository structure, FastAPI backend with a health endpoint, Next.js frontend
-with the homepage and an API connectivity indicator, environment configuration,
-Docker setup, tests and lint/type checks.
+Working end to end today:
 
-Audio upload, pitch detection and AI feedback are not implemented yet. See
-[docs/roadmap.md](docs/roadmap.md) for the phase plan.
+- **Upload** — WAV/MP3, validated by content rather than by filename, stored
+  with server-generated names.
+- **Speech analysis** — transcription, then deterministic metrics counted from
+  the transcript: speaking time, words per minute, articulation rate, pauses,
+  and filler words split into hesitations and discourse markers.
+- **AI feedback** — an LLM explaining those measurements. It never produces a
+  number and never produces a score.
+- **Live pitch** — while recording, the note and cents deviation of your voice,
+  detected in the browser. See
+  [docs/audio-analysis.md](docs/audio-analysis.md).
+
+Providers are selected by configuration. With `mock` selected the output is
+demo data, and the UI says so in a banner rather than passing it off as
+analysis.
+
+Backend pitch/loudness/spectral analysis of the stored audio is **not**
+implemented; see [docs/roadmap.md](docs/roadmap.md).
+
+### Recording in the browser
+
+The microphone recorder runs entirely locally. Audio is captured as raw PCM,
+analysed for pitch in the page, and written as a WAV — nothing is sent to any
+provider, model or VocalLens endpoint while recording. The finished recording
+is uploaded only when you press **Upload for analysis**.
+
+Recording needs a secure context, so use `http://localhost` in development or
+HTTPS anywhere else; browsers do not grant microphone access otherwise.
 
 ## Repository layout
 
@@ -32,7 +55,9 @@ Audio upload, pitch detection and AI feedback are not implemented yet. See
 │   ├── app/           Routes and layouts
 │   ├── components/    UI components
 │   ├── hooks/         Client-side React hooks
-│   ├── lib/           API client and configuration
+│   ├── lib/           API client, pitch detection, WAV encoding
+│   ├── public/        Static assets, including the audio capture worklet
+│   ├── tests/         node --test suites for the pure logic modules
 │   └── types/         Shared API response types
 ├── backend/           FastAPI + Python 3.11
 │   ├── app/
@@ -110,6 +135,7 @@ cd backend
 cd frontend
 npm run lint
 npm run typecheck
+npm run test
 npm run build
 ```
 
@@ -139,7 +165,7 @@ Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL`) are never hardcoded or committed.
 
 - [docs/architecture.md](docs/architecture.md) — system design and conventions
 - [docs/api.md](docs/api.md) — endpoint reference
-- [docs/audio-analysis.md](docs/audio-analysis.md) — planned analysis pipeline
+- [docs/audio-analysis.md](docs/audio-analysis.md) — live pitch detection, and the planned backend pipeline
 - [docs/ai.md](docs/ai.md) — LLM interpretation layer
 - [docs/limitations.md](docs/limitations.md) — what VocalLens cannot tell you
 - [docs/roadmap.md](docs/roadmap.md) — development phases
