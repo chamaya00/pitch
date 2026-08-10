@@ -56,3 +56,23 @@ export function formatDurationLimit(seconds: number): string {
   }
   return `${seconds} seconds`;
 }
+
+/**
+ * A recording clock: `mm:ss`, or `h:mm:ss` past an hour.
+ *
+ * Distinct from `formatDuration`, which reads as prose ("29.6s") and is right
+ * for a measured length in a results table. A timer ticking while someone
+ * records needs fixed width and a familiar shape, so it does not reflow on
+ * every second and can be read at a glance.
+ */
+export function formatClock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const remainder = whole % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(remainder)}`
+    : `${pad(minutes)}:${pad(remainder)}`;
+}

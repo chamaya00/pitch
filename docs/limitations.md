@@ -82,8 +82,33 @@ recording estimate" wherever it appears. Specifically:
 - **Range shown is what this recording contained**, exactly as below — never a
   limit of anyone's voice.
 
+### Live Vocal Practice
+
+- **Pitch consistency is not singing ability.** It is the share of the last ~4
+  seconds of voiced audio that sat within 25 cents of the nearest note. With no
+  reference melody it cannot say whether that note was the right one.
+- **It says "Not enough yet", not 0%,** until 30 voiced frames exist. Those are
+  different statements and are never rendered as the same thing.
+- **Session range is what this session contained.** A pitch has to be held for
+  ~165 ms to count, which excludes transients but also excludes genuinely fast
+  passages.
+- **Target-note mode does not grade you.** It reports the note you actually
+  sang and its distance from the target. Singing a semitone or an octave away
+  is reported as exactly that, never as the target note slightly out of tune.
+- **The live figures will not match the audio analysis of the same recording.**
+  Different window, different thresholds, different aggregation. Neither
+  validates the other.
+
 Microphone audio is never uploaded while recording, and no recording is sent
 anywhere unless it is explicitly submitted for analysis.
+
+### Not validated against real singing
+
+Every part of this — live and offline — is an engineering MVP verified against
+**synthetic signals with known fundamentals**. It is **monophonic**: one voice
+at a time, with no detection that more than one is present. Nothing here has
+been benchmarked against an annotated dataset of real singing, and no claim
+about real-world accuracy is made or implied.
 
 ## Vocal range
 

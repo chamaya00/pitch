@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { formatDuration } from "@/lib/format";
+import { formatClock } from "@/lib/format";
 import type { RecorderState } from "@/lib/live-pitch-engine";
 
 interface RecordingControlsProps {
@@ -46,11 +46,11 @@ export function RecordingControls({
           }`}
         />
         <p className="font-mono text-lg tabular-nums">
-          {formatDuration(elapsedSeconds)}
+          {formatClock(elapsedSeconds)}
         </p>
         {maxDurationSeconds !== undefined && live && (
           <p className="text-xs text-muted">
-            of {formatDuration(maxDurationSeconds)}
+            of {formatClock(maxDurationSeconds)}
           </p>
         )}
       </div>

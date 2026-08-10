@@ -88,7 +88,7 @@ Conventions:
 | `app/` | App Router routes, layout, global styles |
 | `components/` | Presentational and container components |
 | `components/ui/` | Primitives (`Button`, …) |
-| `components/record/` | Microphone recorder and the live pitch display |
+| `components/record/` | Microphone recorder and Live Vocal Practice |
 | `hooks/` | Client-side state and data-fetching hooks |
 | `lib/config.ts` | Public runtime configuration |
 | `lib/api.ts` | Typed API client and `ApiError` |
@@ -122,6 +122,11 @@ Everything about the microphone runs in the browser and is described in full in
 - **Live pitch and backend analysis are separate products.** They share a
   musical reference and nothing else, so the UI labels the live figures "Live
   recording estimate" and never places them alongside measured analysis.
+
+Live Vocal Practice (`components/record/live-practice-panel.tsx`) is a *reader*
+of that stream, not a second detector: meter, consistency, session range and
+target-note comparison are all arithmetic over `LivePitchSample` in
+`lib/live-practice.ts`. There is one pitch detector in this product.
 
 Per-frame data does not go through React. Pitch frames arrive ~30 times a
 second and are delivered to subscribers that write to the DOM or a canvas

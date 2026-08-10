@@ -17,7 +17,7 @@ const SEMITONES_PER_OCTAVE = 12;
 const CENTS_PER_SEMITONE = 100;
 
 /** Sharps only. Enharmonic spelling needs a key, which live audio does not give us. */
-const NOTE_NAMES = [
+export const NOTE_NAMES = [
   "C",
   "C#",
   "D",

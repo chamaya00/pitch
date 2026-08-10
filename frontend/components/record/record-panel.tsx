@@ -1,9 +1,9 @@
 "use client";
 
-import { LivePitchDisplay } from "@/components/record/live-pitch-display";
+import { useState } from "react";
+import { LivePracticePanel } from "@/components/record/live-practice-panel";
 import { LiveSummaryCard } from "@/components/record/live-summary-card";
 import { MicrophoneError } from "@/components/record/microphone-error";
-import { PitchTrace } from "@/components/record/pitch-trace";
 import { RecordingControls } from "@/components/record/recording-controls";
 import { Button } from "@/components/ui/button";
 import type { MicrophoneRecorder } from "@/hooks/use-microphone-recorder";
@@ -42,6 +42,9 @@ export function RecordPanel({
   onAnalyse,
   maxDurationSeconds,
 }: RecordPanelProps) {
+  // Bumped by `start`, so the practice statistics restart with each take
+  // without the panel needing to know anything about the recorder.
+  const [sessionId, setSessionId] = useState(0);
   const {
     state,
     errorCode,
@@ -53,6 +56,11 @@ export function RecordPanel({
 
   const live = state === "recording" || state === "paused" || state === "requesting";
 
+  const startTake = () => {
+    setSessionId((current) => current + 1);
+    recorder.start();
+  };
+
   return (
     <div className="space-y-4">
       <p aria-live="polite" className="sr-only">
@@ -60,7 +68,7 @@ export function RecordPanel({
       </p>
 
       {errorCode !== null && (
-        <MicrophoneError code={errorCode} onRetry={recorder.start} />
+        <MicrophoneError code={errorCode} onRetry={startTake} />
       )}
 
       {state === "idle" && recording === null && errorCode === null && (
@@ -73,19 +81,19 @@ export function RecordPanel({
             back and then choose whether to upload it for analysis.
           </p>
           <div className="mt-5">
-            <Button onClick={recorder.start}>Start recording</Button>
+            <Button onClick={startTake}>Start recording</Button>
           </div>
         </div>
       )}
 
       {live && (
-        <>
-          <LivePitchDisplay
-            subscribe={subscribe}
-            active={state === "recording"}
-          />
-          <PitchTrace subscribe={subscribe} active={state === "recording"} />
-        </>
+        <LivePracticePanel
+          subscribe={subscribe}
+          active={state === "recording"}
+          // A new take gets fresh statistics: the range from the last one is
+          // not part of this one.
+          sessionId={sessionId}
+        />
       )}
 
       {live && (
@@ -93,7 +101,7 @@ export function RecordPanel({
           state={state}
           elapsedSeconds={elapsedSeconds}
           maxDurationSeconds={maxDurationSeconds}
-          onStart={recorder.start}
+          onStart={startTake}
           onPause={recorder.pause}
           onResume={recorder.resume}
           onStop={recorder.stop}
@@ -107,7 +115,7 @@ export function RecordPanel({
             The recording stopped before any audio was captured. Try again.
           </p>
           <div className="mt-4">
-            <Button onClick={recorder.start}>Start recording</Button>
+            <Button onClick={startTake}>Start recording</Button>
           </div>
         </div>
       )}
@@ -123,7 +131,7 @@ export function RecordPanel({
 
           <div className="fade-in rounded-xl border border-border bg-surface">
             <div className="border-b border-border p-5">
-              <p className="text-sm font-medium">Your recording</p>
+              <p className="text-sm font-medium">Your take is ready</p>
               <p className="mt-1 font-mono text-xs text-muted">
                 {formatDuration(recording.durationSeconds)} ·{" "}
                 {formatBytes(recording.sizeBytes)} · WAV
@@ -137,8 +145,8 @@ export function RecordPanel({
 
             <div className="flex flex-wrap items-center justify-between gap-3 p-5">
               <p className="text-xs text-muted">
-                Uploading sends this recording to VocalLens. Nothing has left
-                your browser yet.
+                Analysing uploads this take to VocalLens. Nothing has left your
+                browser yet.
               </p>
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -150,10 +158,10 @@ export function RecordPanel({
                     )
                   }
                 >
-                  Upload for analysis
+                  Analyse recording
                 </Button>
                 <Button variant="secondary" onClick={recorder.discard}>
-                  Record again
+                  Discard
                 </Button>
               </div>
             </div>

@@ -127,6 +127,62 @@ voiced frames, not a mean, so a single octave-jumped frame cannot move the
 display. The window is deliberately short: longer looks calmer and starts to
 lag visibly behind the voice, which for a live readout is the worse failure.
 
+### Live Vocal Practice (Step 7J)
+
+The practice card reads the sample stream described above and adds no detection
+of its own. `frontend/lib/live-practice.ts` is arithmetic over
+`LivePitchSample`; the detector, the clarity gate and the median smoother are
+untouched.
+
+**Pitch meter.** The needle position is `clamp(cents, ±50) / 50`. The *display*
+is clamped and the *number* is not: past ±50 cents the next semitone is nearer,
+so the needle stops at the end while the text keeps reporting the true
+deviation and marks that the needle is pinned. A needle resting at the end must
+never be read as "exactly 50 cents sharp".
+
+Direction is carried as text ("23 cents flat"), as a `data-direction`
+attribute, and only then as a tint — colour is never the sole cue.
+
+**Live consistency.**
+
+```
+consistency = (voiced frames in the last 128 within ±25 cents of the nearest note)
+              ─────────────────────────────────────────────────────────────────
+                            (voiced frames in the last 128)
+```
+
+Roughly the last four seconds at ~30 frames a second. Reported only once **30
+voiced frames** exist; below that it reads "Not enough yet", which is a
+different statement from 0% and is never rendered as one. Unvoiced frames never
+enter the window, so silence cannot lower it. It is a measure of how close the
+pitch sat to *some* note — **not of singing ability**, and there is no reference
+melody to be right or wrong against.
+
+**Session range.** The same held-pitch rule the backend applies to a saved
+recording: a pitch must hold for **5 consecutive voiced frames within 1
+semitone** (~165 ms) before it counts. A run is broken by any unvoiced frame, so
+a "held" pitch either side of silence is two pitches. This is what stops a
+two-frame transient between notes from becoming the bottom of a reported range.
+Labelled *range detected in this session*, never a physiological range.
+
+**Target note (optional mode).** Choosing a target changes what the deviation is
+measured *from* — the target note rather than the nearest one. The guarantee it
+exists to keep: **a detected pitch is not a correct pitch.** Singing B3 against a
+C4 target reports `B3, 1 semitone below the target`, not "C4, slightly flat", and
+an octave error reports as an octave. `onTarget` is true only when the nearest
+note to the sung pitch *is* the target.
+
+**Render budget.** Note, cents, frequency, needle and trace are written to the
+DOM from the subscription and never through React. The only state is the target
+note (a click) and the session summary, published on a 500 ms timer — two
+renders a second rather than thirty. Measured in Chromium over a live session:
+~14% of wall time in tasks, ~7% scripting, ~1% layout.
+
+**Accessibility.** No `aria-live` region updates at frame rate; the only polite
+regions carry lifecycle text ("Recording."). The meter is a `role="img"` with a
+static description, flat/sharp is text, and the target picker is a native
+`<select>`.
+
 ### What the live summary is, and is not
 
 `LiveSummary` reports the lowest, highest and most-held note, the mean cents

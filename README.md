@@ -23,8 +23,11 @@ Implemented and working end to end:
 
 - **Microphone recording** — captured as raw PCM in the browser and written as a
   WAV, uploaded only when you ask.
-- **Live browser pitch detection** — note, cents deviation and frequency while
-  you record, computed locally. Audio never leaves the page during recording.
+- **Live Vocal Practice** — while you record: the detected note, a tuner meter
+  showing flat or sharp with the deviation in cents, a scrolling pitch trace,
+  a rolling pitch-consistency figure, the range covered this session, and an
+  optional target note to practise against. All computed locally; audio never
+  leaves the page during recording.
 - **Upload** — WAV/MP3, validated by content rather than by filename, stored
   with server-generated names.
 - **Speech analysis** — transcription, then deterministic metrics counted from

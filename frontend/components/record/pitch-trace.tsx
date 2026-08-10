@@ -110,6 +110,9 @@ export function PitchTrace({ subscribe, active }: PitchTraceProps) {
 
   return (
     <div className="rounded-xl border border-border bg-surface p-4">
+      <p className="mb-2 text-xs text-muted">
+        Recent pitch — the last few seconds, newest on the right
+      </p>
       <canvas
         ref={canvasRef}
         role="img"
