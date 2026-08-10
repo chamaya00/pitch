@@ -18,6 +18,7 @@ _DESCRIPTIONS: dict[ErrorCode, str] = {
     ErrorCode.AUDIO_TOO_LONG: "The recording exceeds the configured duration limit.",
     ErrorCode.CORRUPTED_AUDIO: "The file could not be read as audio.",
     ErrorCode.RECORDING_NOT_FOUND: "No recording exists with that identifier.",
+    ErrorCode.ANALYSIS_NOT_FOUND: "That recording has not been analysed.",
     ErrorCode.VALIDATION_ERROR: "The request was not valid.",
     ErrorCode.INTERNAL_ERROR: "An unexpected error occurred.",
 }

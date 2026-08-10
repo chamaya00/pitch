@@ -17,7 +17,9 @@ configuration and factory that select between them, and error translation.
 Implemented (Step 7D): the orchestration service, analysis persistence, failure
 and idempotency behaviour.
 
-Not implemented: API routes and the analysis UI.
+Implemented (Step 7E): the HTTP API — see [api.md](api.md).
+
+Not implemented: the analysis UI.
 
 **No real transcription has been executed.** The adapters exist and are covered
 by tests at the SDK boundary, but this development environment has no provider

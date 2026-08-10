@@ -27,6 +27,7 @@ task. :meth:`AnalysisService.analyze` runs both, which is what tests use.
 """
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -73,6 +74,21 @@ ACTIVE_STATUSES: Final[frozenset[AnalysisStatus]] = frozenset(
 _START_LOCK: Final = asyncio.Lock()
 
 
+@dataclass(frozen=True, slots=True)
+class StartedAnalysis:
+    """What :meth:`AnalysisService.start` decided.
+
+    ``created`` is the whole point: only a caller that knows it caused a *new*
+    analysis may schedule the work. Without it a caller would have to compare
+    timestamps or re-derive the idempotency rules to tell a record it just
+    created from one that was already in flight, and scheduling the second kind
+    would run a paid provider call twice over the same recording.
+    """
+
+    analysis: Analysis
+    created: bool
+
+
 def _revalidated(analysis: Analysis, **changes: Any) -> Analysis:
     """Return a copy of ``analysis`` with ``changes`` applied, revalidated.
 
@@ -116,12 +132,32 @@ class AnalysisService:
         Returns an existing analysis untouched when one is already in flight or
         already finished — see :meth:`start`.
         """
-        analysis = await self.start(recording_id)
-        if analysis.status is not AnalysisStatus.PENDING:
-            return analysis
-        return await self.run(analysis.analysis_id)
+        started = await self.start(recording_id)
+        if not started.created:
+            return started.analysis
+        return await self.run(started.analysis.analysis_id)
 
-    async def start(self, recording_id: str) -> Analysis:
+    def current(self, recording_id: str) -> Analysis | None:
+        """The most recent analysis of a recording, whatever state it is in.
+
+        Read-only, and deliberately different from what :meth:`start` looks at:
+        this one returns a ``failed`` analysis too, because a caller asking
+        "how did the analysis go?" needs the failure, while a caller asking to
+        analyse the recording needs a fresh attempt.
+
+        Raises:
+            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown. The
+                stored audio is not required — an analysis that already ran
+                stays readable even if the recording's bytes were since removed.
+        """
+        if self._recordings.get(recording_id) is None:
+            raise ApiError(ErrorCode.RECORDING_NOT_FOUND, "That recording could not be found.")
+
+        for analysis in self._analyses.list_for_recording(recording_id):
+            return analysis
+        return None
+
+    async def start(self, recording_id: str) -> StartedAnalysis:
         """Return the analysis to work with, creating one only if needed.
 
         The idempotency rule, in order:
@@ -152,7 +188,7 @@ class AnalysisService:
                         "status": existing.status.value,
                     },
                 )
-                return existing
+                return StartedAnalysis(analysis=existing, created=False)
 
             analysis = self._analyses.create(
                 Analysis(analysis_id=new_analysis_id(), recording_id=recording_id)
@@ -167,7 +203,7 @@ class AnalysisService:
                 "feedback_provider": self._feedback.name,
             },
         )
-        return analysis
+        return StartedAnalysis(analysis=analysis, created=True)
 
     async def run(self, analysis_id: str) -> Analysis:
         """Execute a pending analysis to a terminal state.
@@ -180,8 +216,12 @@ class AnalysisService:
         """
         analysis = self._analyses.get(analysis_id)
         if analysis is None:
-            raise ApiError(ErrorCode.NOT_FOUND, "That analysis could not be found.")
-        if analysis.is_terminal:
+            raise ApiError(ErrorCode.ANALYSIS_NOT_FOUND, "That analysis could not be found.")
+        if analysis.status is not AnalysisStatus.PENDING:
+            # Already finished, or already being worked on. Refusing here means
+            # that even a caller who schedules the same analysis twice cannot
+            # make two provider calls happen — the second one finds the record
+            # claimed and stops.
             return analysis
 
         try:

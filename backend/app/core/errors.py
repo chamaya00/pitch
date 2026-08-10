@@ -69,6 +69,8 @@ class ErrorCode(StrEnum):
     ANALYSIS_PROVIDER_ERROR = "ANALYSIS_PROVIDER_ERROR"
     #: Transcription succeeded and found no speech. Not an error on our side.
     TRANSCRIPT_EMPTY = "TRANSCRIPT_EMPTY"
+    #: The recording exists but has never been analysed.
+    ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
 
 
 #: Default HTTP status for each code. Every member of ``ErrorCode`` must appear
@@ -96,6 +98,7 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.ANALYSIS_RATE_LIMITED: 429,
     ErrorCode.ANALYSIS_PROVIDER_ERROR: 502,
     ErrorCode.TRANSCRIPT_EMPTY: 422,
+    ErrorCode.ANALYSIS_NOT_FOUND: 404,
 }
 
 _STATUS_FALLBACK: Final[dict[int, ErrorCode]] = {

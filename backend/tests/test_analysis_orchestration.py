@@ -47,7 +47,11 @@ from app.services.analysis.repository import (
 )
 from app.services.audio.metadata import AudioFormat
 from app.services.audio.storage import RecordingStorage
-from app.services.orchestration.analysis import ACTIVE_STATUSES, AnalysisService
+from app.services.orchestration.analysis import (
+    ACTIVE_STATUSES,
+    AnalysisService,
+    StartedAnalysis,
+)
 from app.services.recordings.models import Recording
 from app.services.recordings.repository import JsonFileRecordingRepository
 from tests.fixtures import write_wav
@@ -534,8 +538,9 @@ def test_an_analysis_already_in_flight_is_returned_rather_than_duplicated(
 
     returned = run(lambda: service.start(env.recording_id))
 
-    assert returned.analysis_id == active.analysis_id
-    assert returned.status is status
+    assert returned.created is False
+    assert returned.analysis.analysis_id == active.analysis_id
+    assert returned.analysis.status is status
     assert len(list(env.analyses.directory.iterdir())) == 1
 
 
@@ -580,12 +585,13 @@ def test_concurrent_starts_converge_on_one_analysis(env: Fixture):
     """
     service = env.service()
 
-    async def start_many() -> list[Analysis]:
+    async def start_many() -> list[StartedAnalysis]:
         return list(await asyncio.gather(*(service.start(env.recording_id) for _ in range(8))))
 
     started = run(start_many)
 
-    assert len({analysis.analysis_id for analysis in started}) == 1
+    assert len({item.analysis.analysis_id for item in started}) == 1
+    assert [item.created for item in started].count(True) == 1
     assert len(list(env.analyses.directory.iterdir())) == 1
 
 
@@ -668,7 +674,7 @@ def test_a_slow_but_healthy_analysis_is_not_swept(env: Fixture):
     )
     service = env.service(speech_to_text=UnusedSpeechToText(), stale_after_seconds=900)
 
-    assert run(lambda: service.start(env.recording_id)).analysis_id == active.analysis_id
+    assert run(lambda: service.start(env.recording_id)).analysis.analysis_id == active.analysis_id
 
 
 # --- Running a specific analysis -------------------------------------------
@@ -677,7 +683,7 @@ def test_a_slow_but_healthy_analysis_is_not_swept(env: Fixture):
 def test_run_executes_a_pending_analysis(env: Fixture):
     """The split Step 7E needs: create fast, execute in the background."""
     service = env.service()
-    pending = run(lambda: service.start(env.recording_id))
+    pending = run(lambda: service.start(env.recording_id)).analysis
     assert pending.status is AnalysisStatus.PENDING
 
     completed = run(lambda: service.run(pending.analysis_id))
@@ -698,7 +704,7 @@ def test_run_on_an_unknown_analysis_is_refused(env: Fixture):
     service = env.service()
     with pytest.raises(ApiError) as caught:
         run(lambda: service.run(new_analysis_id()))
-    assert caught.value.code is ErrorCode.NOT_FOUND
+    assert caught.value.code is ErrorCode.ANALYSIS_NOT_FOUND
 
 
 def test_cancellation_leaves_a_record_and_propagates(env: Fixture):
@@ -713,7 +719,7 @@ def test_cancellation_leaves_a_record_and_propagates(env: Fixture):
             raise asyncio.CancelledError
 
     service = env.service(speech_to_text=Cancelling())
-    pending = run(lambda: service.start(env.recording_id))
+    pending = run(lambda: service.start(env.recording_id)).analysis
 
     with pytest.raises(asyncio.CancelledError):
         run(lambda: service.run(pending.analysis_id))
@@ -727,7 +733,7 @@ def test_cancellation_leaves_a_record_and_propagates(env: Fixture):
 def test_a_store_that_breaks_while_recording_a_failure_reports_the_real_cause(env: Fixture):
     """The provider timed out; a write error on the way out must not replace it."""
     service = env.service(speech_to_text=FailingSpeechToText(ProviderTimeoutError("deepgram")))
-    pending = run(lambda: service.start(env.recording_id))
+    pending = run(lambda: service.start(env.recording_id)).analysis
 
     original_update = env.analyses.update
 
@@ -747,7 +753,7 @@ def test_a_store_that_breaks_while_recording_a_failure_reports_the_real_cause(en
 def test_a_store_that_breaks_mid_run_fails_the_analysis(env: Fixture):
     """When persistence itself is what broke, that is the honest error code."""
     service = env.service()
-    pending = run(lambda: service.start(env.recording_id))
+    pending = run(lambda: service.start(env.recording_id)).analysis
 
     def explode(analysis: Analysis) -> Analysis:
         raise AnalysisRepositoryError("disk full")

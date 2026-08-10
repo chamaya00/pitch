@@ -30,6 +30,77 @@ Same payload, versioned for API clients.
 }
 ```
 
+### `POST /api/v1/recordings/{recording_id}/analysis`
+
+Starts an analysis of a stored recording, or returns the one that already
+exists. `recording_id` must be 32 lower-case hex characters; anything else is a
+`422` before the request reaches a service.
+
+**The response is sent before the analysis runs.** Transcription and feedback
+happen in a background task, so a provider failure never appears here — it is
+recorded on the analysis and surfaces on `GET`.
+
+**202 Accepted** — work is queued or already in flight.
+
+```json
+{
+  "analysis_id": "3fa85f6457174562b3fc2c963f66afa6",
+  "recording_id": "8f14e45fceea167a5a36dedd4bea2543",
+  "status": "pending"
+}
+```
+
+The full `AnalysisResponse` shape is returned; the fields above are the ones
+populated at this stage.
+
+**200 OK** — an analysis had already completed. Nothing was queued and no
+provider was called.
+
+Repeating the request is safe. An analysis that is `pending`, `transcribing`,
+`analyzing` or `completed` is returned as-is. Only a recording whose last
+analysis *failed* starts a new one; the failed record stays readable.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Unknown recording | 404 | `RECORDING_NOT_FOUND` |
+| Malformed recording id | 422 | `VALIDATION_ERROR` |
+
+### `GET /api/v1/recordings/{recording_id}/analysis`
+
+Returns the recording's most recent analysis: its progress while it runs, its
+results once it finishes.
+
+**A failed analysis is a successful response** — `200` with `status: "failed"`
+and an `error_code`. The request worked; the analysis did not. Provider failures
+are never turned into `500`s.
+
+Which fields are populated depends on `status`:
+
+| status | transcript | metrics | feedback | error_code |
+| --- | --- | --- | --- | --- |
+| `pending`, `transcribing` | `null` | `null` | `null` | `null` |
+| `analyzing` | present | present | `null` | `null` |
+| `completed` | present | present | present *or* `null` | `null` |
+| `failed` | usually `null` | usually `null` | `null` | present |
+
+A completed analysis with `feedback: null` is a normal outcome: the numbers are
+produced without a language model, so a feedback outage degrades an analysis to
+measurements rather than losing it.
+
+**A `null` metric means "not measurable from this recording", never zero.** See
+[speech-analysis.md](speech-analysis.md) for which metrics need what. `metrics`
+and `feedback` are separate objects — measured arithmetic and generated prose —
+and `provenance` says which provider produced each, including `is_mock`.
+
+There is deliberately no overall score, grade or percentage, and nothing about
+pronunciation.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Recording exists, never analysed | 404 | `ANALYSIS_NOT_FOUND` |
+| Unknown recording | 404 | `RECORDING_NOT_FOUND` |
+| Malformed recording id | 422 | `VALIDATION_ERROR` |
+
 ---
 
 ## Planned
@@ -124,6 +195,12 @@ day" and "the recording had nothing in it", which callers retry differently.
 | `ANALYSIS_RATE_LIMITED` | 429 | The provider refused the request under its own rate limits |
 | `ANALYSIS_PROVIDER_ERROR` | 502 | The provider answered with an error or an unusable response |
 | `TRANSCRIPT_EMPTY` | 422 | Transcription succeeded and found no speech |
+| `ANALYSIS_NOT_FOUND` | 404 | The recording exists but has never been analysed |
+
+The first six are *analysis* outcomes, not request outcomes: they are persisted
+on the analysis record and returned by `GET` inside a `200` response, never as
+an HTTP error status. `ANALYSIS_NOT_FOUND` is the exception — it describes the
+request, and is a real 404.
 
 A provider's own error text never reaches a client. Each code carries our
 wording; the vendor's exception class or status is logged as a short `reason`
