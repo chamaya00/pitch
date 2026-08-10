@@ -16,7 +16,13 @@ from app.services.ai.factory import build_feedback_provider, build_speech_to_tex
 from app.services.ai.protocols import FeedbackProvider, SpeechToTextProvider
 from app.services.analysis.repository import AnalysisRepository, JsonFileAnalysisRepository
 from app.services.audio.storage import RecordingStorage
+from app.services.audio_analysis.analyzer import AudioAnalyzer, SignalAudioAnalyzer
+from app.services.audio_analysis.repository import (
+    AudioAnalysisRepository,
+    JsonFileAudioAnalysisRepository,
+)
 from app.services.orchestration.analysis import AnalysisService
+from app.services.orchestration.audio_analysis import AudioAnalysisService
 from app.services.recordings.repository import (
     JsonFileRecordingRepository,
     RecordingRepository,
@@ -66,11 +72,31 @@ def get_analysis_repository(settings: SettingsDep) -> AnalysisRepository:
     return JsonFileAnalysisRepository(settings.storage_root)
 
 
+def get_audio_analysis_repository(settings: SettingsDep) -> AudioAnalysisRepository:
+    """Return the active audio-analysis repository, annotated as the protocol."""
+    return JsonFileAudioAnalysisRepository(settings.storage_root)
+
+
+def get_audio_analyzer() -> AudioAnalyzer:
+    """Return the deterministic analyzer, annotated as the protocol.
+
+    Takes no settings: its parameters are properties of the algorithm, chosen
+    against test signals and documented in ``docs/audio-analysis.md``. Making
+    them deployment knobs would let two installations report different ranges
+    for the same recording while both calling the number "detected range".
+    """
+    return SignalAudioAnalyzer()
+
+
 RecordingStorageDep = Annotated[RecordingStorage, Depends(get_recording_storage)]
 RecordingRepositoryDep = Annotated[RecordingRepository, Depends(get_recording_repository)]
 SpeechToTextProviderDep = Annotated[SpeechToTextProvider, Depends(get_speech_to_text_provider)]
 FeedbackProviderDep = Annotated[FeedbackProvider, Depends(get_feedback_provider)]
 AnalysisRepositoryDep = Annotated[AnalysisRepository, Depends(get_analysis_repository)]
+AudioAnalysisRepositoryDep = Annotated[
+    AudioAnalysisRepository, Depends(get_audio_analysis_repository)
+]
+AudioAnalyzerDep = Annotated[AudioAnalyzer, Depends(get_audio_analyzer)]
 
 
 def get_analysis_service(
@@ -97,3 +123,28 @@ def get_analysis_service(
 
 
 AnalysisServiceDep = Annotated[AnalysisService, Depends(get_analysis_service)]
+
+
+def get_audio_analysis_service(
+    settings: SettingsDep,
+    recordings: RecordingRepositoryDep,
+    storage: RecordingStorageDep,
+    analyses: AudioAnalysisRepositoryDep,
+    analyzer: AudioAnalyzerDep,
+) -> AudioAnalysisService:
+    """Assemble the audio-analysis workflow from the configured pieces.
+
+    Note what is absent: no speech-to-text provider and no feedback provider.
+    This pipeline measures the signal and needs neither, which is why a
+    deployment with no AI credentials at all can still analyse audio.
+    """
+    return AudioAnalysisService(
+        recordings=recordings,
+        storage=storage,
+        analyses=analyses,
+        analyzer=analyzer,
+        stale_after_seconds=settings.analysis_stale_after_seconds,
+    )
+
+
+AudioAnalysisServiceDep = Annotated[AudioAnalysisService, Depends(get_audio_analysis_service)]

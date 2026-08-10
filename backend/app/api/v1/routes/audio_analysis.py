@@ -1,0 +1,195 @@
+"""Deterministic audio-analysis routes.
+
+A thin translation layer, exactly like ``routes/analysis.py``: path parameter in,
+service call, domain object out as a response schema. No measurement logic, no
+filesystem access, no decisions about retry or idempotency — those belong to
+``services/orchestration/audio_analysis.py`` and stay there.
+
+Paths follow the convention the speech analysis already set:
+``/recordings/{id}/<noun>``. The noun is ``audio-analysis`` rather than
+something like ``pitch``, because the resource is the whole deterministic
+measurement — pitch, loudness and spectrum — and the timeline hangs off it at
+``/audio-analysis/pitch``.
+
+The slow work never happens inside a request. ``POST`` creates the record and
+hands execution to a background task, so a provider-free but CPU-heavy
+measurement cannot hold a connection open. A measurement failure is therefore
+never a ``POST`` error: it surfaces on ``GET`` as ``200`` with
+``status: "failed"``.
+"""
+
+from typing import Annotated
+
+from fastapi import APIRouter, BackgroundTasks, Path, Query, Response, status
+
+from app.api.deps import AudioAnalysisServiceDep
+from app.api.responses import error_responses
+from app.core.errors import ApiError, ErrorCode
+from app.schemas.audio_analysis import AudioAnalysisResponse, PitchTimelineResponse
+from app.services.audio_analysis.models import AudioAnalysisStatus
+
+router = APIRouter(prefix="/recordings", tags=["audio-analysis"])
+
+#: Recording ids are ``uuid4().hex``. Constraining the path parameter means a
+#: malformed id is refused at the edge and never reaches a service, so nothing
+#: shaped like a path or a traversal sequence travels further in.
+RecordingIdPath = Annotated[
+    str,
+    Path(
+        description="Server-generated recording identifier: 32 lower-case hex characters.",
+        pattern=r"^[0-9a-f]{32}$",
+        examples=["8f14e45fceea167a5a36dedd4bea2543"],
+    ),
+]
+
+#: Default cap on returned pitch points. A five-minute recording produces around
+#: 13 000 voiced frames; a graph a few hundred pixels wide cannot show them, and
+#: sending them all costs a megabyte for nothing. Callers that genuinely want
+#: every point can raise it.
+DEFAULT_MAX_POINTS = 1000
+MAX_POINTS_LIMIT = 50000
+
+
+@router.post(
+    "/{recording_id}/audio-analysis",
+    response_model=AudioAnalysisResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Analyse a recording's audio",
+    description=(
+        "Start a deterministic audio analysis of a stored recording — pitch, "
+        "detected range, pitch stability, loudness and spectral characteristics "
+        "— or return the one that already exists.\n\n"
+        "This is **separate from the speech analysis** on "
+        "`/recordings/{id}/analysis`, which transcribes the recording and "
+        "measures pace, pauses and filler words. The two measure different "
+        "things, run independently, and are never combined into one figure.\n\n"
+        "**This returns before the analysis runs.** Poll `GET` on the same path "
+        "for progress and results. A measurement failure therefore never appears "
+        "here — it is recorded on the analysis and surfaces on `GET` as `200` "
+        'with `status: "failed"`.\n\n'
+        "**Repeating the request is safe.** An analysis already queued, running "
+        "or finished is returned as-is. Only a recording whose last audio "
+        "analysis *failed* starts a new one.\n\n"
+        "Returns `202` when work is queued, and `200` when an already-completed "
+        "analysis is handed back."
+    ),
+    responses={
+        status.HTTP_200_OK: {
+            "model": AudioAnalysisResponse,
+            "description": "An audio analysis of this recording had already finished.",
+        },
+        **error_responses(
+            ErrorCode.RECORDING_NOT_FOUND,
+            ErrorCode.VALIDATION_ERROR,
+            ErrorCode.INTERNAL_ERROR,
+        ),
+    },
+)
+async def start_audio_analysis(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+    background_tasks: BackgroundTasks,
+    response: Response,
+) -> AudioAnalysisResponse:
+    """Create or return the audio analysis for a recording."""
+    started = await service.start(recording_id)
+
+    if started.created:
+        # Scheduled only for an analysis this request created; scheduling one
+        # for a record already in flight would measure the same file twice.
+        background_tasks.add_task(service.run, started.analysis.audio_analysis_id)
+    elif started.analysis.is_terminal:
+        response.status_code = status.HTTP_200_OK
+
+    return AudioAnalysisResponse.from_domain(started.analysis)
+
+
+@router.get(
+    "/{recording_id}/audio-analysis",
+    response_model=AudioAnalysisResponse,
+    summary="Get a recording's audio analysis",
+    description=(
+        "Return the current audio analysis of a recording: its progress while it "
+        "runs, its measurements once it finishes.\n\n"
+        "**A failed analysis is a successful response.** It comes back as `200` "
+        'with `status: "failed"` and an `error_code` — `INSUFFICIENT_PITCH_SIGNAL` '
+        "when the audio decoded but carried no reliable pitch, which is a normal "
+        "outcome for a whisper, a noisy room or an instrumental recording.\n\n"
+        "A `null` measurement always means the signal did not support it, never "
+        "zero. The pitch timeline is not included here; fetch it from "
+        "`/audio-analysis/pitch`."
+    ),
+    responses=error_responses(
+        ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+        ErrorCode.RECORDING_NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def get_audio_analysis(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+) -> AudioAnalysisResponse:
+    """Return the recording's most recent audio analysis."""
+    return AudioAnalysisResponse.from_domain(_require_analysis(service, recording_id))
+
+
+@router.get(
+    "/{recording_id}/audio-analysis/pitch",
+    response_model=PitchTimelineResponse,
+    summary="Get the pitch timeline",
+    description=(
+        "Every voiced frame of the analysis, in order.\n\n"
+        "**Unvoiced frames are omitted, not nulled.** Silence, noise, consonants "
+        "and anything below the clarity threshold produce no point at all, so "
+        "every point returned was measured. A gap between consecutive timestamps "
+        "is meaningful — draw it as a gap and never interpolate across it. The "
+        "share of the recording that was voiced is `stability.voiced_ratio` on "
+        "the summary.\n\n"
+        "Long recordings produce tens of thousands of points, so the response is "
+        f"decimated to `max_points` (default {DEFAULT_MAX_POINTS}) by taking "
+        "every n-th point. `decimation` states the factor used."
+    ),
+    responses=error_responses(
+        ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+        ErrorCode.RECORDING_NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def get_pitch_timeline(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+    max_points: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=MAX_POINTS_LIMIT,
+            description="Largest number of points to return. The response says what it did.",
+        ),
+    ] = DEFAULT_MAX_POINTS,
+) -> PitchTimelineResponse:
+    """Return the analysis's pitch points, decimated to ``max_points``."""
+    analysis = _require_analysis(service, recording_id)
+    if analysis.status is not AudioAnalysisStatus.COMPLETED:
+        raise ApiError(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            "That recording's audio analysis has not finished yet.",
+        )
+
+    points = list(analysis.pitch_points)
+    decimation = max(1, -(-len(points) // max_points))  # ceiling division
+    if decimation > 1:
+        points = points[::decimation]
+
+    return PitchTimelineResponse.from_domain(analysis, points=points, decimation=decimation)
+
+
+def _require_analysis(service: AudioAnalysisServiceDep, recording_id: str):  # type: ignore[no-untyped-def]
+    analysis = service.current(recording_id)
+    if analysis is None:
+        raise ApiError(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            "That recording's audio has not been analysed yet.",
+        )
+    return analysis

@@ -18,3 +18,12 @@ python-multipart>=0.0.9,<1.0
 # vendor is installed, and neither is reachable from the development sandbox.
 deepgram-sdk>=7.6,<8.0
 anthropic>=0.121,<1.0
+
+# Step 7I — deterministic audio analysis. numpy does the arithmetic; soundfile
+# (libsndfile) decodes WAV and MP3, the two formats upload accepts, with no
+# ffmpeg process and no temporary files. librosa is deliberately absent: it
+# pulls in numba, scikit-learn and soxr for one function, where what is
+# actually needed is a decoder and ~200 lines of numpy. See
+# docs/audio-analysis.md for the trade and the conditions for revisiting it.
+numpy>=1.26,<3.0
+soundfile>=0.12,<1.0

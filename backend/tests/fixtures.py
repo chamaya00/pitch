@@ -70,6 +70,75 @@ def write_wav_of_exact_size(path: Path, total_bytes: int, *, sample_rate: int = 
     return path
 
 
+# --- Signals for audio analysis --------------------------------------------
+#
+# A pure sine is the wrong fixture for testing a pitch detector: it is the one
+# signal on which every method works. The interesting cases are a harmonic tone
+# (which breaks naive autocorrelation), noise (which must produce nothing), and
+# silence (likewise) — so those are built here rather than approximated.
+
+
+def write_signal_wav(path: Path, samples: list[float], *, sample_rate: int) -> Path:
+    """Write mono 16-bit PCM from floats in [-1, 1]. Values outside are clamped."""
+    frames = array.array("h")
+    for value in samples:
+        scaled = int(max(-1.0, min(1.0, value)) * 32767)
+        frames.append(scaled)
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(frames.tobytes())
+    return path
+
+
+def harmonic_samples(
+    frequency: float,
+    *,
+    seconds: float,
+    sample_rate: int,
+    amplitude: float = 0.5,
+    partials: tuple[float, ...] = (1.0, 0.6, 0.4, 0.25, 0.15),
+) -> list[float]:
+    """A tone with harmonics — roughly what a voice looks like to a detector.
+
+    This is the signal that defeats plain autocorrelation: the harmonics make
+    the correlation at twice the true period as strong as at the period itself,
+    so a detector taking the tallest peak reports an octave too low.
+    """
+    total = sum(partials)
+    samples = []
+    for index in range(int(sample_rate * seconds)):
+        phase = 2 * math.pi * frequency * index / sample_rate
+        value = sum(gain * math.sin((n + 1) * phase) for n, gain in enumerate(partials))
+        samples.append(amplitude * value / total)
+    return samples
+
+
+def sine_samples(
+    frequency: float, *, seconds: float, sample_rate: int, amplitude: float = 0.5
+) -> list[float]:
+    """A pure tone of a known frequency."""
+    return [
+        amplitude * math.sin(2 * math.pi * frequency * index / sample_rate)
+        for index in range(int(sample_rate * seconds))
+    ]
+
+
+def noise_samples(
+    *, seconds: float, sample_rate: int, amplitude: float = 0.4, seed: int = 1234
+) -> list[float]:
+    """Deterministic white noise: plenty of level, no pitch to find."""
+    generator = random.Random(seed)
+    return [generator.uniform(-amplitude, amplitude) for _ in range(int(sample_rate * seconds))]
+
+
+def silence_samples(*, seconds: float, sample_rate: int) -> list[float]:
+    """Digital silence."""
+    return [0.0] * int(sample_rate * seconds)
+
+
 # --- MP3 -------------------------------------------------------------------
 #
 # A minimal but genuinely valid MPEG-1 Layer III stream. Each 32-bit frame

@@ -49,8 +49,16 @@ class ErrorCode(StrEnum):
     CORRUPTED_AUDIO = "CORRUPTED_AUDIO"
     RECORDING_NOT_FOUND = "RECORDING_NOT_FOUND"
 
-    # Analysis (Phase 2)
+    # Deterministic audio analysis (Step 7I)
+    #: The audio decoded, but no frame carried a reliable pitch. A normal
+    #: outcome for a whisper, a noisy room or an instrumental recording.
     INSUFFICIENT_PITCH_SIGNAL = "INSUFFICIENT_PITCH_SIGNAL"
+    #: The stored file could not be decoded, or holds no readable audio.
+    AUDIO_UNSUPPORTED = "AUDIO_UNSUPPORTED"
+    #: Audio analysis failed for a reason with no more specific code.
+    AUDIO_ANALYSIS_FAILED = "AUDIO_ANALYSIS_FAILED"
+    #: The recording exists but has never had its audio analysed.
+    AUDIO_ANALYSIS_NOT_FOUND = "AUDIO_ANALYSIS_NOT_FOUND"
 
     # AI feedback (Phase 6)
     AI_UNAVAILABLE = "AI_UNAVAILABLE"
@@ -91,6 +99,9 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.CORRUPTED_AUDIO: 422,
     ErrorCode.RECORDING_NOT_FOUND: 404,
     ErrorCode.INSUFFICIENT_PITCH_SIGNAL: 422,
+    ErrorCode.AUDIO_UNSUPPORTED: 422,
+    ErrorCode.AUDIO_ANALYSIS_FAILED: 422,
+    ErrorCode.AUDIO_ANALYSIS_NOT_FOUND: 404,
     ErrorCode.AI_UNAVAILABLE: 503,
     ErrorCode.ANALYSIS_NOT_CONFIGURED: 503,
     ErrorCode.ANALYSIS_PROVIDER_UNAVAILABLE: 503,
