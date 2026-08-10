@@ -334,3 +334,145 @@ def test_a_failed_audio_analysis_does_not_affect_speech_analysis(
 
     client.post(f"{RECORDINGS_URL}/{recording_id}/analysis")
     assert client.get(f"{RECORDINGS_URL}/{recording_id}/analysis").json()["status"] == "completed"
+
+
+# --- Note breakdown --------------------------------------------------------
+
+
+def notes_url(recording_id: str) -> str:
+    return f"{audio_url(recording_id)}/notes"
+
+
+def test_a_held_note_breaks_down_to_that_one_note(client: TestClient, recording_id: str) -> None:
+    client.post(audio_url(recording_id))
+    response = client.get(notes_url(recording_id))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [note["note_name"] for note in body["notes"]] == ["A4"]
+    assert body["notes"][0]["percentage_of_voiced_time"] == pytest.approx(100.0)
+    assert body["notes"][0]["in_tune_ratio"] == pytest.approx(1.0)
+    assert body["in_tune_cents"] == 25.0
+
+
+def test_a_two_note_recording_breaks_down_into_two_notes(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The deterministic fixture the whole audio pipeline is checked against."""
+    samples = harmonic_samples(440.0, seconds=2.0, sample_rate=SAMPLE_RATE) + harmonic_samples(
+        261.626, seconds=1.0, sample_rate=SAMPLE_RATE
+    )
+    recording_id = upload(
+        client, write_signal_wav(tmp_path / "two.wav", samples, sample_rate=SAMPLE_RATE)
+    )
+    client.post(audio_url(recording_id))
+
+    body = client.get(notes_url(recording_id)).json()
+    names = [note["note_name"] for note in body["notes"]]
+
+    assert names[:2] == ["A4", "C4"], f"got {names}"
+    # Twice as long on A4 as on C4, within a frame or two either side.
+    a4, c4 = body["notes"][0], body["notes"][1]
+    assert a4["duration_seconds"] == pytest.approx(2 * c4["duration_seconds"], rel=0.1)
+    assert a4["percentage_of_voiced_time"] > c4["percentage_of_voiced_time"]
+
+
+def test_the_breakdown_covers_the_voiced_time_and_nothing_else(
+    client: TestClient, recording_id: str
+) -> None:
+    client.post(audio_url(recording_id))
+    breakdown = client.get(notes_url(recording_id)).json()
+    summary = client.get(audio_url(recording_id)).json()["summary"]
+
+    assert breakdown["total_frames"] == summary["stability"]["voiced_frames"]
+    assert sum(note["percentage_of_voiced_time"] for note in breakdown["notes"]) == pytest.approx(
+        100.0
+    )
+    # Voiced time is a share of the recording, not the whole of it.
+    assert breakdown["voiced_seconds"] <= summary["duration_seconds"] + 0.1
+
+
+def test_the_breakdown_does_not_redefine_the_range(client: TestClient, tmp_path: Path) -> None:
+    """Aggregating by note must leave the authoritative range untouched."""
+    samples = harmonic_samples(440.0, seconds=1.5, sample_rate=SAMPLE_RATE) + harmonic_samples(
+        220.0, seconds=1.5, sample_rate=SAMPLE_RATE
+    )
+    recording_id = upload(
+        client, write_signal_wav(tmp_path / "range.wav", samples, sample_rate=SAMPLE_RATE)
+    )
+    client.post(audio_url(recording_id))
+
+    summary = client.get(audio_url(recording_id)).json()["summary"]
+    assert summary["range"]["lowest_note"] == "A3"
+    assert summary["range"]["highest_note"] == "A4"
+    assert summary["range"]["semitone_span"] == 12
+
+
+def test_the_notes_are_ordered_longest_first(client: TestClient, tmp_path: Path) -> None:
+    samples = (
+        harmonic_samples(440.0, seconds=0.6, sample_rate=SAMPLE_RATE)
+        + harmonic_samples(329.628, seconds=1.8, sample_rate=SAMPLE_RATE)
+        + harmonic_samples(261.626, seconds=1.2, sample_rate=SAMPLE_RATE)
+    )
+    recording_id = upload(
+        client, write_signal_wav(tmp_path / "three.wav", samples, sample_rate=SAMPLE_RATE)
+    )
+    client.post(audio_url(recording_id))
+
+    notes = client.get(notes_url(recording_id)).json()["notes"]
+    durations = [note["duration_seconds"] for note in notes]
+    assert durations == sorted(durations, reverse=True)
+    assert notes[0]["note_name"] == "E4"
+
+
+def test_silence_has_no_breakdown_to_fetch(client: TestClient, tmp_path: Path) -> None:
+    """A failed analysis has nothing to break down — and says so with a code."""
+    source = write_signal_wav(
+        tmp_path / "silence.wav",
+        silence_samples(seconds=2.0, sample_rate=SAMPLE_RATE),
+        sample_rate=SAMPLE_RATE,
+    )
+    recording_id = upload(client, source)
+    client.post(audio_url(recording_id))
+
+    response = client.get(notes_url(recording_id))
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "AUDIO_ANALYSIS_NOT_FOUND"
+
+
+def test_asking_for_a_breakdown_before_the_analysis_ran_is_a_documented_404(
+    client: TestClient, recording_id: str
+) -> None:
+    response = client.get(notes_url(recording_id))
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "AUDIO_ANALYSIS_NOT_FOUND"
+
+
+def test_an_unknown_recording_has_no_breakdown(client: TestClient) -> None:
+    response = client.get(notes_url("0" * 32))
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "RECORDING_NOT_FOUND"
+
+
+def test_the_breakdown_never_leaks_internals(client: TestClient, recording_id: str) -> None:
+    client.post(audio_url(recording_id))
+    text = client.get(notes_url(recording_id)).text
+    for leak in ("Traceback", "/tmp", "soundfile", "numpy"):
+        assert leak not in text
+
+
+def test_the_breakdown_is_a_short_response_whatever_the_timeline_length(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The aggregation happens server-side; a client never downloads the points."""
+    source = write_signal_wav(
+        tmp_path / "long.wav",
+        harmonic_samples(440.0, seconds=8.0, sample_rate=SAMPLE_RATE),
+        sample_rate=SAMPLE_RATE,
+    )
+    recording_id = upload(client, source)
+    client.post(audio_url(recording_id))
+
+    breakdown = client.get(notes_url(recording_id)).json()
+    assert breakdown["total_frames"] > 300
+    assert len(breakdown["notes"]) <= 3

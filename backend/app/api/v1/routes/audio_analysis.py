@@ -25,7 +25,11 @@ from fastapi import APIRouter, BackgroundTasks, Path, Query, Response, status
 from app.api.deps import AudioAnalysisServiceDep
 from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
-from app.schemas.audio_analysis import AudioAnalysisResponse, PitchTimelineResponse
+from app.schemas.audio_analysis import (
+    AudioAnalysisResponse,
+    NoteBreakdownResponse,
+    PitchTimelineResponse,
+)
 from app.services.audio_analysis.models import AudioAnalysisStatus
 
 router = APIRouter(prefix="/recordings", tags=["audio-analysis"])
@@ -183,6 +187,50 @@ async def get_pitch_timeline(
         points = points[::decimation]
 
     return PitchTimelineResponse.from_domain(analysis, points=points, decimation=decimation)
+
+
+@router.get(
+    "/{recording_id}/audio-analysis/notes",
+    response_model=NoteBreakdownResponse,
+    summary="Get the note breakdown",
+    description=(
+        "How the recording's pitched time was divided between musical notes.\n\n"
+        "A companion to `/audio-analysis/pitch` rather than a replacement: that "
+        "path returns the timeline frame by frame for drawing, this one returns "
+        "it aggregated by note for reading. Both derive from the same stored "
+        "measurement, and the aggregation happens here rather than in a client "
+        "so a browser never downloads thousands of points to build a short "
+        "table.\n\n"
+        "**`percentage_of_voiced_time` is a share of pitched time, not of the "
+        "recording.** Silence and unvoiced audio are excluded from the "
+        "denominator — a recording that is half silence would otherwise report "
+        "every note at half its real share — so the percentages sum to 100.\n\n"
+        "**An empty `notes` list means no notes were detected.** That is not a "
+        "successful measurement of zero notes, and must not be rendered as an "
+        "empty table.\n\n"
+        "Notes are ordered longest first, with the lower note first on a tie, so "
+        "the same analysis always renders the same way."
+    ),
+    responses=error_responses(
+        ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+        ErrorCode.RECORDING_NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def get_note_breakdown(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+) -> NoteBreakdownResponse:
+    """Return the analysis's pitched time, aggregated by note."""
+    analysis = _require_analysis(service, recording_id)
+    notes = service.notes(recording_id)
+    if notes is None:
+        raise ApiError(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            "That recording's audio analysis has not finished yet.",
+        )
+    return NoteBreakdownResponse.from_domain(analysis, notes)
 
 
 def _require_analysis(service: AudioAnalysisServiceDep, recording_id: str):  # type: ignore[no-untyped-def]

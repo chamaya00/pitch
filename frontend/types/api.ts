@@ -261,3 +261,28 @@ export interface PitchTimeline {
   decimation: number;
   points: PitchPoint[];
 }
+
+/** How much of the pitched time was spent on one musical note. */
+export interface NoteSummary {
+  midi_note: number;
+  note_name: string;
+  duration_seconds: number;
+  /** Share of *pitched* time, not of the recording. These sum to 100. */
+  percentage_of_voiced_time: number;
+  frame_count: number;
+  average_cents: number;
+  mean_abs_cents: number;
+  /** Share of this note's frames within `in_tune_cents` of it. Not a grade. */
+  in_tune_ratio: number;
+}
+
+export interface NoteBreakdown {
+  recording_id: string;
+  audio_analysis_id: string;
+  voiced_seconds: number;
+  total_frames: number;
+  /** The threshold `in_tune_ratio` was measured against, in cents. */
+  in_tune_cents: number;
+  /** Longest first, lower note first on a tie. Empty means none were detected. */
+  notes: NoteSummary[];
+}

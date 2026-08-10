@@ -37,6 +37,14 @@ _ID_PATTERN: Final = r"\A[0-9a-f]{32}\z"
 #: a note name can never carry arbitrary text into a stored document.
 _NOTE_PATTERN: Final = r"\A[A-G]#?-?[0-9]\z"
 
+#: A voiced frame within this many cents of its semitone counts as in tune.
+#:
+#: Lives here, in the domain, rather than beside the detector: the recording-level
+#: ``in_tune_ratio`` and the per-note one must mean the same thing, and the note
+#: aggregation must be able to reach it without importing numpy and a decoder.
+#: Roughly where a trained listener stops hearing a note as bent.
+IN_TUNE_CENTS: Final = 25.0
+
 
 def new_audio_analysis_id() -> str:
     """Return a fresh, server-generated audio-analysis identifier."""
@@ -86,6 +94,35 @@ class PitchPoint(BaseModel):
     cents: float = Field(ge=-50, le=50)
     #: Measured NSDF peak height, 0–1. Not an invented score.
     confidence: float = Field(ge=0, le=1)
+
+
+class NoteSummary(BaseModel):
+    """How much of the pitched time was spent on one musical note.
+
+    One entry per semitone, not per frequency: every frame whose nearest note is
+    this one contributes, and how far those frames sat from it is reported by
+    ``average_cents`` and ``mean_abs_cents`` rather than by splitting them into
+    separate entries.
+
+    ``percentage_of_voiced_time`` is a share of the **pitched** time, not of the
+    recording. A recording that is half silence would otherwise report every
+    note at half its real share.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    midi_note: int = Field(ge=0, le=127)
+    note_name: str = Field(pattern=_NOTE_PATTERN)
+    #: Frames on this note times the hop. See ``notes.py`` for why the hop.
+    duration_seconds: float = Field(ge=0)
+    percentage_of_voiced_time: float = Field(ge=0, le=100)
+    frame_count: int = Field(ge=1)
+    #: Signed mean deviation from this note. Negative reads flat.
+    average_cents: float = Field(ge=-50, le=50)
+    #: Mean distance from the note regardless of direction.
+    mean_abs_cents: float = Field(ge=0, le=50)
+    #: Share of this note's frames within :data:`IN_TUNE_CENTS` of it.
+    in_tune_ratio: float = Field(ge=0, le=1)
 
 
 class VocalRange(BaseModel):

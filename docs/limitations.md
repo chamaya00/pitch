@@ -38,6 +38,24 @@ spectrum is an **audio-based estimate from one recording**. Specifically:
   engineering MVP measured against synthetic signals with known fundamentals,
   not a system benchmarked on annotated recordings of real voices.
 
+### Note breakdown
+
+- **It describes detected pitch, not musical notation.** A note in the breakdown
+  is "frames whose nearest semitone was this one", not a note anyone wrote down.
+  Nothing here has been validated against annotated musical transcription, and
+  no claim of note-recognition accuracy is made.
+- **A slide leaves a trace on every note it passes through.** Moving from C4 to
+  E4 produces small entries for C#4 and D4 — a true description of what the
+  pitch did, and not a claim that those notes were sung deliberately.
+- **Short entries are shown, not hidden.** No minimum-duration filter is
+  applied; `frame_count` says how thin the evidence is. A single-frame entry is
+  one 23 ms analysis window.
+- **Percentages are of pitched time.** A recording that is mostly silence still
+  reports shares summing to 100 — of the small part that carried a pitch. Read
+  `voiced_ratio` alongside to know how much of the recording that was.
+- **Monophonic, like everything else here.** Two voices produce a breakdown
+  belonging to neither.
+
 ### Pitch consistency
 
 `Pitch consistency` is the **share of voiced frames within 25 cents of the

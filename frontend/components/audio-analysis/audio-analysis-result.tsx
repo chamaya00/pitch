@@ -1,5 +1,6 @@
 "use client";
 
+import { NoteBreakdown } from "@/components/audio-analysis/note-breakdown";
 import { PitchGraph } from "@/components/audio-analysis/pitch-graph";
 import {
   loudnessRows,
@@ -9,12 +10,18 @@ import {
   stabilityRows,
   type MetricRow,
 } from "@/lib/audio-analysis-metrics";
-import type { AudioSummary, PitchPoint } from "@/types/api";
+import type {
+  AudioSummary,
+  NoteBreakdown as NoteBreakdownData,
+  PitchPoint,
+} from "@/types/api";
 
 interface AudioAnalysisResultProps {
   summary: AudioSummary;
   timeline: PitchPoint[] | null;
   timelineError: string | null;
+  breakdown: NoteBreakdownData | null;
+  breakdownError: string | null;
 }
 
 /**
@@ -33,6 +40,8 @@ export function AudioAnalysisResult({
   summary,
   timeline,
   timelineError,
+  breakdown,
+  breakdownError,
 }: AudioAnalysisResultProps) {
   const range = rangeLabel(summary.range);
   const consistency = summary.stability.in_tune_ratio;
@@ -85,6 +94,8 @@ export function AudioAnalysisResult({
           )}
         </div>
       </section>
+
+      <NoteBreakdown breakdown={breakdown} error={breakdownError} />
 
       <MetricGroup
         id="audio-range"

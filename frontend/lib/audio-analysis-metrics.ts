@@ -18,6 +18,8 @@ import type {
   AudioSummary,
   DetectedRange,
   LoudnessMetrics,
+  NoteBreakdown,
+  NoteSummary,
   PitchStabilityMetrics,
   SpectralMetrics,
 } from "../types/api";
@@ -105,6 +107,13 @@ export function stabilityRows(stability: PitchStabilityMetrics): MetricRow[] {
           cents(stability.mean_cents_deviation),
           "Signed: negative reads flat, positive sharp.",
         ),
+    stability.mean_abs_cents_deviation === null
+      ? unmeasured("Typical distance from a note")
+      : measured(
+          "Typical distance from a note",
+          `${stability.mean_abs_cents_deviation.toFixed(1)} cents`,
+          "How far from a note, ignoring whether it was flat or sharp.",
+        ),
     stability.cents_std === null
       ? unmeasured("Deviation spread")
       : measured(
@@ -168,4 +177,49 @@ export function spectralRows(spectral: SpectralMetrics | null): MetricRow[] {
  */
 export function hasPitchResult(summary: AudioSummary | null): boolean {
   return summary !== null && summary.range !== null;
+}
+
+/* --- Note breakdown -------------------------------------------------------- */
+
+/** One row of the note table, formatted and ready to render. */
+export interface NoteRow {
+  note: string;
+  midi: number;
+  duration: string;
+  share: string;
+  /** 0–100, for the bar width. The formatted share is `share`. */
+  sharePercent: number;
+  inTune: string;
+  /** Signed mean deviation, e.g. `−4 cents`. */
+  deviation: string;
+  frameCount: number;
+}
+
+/**
+ * Format a breakdown for display.
+ *
+ * Ordering is the server's — longest first, lower note first on a tie — and is
+ * deliberately not re-sorted here: two sort implementations is two places for
+ * the order to differ from what the API documented.
+ */
+export function noteRows(notes: NoteSummary[]): NoteRow[] {
+  return notes.map((note) => ({
+    note: note.note_name,
+    midi: note.midi_note,
+    duration: `${note.duration_seconds.toFixed(2)}s`,
+    share: percent(note.percentage_of_voiced_time / 100),
+    sharePercent: note.percentage_of_voiced_time,
+    inTune: percent(note.in_tune_ratio),
+    deviation: cents(note.average_cents),
+    frameCount: note.frame_count,
+  }));
+}
+
+/**
+ * Whether there is a breakdown worth rendering.
+ *
+ * An empty note list is "no notes were detected", not a table with no rows.
+ */
+export function hasNoteBreakdown(breakdown: NoteBreakdown | null): boolean {
+  return breakdown !== null && breakdown.notes.length > 0;
 }

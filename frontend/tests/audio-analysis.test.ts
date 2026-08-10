@@ -25,8 +25,10 @@ import {
 import {
   IN_TUNE_CENTS,
   NOT_MEASURED,
+  hasNoteBreakdown,
   hasPitchResult,
   loudnessRows,
+  noteRows,
   rangeLabel,
   rangeRows,
   spectralRows,
@@ -46,6 +48,8 @@ import type {
   AudioSummary,
   DetectedRange,
   LoudnessMetrics,
+  NoteBreakdown,
+  NoteSummary,
   PitchStabilityMetrics,
   SpectralMetrics,
 } from "../types/api.ts";
@@ -462,4 +466,111 @@ test("a second start does not begin a second measurement", async () => {
   await settle();
 
   assert.equal(starts, 1);
+});
+
+// --- Note breakdown --------------------------------------------------------
+
+function note(overrides: Partial<NoteSummary> = {}): NoteSummary {
+  return {
+    midi_note: 60,
+    note_name: "C4",
+    duration_seconds: 1.84,
+    percentage_of_voiced_time: 31.2,
+    frame_count: 92,
+    average_cents: -4.1,
+    mean_abs_cents: 8.7,
+    in_tune_ratio: 0.84,
+    ...overrides,
+  };
+}
+
+function breakdown(notes: NoteSummary[]): NoteBreakdown {
+  return {
+    recording_id: "b".repeat(32),
+    audio_analysis_id: "a".repeat(32),
+    voiced_seconds: notes.reduce((total, item) => total + item.duration_seconds, 0),
+    total_frames: notes.reduce((total, item) => total + item.frame_count, 0),
+    in_tune_cents: 25,
+    notes,
+  };
+}
+
+test("a note row carries every figure the table shows", () => {
+  const [row] = noteRows([note()]);
+  assert.equal(row.note, "C4");
+  assert.equal(row.midi, 60);
+  assert.equal(row.duration, "1.84s");
+  assert.equal(row.share, "31%");
+  assert.equal(row.inTune, "84%");
+  assert.equal(row.deviation, "−4.1 cents");
+  assert.equal(row.frameCount, 92);
+});
+
+test("the bar width is the real share, not the rounded label", () => {
+  const [row] = noteRows([note({ percentage_of_voiced_time: 31.24 })]);
+  assert.equal(row.share, "31%");
+  assert.equal(row.sharePercent, 31.24);
+});
+
+test("deviation is signed the way a tuner reads", () => {
+  assert.equal(noteRows([note({ average_cents: 4.1 })])[0].deviation, "+4.1 cents");
+  assert.equal(noteRows([note({ average_cents: -4.1 })])[0].deviation, "−4.1 cents");
+  assert.equal(noteRows([note({ average_cents: 0 })])[0].deviation, "0 cents");
+});
+
+test("the server's order is preserved rather than re-sorted", () => {
+  // Deliberately not in duration order: the server decides, and a second sort
+  // here would be a second place for the order to differ.
+  const rows = noteRows([
+    note({ midi_note: 64, note_name: "E4", duration_seconds: 0.5 }),
+    note({ midi_note: 60, note_name: "C4", duration_seconds: 2.0 }),
+  ]);
+  assert.deepEqual(
+    rows.map((row) => row.note),
+    ["E4", "C4"],
+  );
+});
+
+test("a note held for a single frame is still a row", () => {
+  const rows = noteRows([note({ frame_count: 1, duration_seconds: 0.02, percentage_of_voiced_time: 0.4 })]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].frameCount, 1);
+  assert.equal(rows[0].share, "0%");
+});
+
+test("an empty breakdown is not a breakdown", () => {
+  assert.equal(hasNoteBreakdown(null), false);
+  assert.equal(hasNoteBreakdown(breakdown([])), false, "zero notes is not a measurement");
+  assert.equal(hasNoteBreakdown(breakdown([note()])), true);
+});
+
+test("shares across a real breakdown reach 100", () => {
+  const notes = [
+    note({ midi_note: 60, note_name: "C4", percentage_of_voiced_time: 50 }),
+    note({ midi_note: 62, note_name: "D4", percentage_of_voiced_time: 30 }),
+    note({ midi_note: 64, note_name: "E4", percentage_of_voiced_time: 20 }),
+  ];
+  const total = noteRows(notes).reduce((sum, row) => sum + row.sharePercent, 0);
+  assert.ok(Math.abs(total - 100) < 0.01);
+});
+
+test("the typical distance from a note is surfaced beside the signed one", () => {
+  const rows = stabilityRows(stability({ mean_abs_cents_deviation: 19.4 }));
+  const abs = rows.find((row) => row.label === "Typical distance from a note");
+  assert.ok(abs);
+  assert.equal(abs.value, "19.4 cents");
+  assert.ok(abs.hint?.includes("ignoring"));
+
+  // And it still says nothing rather than zero when there was nothing to measure.
+  const none = stabilityRows(stability({ mean_abs_cents_deviation: null }));
+  const missing = none.find((row) => row.label === "Typical distance from a note");
+  assert.equal(missing?.value, NOT_MEASURED);
+  assert.equal(missing?.measured, false);
+});
+
+test("no note-breakdown label reads as a grade", () => {
+  const text = JSON.stringify(noteRows([note()])).toLowerCase();
+  for (const word of ["score", "grade", "rating", "ability", "accuracy"]) {
+    assert.ok(!text.includes(word), `a note row mentioned "${word}"`);
+  }
 });

@@ -55,6 +55,7 @@ from app.services.audio_analysis.errors import (
 )
 from app.services.audio_analysis.features import FrameFeatures, dynamic_range_db, frame_features
 from app.services.audio_analysis.models import (
+    IN_TUNE_CENTS,
     AnalysisSettings,
     AudioMetrics,
     Loudness,
@@ -79,12 +80,6 @@ HOP_SECONDS: Final = 0.0232
 
 #: A recording shorter than this cannot produce a usable frame at any rate.
 MIN_DURATION_SECONDS: Final = 0.25
-
-#: A voiced frame within this many cents of a semitone counts towards
-#: ``in_tune_ratio``. Roughly the point at which a trained listener hears a note
-#: as "in tune" rather than as bent; stated wherever the ratio is shown, because
-#: the number is meaningless without it.
-IN_TUNE_CENTS: Final = 25.0
 
 #: Frames either side of a frame, used for the rolling instability window.
 _STABILITY_WINDOW: Final = 5

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   getAudioAnalysis,
+  getNoteBreakdown,
   getPitchTimeline,
   startAudioAnalysis,
 } from "@/lib/api";
@@ -13,7 +14,7 @@ import {
   type AudioAnalysisRunner,
   type AudioRunState,
 } from "@/lib/analysis-runner";
-import type { PitchPoint } from "@/types/api";
+import type { NoteBreakdown, PitchPoint } from "@/types/api";
 
 /**
  * React wrapper around the audio-analysis runner.
@@ -22,9 +23,10 @@ import type { PitchPoint } from "@/types/api";
  * twice, stopping cleanly — parameterised by the response type. Two copies of
  * that logic would be two places for the overlapping-request bug to live.
  *
- * The timeline is fetched once, after the analysis completes, and only if
- * something asked for it. It is the largest thing this API returns and a caller
- * showing only a range should not pay for it.
+ * The timeline and the note breakdown are fetched once, after the analysis
+ * completes. Both are derived views of the same stored measurement, so they are
+ * requested together rather than in cascading effects, and a failure in either
+ * leaves the other — and the summary numbers — intact.
  */
 
 /** Points requested for the graph. More than a chart can draw is waste. */
@@ -37,6 +39,9 @@ export interface AudioAnalysisController {
   /** The timeline, once fetched. `null` until then. */
   timeline: PitchPoint[] | null;
   timelineError: string | null;
+  /** The note breakdown, once fetched. `null` until then. */
+  breakdown: NoteBreakdown | null;
+  breakdownError: string | null;
 }
 
 function describeError(error: unknown): string {
@@ -54,6 +59,8 @@ export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
   const [state, setState] = useState<AudioRunState>({ status: "idle" });
   const [timeline, setTimeline] = useState<PitchPoint[] | null>(null);
   const [timelineError, setTimelineError] = useState<string | null>(null);
+  const [breakdown, setBreakdown] = useState<NoteBreakdown | null>(null);
+  const [breakdownError, setBreakdownError] = useState<string | null>(null);
   const runnerRef = useRef<AudioAnalysisRunner | null>(null);
 
   useEffect(() => {
@@ -79,12 +86,20 @@ export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
     if (!completed || pointCount === 0) return;
 
     const controller = new AbortController();
+
     getPitchTimeline(recordingId, GRAPH_POINTS, controller.signal)
       .then((response) => setTimeline(response.points))
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         // The graph is an extra; losing it must not take the numbers with it.
         setTimelineError(describeError(error));
+      });
+
+    getNoteBreakdown(recordingId, controller.signal)
+      .then(setBreakdown)
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setBreakdownError(describeError(error));
       });
 
     return () => controller.abort();
@@ -94,5 +109,5 @@ export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
     runnerRef.current?.start();
   }, []);
 
-  return { state, start, timeline, timelineError };
+  return { state, start, timeline, timelineError, breakdown, breakdownError };
 }

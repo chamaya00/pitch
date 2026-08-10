@@ -197,6 +197,55 @@ around 13 000 voiced frames, which no graph can draw.
 Available only once the analysis has completed; otherwise `404`
 `AUDIO_ANALYSIS_NOT_FOUND`.
 
+### `GET /api/v1/recordings/{recording_id}/audio-analysis/notes`
+
+How the recording's pitched time was divided between musical notes.
+
+```json
+{
+  "voiced_seconds": 5.84,
+  "total_frames": 253,
+  "in_tune_cents": 25.0,
+  "notes": [
+    {
+      "midi_note": 60,
+      "note_name": "C4",
+      "duration_seconds": 1.84,
+      "percentage_of_voiced_time": 31.2,
+      "frame_count": 92,
+      "average_cents": -4.1,
+      "mean_abs_cents": 8.7,
+      "in_tune_ratio": 0.84
+    }
+  ]
+}
+```
+
+A companion to `/pitch` rather than a replacement: that path returns the
+timeline frame by frame for drawing, this one returns it aggregated by note for
+reading. Both derive from the same stored measurement, and the aggregation
+happens server-side so a browser never downloads thousands of points to build a
+table of a few rows.
+
+**`percentage_of_voiced_time` is a share of pitched time, not of the
+recording.** Silence and unvoiced audio are excluded from the denominator, so
+the percentages sum to 100. **`duration_seconds` counts one analysis hop per
+frame**, not one frame length — frames overlap, and charging each its full
+length would multiply every duration.
+
+**An empty `notes` list means no notes were detected.** That is not a successful
+measurement of zero notes and must not be rendered as an empty table.
+
+`in_tune_ratio` is the share of a note's frames within `in_tune_cents` of it —
+the same threshold the recording-level figure uses. It is a measurement against
+a stated threshold, not a grade.
+
+Notes are ordered by duration descending, with the lower MIDI note first on a
+tie, so the same analysis always renders the same way.
+
+Available only once the analysis has completed; otherwise `404`
+`AUDIO_ANALYSIS_NOT_FOUND`.
+
 ---
 
 ## Planned

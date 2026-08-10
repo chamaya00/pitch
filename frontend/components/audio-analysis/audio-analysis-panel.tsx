@@ -25,7 +25,8 @@ interface AudioAnalysisPanelProps {
  * nobody notices.
  */
 export function AudioAnalysisPanel({ recordingId }: AudioAnalysisPanelProps) {
-  const { state, start, timeline, timelineError } = useAudioAnalysis(recordingId);
+  const { state, start, timeline, timelineError, breakdown, breakdownError } =
+    useAudioAnalysis(recordingId);
 
   const notMeasurable =
     state.status === "failed" && isNotMeasurable(state.analysis.error_code);
@@ -68,6 +69,8 @@ export function AudioAnalysisPanel({ recordingId }: AudioAnalysisPanelProps) {
           summary={state.analysis.summary}
           timeline={timeline}
           timelineError={timelineError}
+          breakdown={breakdown}
+          breakdownError={breakdownError}
         />
       )}
 

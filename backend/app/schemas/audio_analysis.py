@@ -23,10 +23,12 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.services.audio_analysis.models import (
+    IN_TUNE_CENTS,
     AnalysisSettings,
     AudioAnalysis,
     AudioMetrics,
     Loudness,
+    NoteSummary,
     PitchPoint,
     PitchStability,
     SpectralFeatures,
@@ -241,6 +243,81 @@ class AudioAnalysisResponse(BaseModel):
                 AudioSummaryResponse.from_domain(analysis.metrics) if analysis.metrics else None
             ),
             pitch_point_count=len(analysis.pitch_points),
+        )
+
+
+class NoteSummaryResponse(BaseModel):
+    """How much of the pitched time was spent on one musical note."""
+
+    midi_note: int
+    note_name: str = Field(description="Scientific pitch notation, sharps only, e.g. `C4`.")
+    duration_seconds: float = Field(
+        description=(
+            "Frames on this note times the analysis hop. Frames overlap, so each "
+            "is charged the audio it newly brought rather than its full length."
+        )
+    )
+    percentage_of_voiced_time: float = Field(
+        description=(
+            "Share of the recording's **pitched** time, not of its duration. "
+            "Silence and unvoiced audio are excluded from the denominator, so "
+            "these sum to 100 across the breakdown."
+        )
+    )
+    frame_count: int = Field(
+        description=(
+            "Analysis frames behind this entry. A low count is a short note and "
+            "thin evidence; it is reported rather than hidden."
+        )
+    )
+    average_cents: float = Field(
+        description="Signed mean deviation from this note. Negative reads flat."
+    )
+    mean_abs_cents: float = Field(description="Mean distance from this note, ignoring direction.")
+    in_tune_ratio: float = Field(
+        description=(
+            f"Share of this note's frames within {IN_TUNE_CENTS:.0f} cents of it. "
+            "A measurement with a stated threshold, not a grade."
+        )
+    )
+
+    @classmethod
+    def from_domain(cls, note: NoteSummary) -> "NoteSummaryResponse":
+        return cls(**note.model_dump())
+
+
+class NoteBreakdownResponse(BaseModel):
+    """Where the pitched time went, note by note.
+
+    An **empty `notes` list means no notes were detected**, which is not a
+    successful measurement of zero notes. Render it the way every other
+    unavailable measurement is rendered, not as a table with no rows.
+    """
+
+    recording_id: str
+    audio_analysis_id: str
+    voiced_seconds: float = Field(
+        description="Total pitched time the breakdown divides up, in seconds."
+    )
+    total_frames: int = Field(description="Voiced frames behind the breakdown.")
+    in_tune_cents: float = Field(
+        description="The threshold `in_tune_ratio` is measured against, in cents."
+    )
+    notes: list[NoteSummaryResponse] = Field(
+        description="Longest first; where two are equal, the lower note first."
+    )
+
+    @classmethod
+    def from_domain(
+        cls, analysis: AudioAnalysis, notes: tuple[NoteSummary, ...]
+    ) -> "NoteBreakdownResponse":
+        return cls(
+            recording_id=analysis.recording_id,
+            audio_analysis_id=analysis.audio_analysis_id,
+            voiced_seconds=sum(note.duration_seconds for note in notes),
+            total_frames=sum(note.frame_count for note in notes),
+            in_tune_cents=IN_TUNE_CENTS,
+            notes=[NoteSummaryResponse.from_domain(note) for note in notes],
         )
 
 

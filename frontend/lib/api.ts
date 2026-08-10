@@ -4,6 +4,7 @@ import type {
   ApiErrorBody,
   AudioAnalysisResponse,
   HealthResponse,
+  NoteBreakdown,
   PitchTimeline,
   PublicConfig,
   Recording,
@@ -270,4 +271,21 @@ export function getPitchTimeline(
     `/recordings/${recordingId}/audio-analysis/pitch?max_points=${maxPoints}`,
     { signal, cache: "no-store" },
   );
+}
+
+/**
+ * The note breakdown: where the pitched time went, aggregated by note.
+ *
+ * Aggregated server-side on purpose. The timeline behind it runs to thousands
+ * of points, and downloading them to build a table of a few rows would be a
+ * megabyte spent on arithmetic the server already did.
+ */
+export function getNoteBreakdown(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<NoteBreakdown> {
+  return apiFetch<NoteBreakdown>(`/recordings/${recordingId}/audio-analysis/notes`, {
+    signal,
+    cache: "no-store",
+  });
 }

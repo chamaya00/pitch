@@ -113,6 +113,62 @@ no note.
 The clarity figure is a measurement (the normalised peak height, 0–1), not an
 invented confidence score.
 
+### Note breakdown
+
+`backend/app/services/audio_analysis/notes.py`. A **pure aggregation of the
+pitch timeline** — it decodes nothing, detects nothing and re-measures nothing.
+Every frame it sees has already passed the clarity gate, the octave-outlier
+rejection and the note conversion. There is one pitch detector in this system
+and it is upstream of here.
+
+It answers one question: *how much of the pitched time went to each note?*
+
+**Duration is counted in hops, not frames.** Analysis frames overlap — 2048
+samples advancing 512 at a time — so charging each frame its full length would
+count the overlap four times over and report durations several times longer than
+the recording. Each frame is charged one hop, the audio it newly brought:
+
+```
+duration_seconds = frame_count × (hop_length_samples / sample_rate_hz)
+```
+
+which makes the note durations sum to the voiced time exactly.
+
+**Voiced time is the denominator, never the recording's duration.** Unvoiced
+audio never reaches the timeline, so voiced time is simply `frame count × hop`:
+
+```
+percentage_of_voiced_time = 100 × note_frames / total_voiced_frames
+```
+
+A recording that is half silence would otherwise report every note at half its
+real share and the shares would sum to 50. As defined, they sum to 100.
+
+**A note is a semitone, not a frequency.** Frames group by nearest MIDI note, so
+C4 at −12, −5, +4 and +8 cents is one entry for C4 — not four. How far those
+frames sat from it is what `average_cents` (signed) and `mean_abs_cents`
+(absolute) report, and `in_tune_ratio` is the share within
+[`IN_TUNE_CENTS`](#aggregates-as-implemented) — the same 25-cent threshold the
+recording-level figure uses, imported from the domain rather than restated so
+the two cannot drift.
+
+**No minimum duration is applied.** This is deliberate and it is the one place
+the feature could have quietly lied. Transient artefacts were already removed
+upstream by rules with tests behind them; adding a second threshold here would
+have silently deleted short notes that are real. A passing note held for two
+frames appears with `frame_count: 2` and a share near zero, which states how
+thin the evidence is rather than hiding it. On the two-tone test fixture this
+shows up as a single `A3` frame at the boundary between A4 and C4 — one frame,
+0.02 s, 0% — visible in the breakdown and correctly excluded from the range.
+
+**Ordering is total.** Longest first, lower note first on a tie. Without the
+tie-break the order would follow dictionary iteration and the same analysis
+could render differently between runs.
+
+**The range is not affected.** The breakdown is a separate view over the same
+timeline; `_sustained` and `_vocal_range` are untouched, and the range remains
+the authoritative one.
+
 ### Conversions and smoothing
 
 Conversions live in `frontend/lib/pitch.ts` and use the same reference as the
@@ -324,6 +380,62 @@ what happened and the range describes what was sung.
 Every one of these is `null` when the signal could not support it. A recording
 with nothing voiced has no range and no deviation; it does not have a range of
 zero semitones.
+
+### Note breakdown
+
+`backend/app/services/audio_analysis/notes.py`. A **pure aggregation of the
+pitch timeline** — it decodes nothing, detects nothing and re-measures nothing.
+Every frame it sees has already passed the clarity gate, the octave-outlier
+rejection and the note conversion. There is one pitch detector in this system
+and it is upstream of here.
+
+It answers one question: *how much of the pitched time went to each note?*
+
+**Duration is counted in hops, not frames.** Analysis frames overlap — 2048
+samples advancing 512 at a time — so charging each frame its full length would
+count the overlap four times over and report durations several times longer than
+the recording. Each frame is charged one hop, the audio it newly brought:
+
+```
+duration_seconds = frame_count × (hop_length_samples / sample_rate_hz)
+```
+
+which makes the note durations sum to the voiced time exactly.
+
+**Voiced time is the denominator, never the recording's duration.** Unvoiced
+audio never reaches the timeline, so voiced time is simply `frame count × hop`:
+
+```
+percentage_of_voiced_time = 100 × note_frames / total_voiced_frames
+```
+
+A recording that is half silence would otherwise report every note at half its
+real share and the shares would sum to 50. As defined, they sum to 100.
+
+**A note is a semitone, not a frequency.** Frames group by nearest MIDI note, so
+C4 at −12, −5, +4 and +8 cents is one entry for C4 — not four. How far those
+frames sat from it is what `average_cents` (signed) and `mean_abs_cents`
+(absolute) report, and `in_tune_ratio` is the share within
+[`IN_TUNE_CENTS`](#aggregates-as-implemented) — the same 25-cent threshold the
+recording-level figure uses, imported from the domain rather than restated so
+the two cannot drift.
+
+**No minimum duration is applied.** This is deliberate and it is the one place
+the feature could have quietly lied. Transient artefacts were already removed
+upstream by rules with tests behind them; adding a second threshold here would
+have silently deleted short notes that are real. A passing note held for two
+frames appears with `frame_count: 2` and a share near zero, which states how
+thin the evidence is rather than hiding it. On the two-tone test fixture this
+shows up as a single `A3` frame at the boundary between A4 and C4 — one frame,
+0.02 s, 0% — visible in the breakdown and correctly excluded from the range.
+
+**Ordering is total.** Longest first, lower note first on a tie. Without the
+tie-break the order would follow dictionary iteration and the same analysis
+could render differently between runs.
+
+**The range is not affected.** The breakdown is a separate view over the same
+timeline; `_sustained` and `_vocal_range` are untouched, and the range remains
+the authoritative one.
 
 ### Conversions
 

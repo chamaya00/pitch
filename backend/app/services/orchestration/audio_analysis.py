@@ -39,8 +39,10 @@ from app.services.audio_analysis.errors import AudioAnalysisError
 from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
+    NoteSummary,
     new_audio_analysis_id,
 )
+from app.services.audio_analysis.notes import frame_duration_seconds, summarise_notes
 from app.services.audio_analysis.repository import (
     AudioAnalysisRepository,
     AudioAnalysisRepositoryError,
@@ -128,6 +130,35 @@ class AudioAnalysisService:
         for analysis in self._analyses.list_for_recording(recording_id):
             return analysis
         return None
+
+    def notes(self, recording_id: str) -> tuple[NoteSummary, ...] | None:
+        """The note breakdown of a recording's completed audio analysis.
+
+        Derived from the stored pitch timeline on read rather than persisted
+        alongside it: it is a pure function of points that are already on disk,
+        and storing it too would be a second copy to keep consistent for a
+        computation that costs one pass over a few thousand values.
+
+        ``None`` when there is no completed analysis to break down — which the
+        caller must distinguish from an empty tuple, meaning the analysis
+        finished and found no notes.
+
+        Raises:
+            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown.
+        """
+        analysis = self.current(recording_id)
+        if analysis is None or analysis.status is not AudioAnalysisStatus.COMPLETED:
+            return None
+        if analysis.metrics is None:
+            return None
+
+        settings = analysis.metrics.settings
+        return summarise_notes(
+            analysis.pitch_points,
+            frame_seconds=frame_duration_seconds(
+                settings.hop_length_samples, settings.sample_rate_hz
+            ),
+        )
 
     async def start(self, recording_id: str) -> StartedAudioAnalysis:
         """Return the analysis to work with, creating one only if needed.
