@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5) |
 
 ## Phase 0 — delivered
 
@@ -141,16 +141,33 @@ Delivered in 10.4 — *frontend error boundaries*:
 - Expected API failures are unchanged: they are still handled inline by the
   panel that made the call, and do not reach these boundaries.
 
+Delivered in 10.5 — *deployment hardening*:
+
+- An nginx proxy is the **only** published port. The API, the web app and
+  **PostgreSQL** — which previously published 5432 to the host with a default
+  password — are now internal.
+- That is what makes `RATE_LIMIT_TRUSTED_PROXIES=1` sound, and it was measured:
+  five forged-`X-Forwarded-For` requests sent *directly* to the backend created
+  five identities against a limit of two; the same five through the proxy
+  created none.
+- An edge body cap equal to `MAX_AUDIO_SIZE_MB`, returning the API's own
+  `FILE_TOO_LARGE` envelope. An oversized upload is refused in 0.24 ms, reaches
+  no application worker, mints no identity and spends no quota.
+- `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` on every
+  response. No CSP and no HSTS, both deferred for stated reasons.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
 considered and rejected for this slice — adding them while deferring reset,
 verification and rate limiting would make the system *less* safe than 128 random
 bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
-in Phase 10 are deployment hardening (there is no reverse proxy, no TLS
-termination and no edge body cap), a retention policy for unused identities,
-performance work, and every credential feature 10.2 deferred. Error pages
-landed in 10.4.
+in Phase 10 are TLS termination (still an external responsibility — the proxy
+speaks HTTP and claims no HSTS), a Content-Security-Policy, a retention policy
+for unused identities, a shared rate-limit counter for multi-worker
+deployments, performance work, and every credential feature 10.2 deferred.
+Error pages landed in 10.4; the proxy, the internal network and the edge body
+cap landed in 10.5.
 
 The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while

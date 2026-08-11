@@ -314,6 +314,31 @@ not know:
   those are what failed. Recordings and keys are untouched by any of this;
   nothing is stored in the page.
 
+## What the deployment does and does not protect
+
+The bundled `docker-compose.yml` puts an nginx proxy in front of everything and
+publishes nothing else. What that does **not** give you:
+
+- **No TLS.** The proxy speaks HTTP. Terminating TLS — and therefore protecting
+  the bearer key in transit — is an external responsibility, and the proxy
+  deliberately advertises no HSTS rather than implying otherwise. **Over plain
+  HTTP a key can be read by anyone on the network path.**
+- **The rate limiter is still per process.** Running several API workers
+  multiplies the effective limit by the worker count. The proxy does not add a
+  shared counter and does not rate-limit itself.
+- **The trust boundary is the network, not a check.** The backend trusts
+  `X-Forwarded-For` because only the proxy can reach it. If a deployment
+  republishes the backend's port, or runs it on a shared network, that
+  assumption is void and the per-address limit becomes forgeable.
+- **No Content-Security-Policy.** Adding one that is both useful and compatible
+  with Next.js needs per-request nonces; a speculative one would be bypassable
+  or would break the app.
+- **The database password has a development default.** The database is not
+  reachable from the host, but `POSTGRES_PASSWORD` should be set for anything
+  real.
+- **It is not a defence against a distributed attacker.** The proxy adds no
+  connection limiting, no WAF and no bot detection.
+
 ## Songs and mixed audio (Phase 8+)
 
 Pitch detection on a full mix is substantially less reliable than on an isolated

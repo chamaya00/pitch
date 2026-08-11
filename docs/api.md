@@ -865,6 +865,12 @@ on the analysis record and returned by `GET` inside a `200` response, never as
 an HTTP error status. `ANALYSIS_NOT_FOUND` is the exception — it describes the
 request, and is a real 404.
 
+`FILE_TOO_LARGE` has two sources since Step 10.5, and they are deliberately
+indistinguishable to a client. In the bundled deployment the edge proxy refuses
+an oversized body before it reaches the application, and answers with byte-for-
+byte the same envelope the application would have returned. Nothing downstream
+needs to know which layer refused.
+
 Rate limiting (Step 10.3) adds one:
 
 | `error_code` | HTTP | Meaning |

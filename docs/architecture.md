@@ -169,6 +169,57 @@ Three rules the code enforces rather than documents:
 - **A credential belonging to somebody else is "not found", not "refused"**, so
   the endpoint cannot be used to discover that an id is real.
 
+### Deployment topology (10.5)
+
+```
+client ──▶ proxy :80  ──▶ frontend :3000
+   (the only published port)  └▶ backend :8000 ──▶ db :5432
+```
+
+**The proxy is the only public entry point.** Before 10.5 the compose file
+published three ports: the frontend, the API, and **PostgreSQL itself** with a
+default password — which put every recording one connection away from anyone who
+could reach the host, bypassing every ownership predicate in the API. All three
+are now internal; only nginx publishes.
+
+That is not tidiness, it is what makes `RATE_LIMIT_TRUSTED_PROXIES=1` sound.
+Measured during this step against the real stack, with a limit of two
+identities: five requests sent **directly** to the backend carrying a forged
+`X-Forwarded-For` created five identities, while the same five through the proxy
+created none. The backend trusts the header because the only thing that can
+reach it is the proxy. Republish its port and that stops being true.
+
+The proxy **sets** `X-Forwarded-For` to `$remote_addr` rather than appending
+with `$proxy_add_x_forwarded_for`, so nothing the client sent is carried
+through. One entry written by one trusted hop is exactly the one entry the
+backend is configured to trust.
+
+**Two body caps, deliberately equal.** `client_max_body_size` at the edge and
+`MaxBodySizeMiddleware` in the application are both kept at `MAX_AUDIO_SIZE_MB`.
+The first attempt made the edge 2 MiB larger so the application would stay the
+primary limit — and a 51 MiB upload was then buffered by nginx, forwarded, and
+refused mid-stream by the middleware, which nginx reported as **502 Bad
+Gateway**. Any gap between the caps is a band of request sizes that gets a worse
+answer than before the proxy existed. With them equal there is no gap: nginx
+refuses before a byte reaches Python, and returns the API's own
+`FILE_TOO_LARGE` envelope so nothing downstream has to learn that some 413s look
+different. Rejection costs 0.24 ms and transfers no body.
+
+The application's middleware is untouched and is still the only limit for
+anything that reaches it directly — which is what defence in depth means here.
+
+**Headers.** `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options`,
+set at server level with `always`. No `add_header` appears in any `location`:
+nginx's inheritance is replace-not-merge, and an earlier version of the config
+set one header inside the 413 handler and thereby dropped the other two from
+that response. No Content-Security-Policy — Next.js emits inline scripts, so a
+useful one needs per-request nonces, and a speculative one would either be
+bypassable or break the product.
+
+**TLS is not provided and is not implied.** The proxy speaks HTTP and advertises
+no HSTS, because advertising transport security from a plaintext listener would
+be a false claim. Terminating TLS is an external responsibility.
+
 ### Rate limiting (10.3)
 
 Added against a measurement, not a worry. Every owner-scoped route mints an

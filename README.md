@@ -137,7 +137,12 @@ if it reads "API unavailable", the backend is not running or
 docker compose up --build
 ```
 
-Starts PostgreSQL, the backend on `:8000` and the frontend on `:3000`.
+Starts PostgreSQL, the backend, the frontend and an nginx proxy. **The proxy is
+the only published port** — open <http://localhost>. The API, the web app and
+the database are reachable only on the internal network, which is what makes the
+backend's trusted-proxy setting safe; see
+[docs/architecture.md](docs/architecture.md). The proxy speaks HTTP: TLS
+termination is an external responsibility.
 PostgreSQL is the source of truth for recordings, analyses, owners and the
 credentials that resolve to them; the backend applies its migrations at startup
 and will not serve the recording endpoints without it.

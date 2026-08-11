@@ -1,14 +1,29 @@
 name: vocallens
 
+# Topology, since Step 10.5:
+#
+#   client -> proxy (the only published port) -> frontend
+#                                             -> backend -> db
+#
+# Only `proxy` publishes a port. The backend, the frontend and PostgreSQL are
+# reachable by service name on the internal compose network and by nothing else.
+# That is not decoration: it is what makes RATE_LIMIT_TRUSTED_PROXIES=1 sound,
+# because the backend's immediate peer can then only ever be the proxy. Republish
+# the backend's port and that assumption is void — a client could then reach it
+# directly and set its own X-Forwarded-For.
+
 services:
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: vocallens
-      POSTGRES_PASSWORD: vocallens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vocallens}
       POSTGRES_DB: vocallens
-    ports:
-      - "5432:5432"
+    # No published port. Until Step 10.5 this published 5432 to the host with a
+    # default password, which put the database — and therefore every recording,
+    # bypassing every ownership predicate in the API — one connection away from
+    # anyone who could reach the host. Use `docker compose exec db psql` for
+    # maintenance instead.
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,14 +37,26 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: postgresql://vocallens:vocallens@db:5432/vocallens
+      DATABASE_URL: postgresql://vocallens:${POSTGRES_PASSWORD:-vocallens}@db:5432/vocallens
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MAX_AUDIO_SIZE_MB: ${MAX_AUDIO_SIZE_MB:-50}
       MAX_AUDIO_DURATION_SECONDS: ${MAX_AUDIO_DURATION_SECONDS:-300}
-      CORS_ORIGINS: http://localhost:3000
+      # Same origin as the frontend now that both are served through the proxy,
+      # so CORS no longer carries the identity header across origins. Kept
+      # configured because a deployment may still front the two separately.
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost}
       STORAGE_ROOT: /var/lib/vocallens
-    ports:
-      - "8000:8000"
+      # Exactly one trusted hop: the proxy sets X-Forwarded-For to the peer it
+      # saw and discards whatever the client sent, so the single value in that
+      # header is the real client. Any larger number would start trusting
+      # entries no proxy in this deployment wrote.
+      RATE_LIMIT_TRUSTED_PROXIES: "1"
+      RATE_LIMIT_NEW_IDENTITIES: ${RATE_LIMIT_NEW_IDENTITIES:-20}
+      RATE_LIMIT_NEW_IDENTITIES_WINDOW_SECONDS: ${RATE_LIMIT_NEW_IDENTITIES_WINDOW_SECONDS:-3600}
+      RATE_LIMIT_COSTLY_REQUESTS: ${RATE_LIMIT_COSTLY_REQUESTS:-60}
+      RATE_LIMIT_COSTLY_REQUESTS_WINDOW_SECONDS: ${RATE_LIMIT_COSTLY_REQUESTS_WINDOW_SECONDS:-3600}
+    expose:
+      - "8000"
     volumes:
       # Recordings must outlive the container; without this they vanish on
       # every rebuild.
@@ -48,11 +75,41 @@ services:
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    ports:
-      - "3000:3000"
+        # The browser now reaches the API through the proxy on the public
+        # origin, so this is no longer the backend's own address. It is inlined
+        # at build time, which is why it is a build arg rather than an env var.
+        NEXT_PUBLIC_API_URL: ${PUBLIC_ORIGIN:-http://localhost}
+    expose:
+      - "3000"
     depends_on:
       - backend
+
+  proxy:
+    image: nginx:1.27-alpine
+    environment:
+      VL_LISTEN_PORT: "80"
+      VL_ACCESS_LOG: /var/log/nginx/access.log
+      VL_BACKEND: backend:8000
+      VL_FRONTEND: frontend:3000
+      # Kept EQUAL to the backend's MAX_AUDIO_SIZE_MB, not larger. A gap
+      # between them is a range of body sizes that nginx forwards and the
+      # application then refuses mid-stream, which nginx reports as 502 — see
+      # the template for the measurement. `test_deployment.py` fails if the two
+      # ever drift apart.
+      VL_EDGE_MAX_BODY_MB: ${MAX_AUDIO_SIZE_MB:-50}
+    ports:
+      - "${PUBLIC_PORT:-80}:80"
+    volumes:
+      # The official image runs envsubst over everything here at start-up.
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   db_data:
