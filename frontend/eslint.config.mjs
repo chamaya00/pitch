@@ -13,6 +13,18 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    rules: {
+      // A leading underscore marks a parameter that exists to document the
+      // contract rather than to be used. `presentRouteFailure(_error)` is the
+      // clearest example: the boundary *is* handed an error, and the point of
+      // that function is that it throws it away.
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;

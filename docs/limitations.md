@@ -296,6 +296,24 @@ many costly requests one identity may make. What that does **not** guarantee:
 - **Reading is never limited**, so it is not a defence against someone reading
   their own history repeatedly.
 
+## When something breaks
+
+The app has deliberate failure states, and they are honest about what they do
+not know:
+
+- **A failure state cannot tell you what went wrong.** It says a page failed and
+  offers a retry, because the underlying error may contain a stack trace, a
+  server path or a key, and none of that is shown. If a failure keeps
+  happening, the detail is in the server's logs, not on the screen.
+- **"Try again" is a genuine retry, not a fix.** It re-attempts the render. A
+  failure with a persistent cause will simply happen again.
+- **A wrong address is not an error.** The not-found page offers no retry
+  because there is nothing to retry.
+- **The global failure state is a last resort.** If the application shell itself
+  fails, the page loses its header, footer and fonts — that is the point, since
+  those are what failed. Recordings and keys are untouched by any of this;
+  nothing is stored in the page.
+
 ## Songs and mixed audio (Phase 8+)
 
 Pitch detection on a full mix is substantially less reliable than on an isolated

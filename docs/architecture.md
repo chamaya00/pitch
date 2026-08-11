@@ -211,6 +211,41 @@ against a distributed attacker. A database-backed counter was rejected for this
 slice: it would add a write to every request in order to bound the cost of
 writes.
 
+### Frontend error boundaries (10.4)
+
+Three App Router files, all deliberately thin:
+
+| File | Catches | Shell |
+| --- | --- | --- |
+| `app/error.tsx` | a render failure inside a page | keeps header and footer |
+| `app/not-found.tsx` | an address that matches nothing | keeps header and footer |
+| `app/global-error.tsx` | the root layout itself failing | replaces everything |
+
+They present a failure and offer a way out. They contain no domain, API,
+identity, credential or rate-limit logic, make no requests, and do not log.
+**Expected API failures never reach them** — a 404 for a recording, a 429, a
+provider being down are still handled by `lib/*-errors.ts` and the panel that
+made the call, which sets an error state rather than throwing during render. A
+handled failure arriving at a boundary would be a bug in the panel.
+
+**The error object is never rendered.** All three call
+`lib/error-presentation.ts`, which takes the error and discards it, returning
+fixed copy. An exception message can carry a stack trace, a filesystem path, a
+database DSN, a provider key or an owner id; the safest guarantee that none of
+it reaches the screen is for the screen never to depend on it. Next's `digest`
+is withheld for the same reason the owner id is: a reader who cannot act on an
+internal identifier should not be shown one.
+
+`global-error.tsx` is the odd one out on purpose. It replaces the root layout,
+so it assumes nothing the layout provides: no Tailwind (those classes and the
+design tokens live in `globals.css`, which the layout imports), no `next/font`,
+no `next/link`, no site chrome. Its palette is inline, both themes come from a
+`prefers-color-scheme` media query, and its "go home" is a plain anchor so
+recovery is a real navigation rather than a client-side transition through a
+router that may be part of the problem. There are no React providers anywhere
+in this codebase to miss, but the rule is written down so the next person adding
+one knows this file must keep working without it.
+
 ### The identity seam
 
 Every domain service takes `owner_id: uuid.UUID` and nothing else. No service
