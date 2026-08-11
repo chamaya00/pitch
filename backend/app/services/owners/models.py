@@ -7,15 +7,19 @@ recordings to show, and building a real account system to answer that question
 would be a larger, separate piece of work with its own security surface.
 
 What it does provide is a clean path to Phase 10. An ``Owner`` has a stable id
-that recordings reference; adding real authentication later means adding a
-table of credentials that resolves *to* an owner id, and nothing that already
-points at an owner has to change.
+that recordings reference; Step 10.2 added the table of credentials that
+resolves *to* that id, and nothing that already points at an owner changed.
+
+The token functions here are still where a key is minted and hashed —
+``services/owners/credentials.py`` builds on them — because the shape of the
+value did not change when its home did.
 
 What it does **not** provide, stated plainly so nobody mistakes it for more:
 
-* Anyone holding the token is the owner. There is no second factor and no way
-  to revoke one.
-* Losing the token loses the history. There is no recovery, because there is no
+* Anyone holding a key is the owner. There is no second factor. A key can be
+  revoked since 10.2, but revocation removes a way in — it cannot undo what
+  somebody holding it already read.
+* Losing every key loses the history. There is no recovery, because there is no
   account to recover.
 * It is not a defence against a determined attacker enumerating tokens — the
   128-bit random value makes that impractical, but the guarantee is the entropy,

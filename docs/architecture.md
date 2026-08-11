@@ -67,7 +67,7 @@ See [audio-analysis.md](audio-analysis.md).
 | `app/db/migrate.py` | Numbered `.sql` files, applied once, checksum-verified |
 | `app/db/migrations/` | The schema, in order |
 | `app/db/import_filesystem.py` | One-off import of pre-7M JSON documents |
-| `app/services/owners/` | Owner identity: model, repository, the resolver seam, deletion |
+| `app/services/owners/` | Owner identity: model, credentials, repository, the resolver, deletion |
 | `app/services/comparison/` | Comparing two recordings: pure arithmetic, eligibility, the owner-scoped query |
 | `app/services/progress/` | Measurements over time: the owner-scoped query, the window, the pure series build |
 | `app/services/audio/` | Upload validation, metadata, filesystem storage of the bytes |
@@ -138,33 +138,59 @@ client, and no frontend is trusted to hide anything. A recording belonging to
 somebody else answers `404`, identical to one that does not exist, because a
 different answer would confirm an id is real to somebody with no right to know.
 
-An owner is a server-generated bearer token and a row: no password, no email, no
-session, no login. **This is ownership, not authentication**, and it is
-documented that way rather than dressed up as more. It gives Phase 10 a clean
-path — real credentials would resolve *to* an owner id, and nothing pointing at
-an owner has to change. The token is stored SHA-256-hashed, which is appropriate
-precisely because it is a 128-bit random value rather than a human-chosen
-secret. See `app/services/owners/models.py` for the limits, stated plainly.
+An owner is a row, and the ways in to it are rows in `credentials`. Every one of
+them is a server-generated bearer key: no password, no email, no session, no
+login. **This is ownership, not authentication**, and it is documented that way
+rather than dressed up as more. Keys are stored SHA-256-hashed, which is
+appropriate precisely because they are 128-bit random values rather than
+human-chosen secrets. See `app/services/owners/credentials.py` for the limits,
+stated plainly.
+
+### Credentials belong to an owner (10.2)
+
+Until 10.2 an owner *was* a key — one column, `owners.token_hash`. That meant an
+identity could not have a second way in, could not label the ways it had, and
+could not revoke one without losing everything it owned.
+
+A credential now **belongs to** an owner. Several per identity, each named, each
+revocable, all resolving to the same `owner_id` that already owns the
+recordings. The migration copies every existing hash into `credentials` and
+drops the column in the same transaction, so every key that worked before works
+after — and a dead column that used to be the identity, still carrying a UNIQUE
+index, is not left behind to be read as authoritative later.
+
+Three rules the code enforces rather than documents:
+
+- **Resolution is an indexed lookup of a hash.** No credential is ever compared
+  in Python, so there is no secret-dependent branch whose timing could leak.
+- **The last credential cannot be revoked**, under a row lock on the owner — two
+  concurrent revocations cannot strand an identity between them. Somebody who
+  wants their data gone deletes the identity, which is honest and different.
+- **A credential belonging to somebody else is "not found", not "refused"**, so
+  the endpoint cannot be used to discover that an id is real.
 
 ### The identity seam
 
 Every domain service takes `owner_id: uuid.UUID` and nothing else. No service
-knows what a token is, how a header is spelled, or how identity was established
-— identity is established in exactly one place, and
+knows what a key is, how a header is spelled, or how identity was established —
+identity is established in exactly one place, and
 `services/owners/identity.py` states that as a protocol rather than leaving it
 as a property the next change could quietly lose.
 
-A real credential-based resolver is therefore a **second implementation of one
-function**, resolving to the *same* `owner_id` that already owns the recordings.
-No migration would reassign anything, and nothing in `services/recordings`,
-`services/analysis`, `services/audio_analysis`, `services/comparison` or
-`services/progress` would change.
+Step 10.1 declared that protocol and consumed it nowhere: the API called the
+bearer-key function directly, so the seam was documentation-shaped. 10.2 made it
+code-shaped. `BearerKeyResolver` is the one implementation, the API depends on
+the protocol, and `tests/test_resolver.py` substitutes a resolver that
+establishes identity a completely different way and then drives the whole
+owner-scoped product through it.
 
-One schema constraint would need relaxing first, recorded so it is not
-rediscovered the hard way: `owners.token_hash` is `NOT NULL UNIQUE`, so every
-owner must currently carry a bearer key. An owner who signs in with credentials
-and never held one needs that column made nullable — additive, one migration,
-and deliberately not done until a credential system exists to justify it.
+A password or OAuth resolver is therefore a **second implementation of one
+method**, resolving to the *same* `owner_id` that already owns the recordings.
+No migration reassigns anything, and nothing in `services/recordings`,
+`services/analysis`, `services/audio_analysis`, `services/comparison` or
+`services/progress` changes. The schema constraint that used to stand in the way
+is gone: `owners` no longer carries a key, so an owner who signs in some other
+way needs no column relaxed and no placeholder key invented.
 
 ### Portability and deletion (7P)
 
@@ -327,7 +353,7 @@ category errors, and this table exists to make them visible.
 | Upload, validation, metadata | `services/audio/`, `routes/recordings.py` | Deterministic | Not transcoding; format is decided by content, never by extension |
 | Recording bytes | `services/audio/storage.py` (filesystem) | Deterministic | Not in the database |
 | Recording metadata, analyses, owners | `db/`, `services/*/postgres_repository.py` | PostgreSQL | Not an ORM; not the filesystem |
-| Owner identity | `api/owner.py`, `services/owners/` | PostgreSQL | **Not authentication**: no password, no revocation, no recovery |
+| Owner identity | `api/owner.py`, `services/owners/` | PostgreSQL | **Not authentication**: bearer keys, no password, no recovery |
 | Ownership enforcement | Every repository read, in SQL | PostgreSQL | Not frontend filtering; not a `403` |
 | Identity portability and deletion | `services/owners/`, `routes/identity.py` | PostgreSQL + browser | Not authentication; the server cannot recover a lost key |
 | Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed |

@@ -243,13 +243,22 @@ becoming a better singer.
 Recordings are linked to an **anonymous identifier stored in the browser**, not
 to an account:
 
-- **There is no login and no password.** Anyone holding the identifier is the
-  owner of those recordings.
+- **There is no login and no password.** Anyone holding a key is the owner of
+  those recordings.
 - **The server cannot recover a lost key.** Only a SHA-256 hash of it is
   stored, so there is no "forgot my key" and no reset. What the product does
   give you is the key itself, shown in the browser that holds it: save it and
-  you can paste it on another device; lose it without saving it and the history
-  is unreachable for good.
+  you can paste it on another device; lose every key without saving one and the
+  history is unreachable for good.
+- **You can hold several keys, and revoke one.** An identity can have more than
+  one key — for another device, or a spare — each named for your own benefit.
+  Revoking one removes a way in and no data. **This is still not authentication**:
+  every key is a bearer credential, so revocation protects against a key you no
+  longer want in circulation, not against somebody who already copied your
+  recordings while holding it.
+- **The last key cannot be revoked.** Removing it would leave the recordings
+  owned and unreachable. Deleting the identity is the way to get rid of
+  everything, and it is a different action.
 - **You can delete everything.** "Delete everything" under *Your key* removes
   every recording, every measurement, every generated interpretation and the
   stored audio itself, irreversibly.

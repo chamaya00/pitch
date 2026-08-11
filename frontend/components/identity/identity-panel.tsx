@@ -2,17 +2,26 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { deleteIdentity, getIdentity } from "@/lib/api";
+import {
+  createCredential,
+  deleteIdentity,
+  getIdentity,
+  revokeCredential,
+} from "@/lib/api";
 import {
   DELETE_CONFIRMATION,
+  MAX_KEY_LABEL,
   deletionWarning,
+  describeKey,
   formatIssued,
   isDeletionConfirmed,
   recoveryKeyProblem,
+  revocationProblem,
+  revocationWarning,
   summarise,
 } from "@/lib/identity";
 import { clearOwnerToken, readOwnerToken, storeOwnerToken } from "@/lib/owner";
-import type { Identity } from "@/types/api";
+import type { CreatedCredential, Credential, Identity } from "@/types/api";
 
 /**
  * Where the deletion report waits out the page reload.
@@ -47,6 +56,16 @@ type State =
   | { status: "ready"; identity: Identity }
   | { status: "error"; message: string };
 
+/** What the keys section is doing. Only one of these can be true at a time. */
+type KeyAction =
+  | { kind: "idle" }
+  | { kind: "adding" }
+  | { kind: "working" }
+  /** A key that has just been created and not yet acknowledged as saved. */
+  | { kind: "created"; credential: CreatedCredential }
+  | { kind: "confirming"; credential: Credential }
+  | { kind: "failed"; message: string };
+
 /**
  * Your recovery key, and the ability to delete everything.
  *
@@ -78,6 +97,9 @@ export function IdentityPanel() {
   const [confirming, setConfirming] = useState(false);
   const [confirmation, setConfirmation] = useState("");
   const [deleted, setDeleted] = useState<string | null>(null);
+  const [keys, setKeys] = useState<Credential[] | null>(null);
+  const [keyAction, setKeyAction] = useState<KeyAction>({ kind: "idle" });
+  const [label, setLabel] = useState("");
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
@@ -92,6 +114,7 @@ export function IdentityPanel() {
         // Inside this callback it is neither.
         const message = takeRememberedDeletion();
         if (message !== null) setDeleted(message);
+        setKeys(identity.credentials);
         setState({ status: "ready", identity });
       })
       .catch((error: unknown) => {
@@ -155,7 +178,50 @@ export function IdentityPanel() {
       });
   };
 
+  const addKey = () => {
+    setKeyAction({ kind: "working" });
+    createCredential(label.trim())
+      .then((credential) => {
+        setLabel("");
+        // The key is in this response and nowhere else, ever again — so it is
+        // held in state until the reader says they have saved it, rather than
+        // shown in a toast that a stray click dismisses.
+        setKeyAction({ kind: "created", credential });
+      })
+      .catch((error: unknown) => {
+        setKeyAction({
+          kind: "failed",
+          message:
+            error instanceof Error ? error.message : "The key could not be added.",
+        });
+      });
+  };
+
+  const revoke = (credential: Credential) => {
+    setKeyAction({ kind: "working" });
+    revokeCredential(credential.credential_id)
+      .then((remaining) => {
+        setKeys(remaining);
+        setKeyAction({ kind: "idle" });
+        // Revoking the key this browser holds is allowed, and leaves it holding
+        // a value the server no longer knows. Reloading lands on a truthful
+        // page — a fresh empty identity — instead of one that looks signed in.
+        if (credential.current) {
+          clearOwnerToken();
+          window.location.reload();
+        }
+      })
+      .catch((error: unknown) => {
+        setKeyAction({
+          kind: "failed",
+          message:
+            error instanceof Error ? error.message : "The key could not be removed.",
+        });
+      });
+  };
+
   const storedKey = readOwnerToken();
+  const busy = keyAction.kind === "working";
 
   return (
     <section
@@ -273,6 +339,176 @@ export function IdentityPanel() {
                 <div className="mt-3">
                   <Button onClick={restore}>Use this key</Button>
                 </div>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-border bg-surface p-5">
+            <h3 className="text-sm font-medium">Keys to this history</h3>
+            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+              Every key here reaches the same recordings. Adding one does not
+              make a second account — it is another way in, for another device or
+              for a copy kept somewhere safe. Removing one takes away a way in
+              and nothing else.
+            </p>
+
+            <ul className="mt-4 space-y-2">
+              {(keys ?? []).map((credential) => (
+                <li
+                  key={credential.credential_id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-surface-raised px-3 py-2"
+                >
+                  <span className="text-sm">
+                    {describeKey(credential)}
+                    {credential.current && (
+                      <span className="ml-2 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
+                        In use here
+                      </span>
+                    )}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    disabled={busy || revocationProblem(keys ?? []) !== null}
+                    onClick={() =>
+                      setKeyAction({ kind: "confirming", credential })
+                    }
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+
+            {revocationProblem(keys ?? []) !== null && (
+              <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
+                {revocationProblem(keys ?? [])}
+              </p>
+            )}
+
+            {keyAction.kind === "confirming" && (
+              <div className="mt-4 rounded-md border border-border p-4">
+                <p className="text-sm font-medium">
+                  Remove “{keyAction.credential.label}”?
+                </p>
+                <p className="mt-1 max-w-prose text-sm leading-relaxed text-muted">
+                  {revocationWarning(keyAction.credential)}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    disabled={busy}
+                    onClick={() => revoke(keyAction.credential)}
+                  >
+                    Remove this key
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => setKeyAction({ kind: "idle" })}
+                  >
+                    Keep it
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {keyAction.kind === "created" && (
+              <div className="mt-4 rounded-md border border-border p-4">
+                <label
+                  htmlFor="new-key"
+                  className="block text-xs font-medium text-muted"
+                >
+                  New key — copy it now, it is not shown again
+                </label>
+                <input
+                  id="new-key"
+                  readOnly
+                  value={keyAction.credential.key}
+                  onFocus={(event) => event.currentTarget.select()}
+                  className="mt-2 w-full rounded-md border border-border bg-surface-raised px-3 py-2 font-mono text-sm"
+                />
+                <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
+                  VocalLens keeps only a scrambled copy, so this is the one and
+                  only time it can be shown. Anyone who has it has your
+                  recordings.
+                </p>
+                <div className="mt-3">
+                  <Button
+                    onClick={() => {
+                      setKeys((current) =>
+                        current === null
+                          ? current
+                          : [
+                              ...current,
+                              {
+                                credential_id:
+                                  keyAction.credential.credential_id,
+                                label: keyAction.credential.label,
+                                created_at: keyAction.credential.created_at,
+                                current: false,
+                              },
+                            ],
+                      );
+                      setKeyAction({ kind: "idle" });
+                    }}
+                  >
+                    I have saved it
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {keyAction.kind === "adding" && (
+              <div className="mt-4">
+                <label
+                  htmlFor="key-label"
+                  className="block text-xs font-medium text-muted"
+                >
+                  What is this key for?
+                </label>
+                <input
+                  id="key-label"
+                  value={label}
+                  maxLength={MAX_KEY_LABEL}
+                  onChange={(event) => setLabel(event.target.value)}
+                  placeholder="Phone"
+                  autoComplete="off"
+                  className="mt-2 w-full max-w-xs rounded-md border border-border bg-surface-raised px-3 py-2 text-sm"
+                />
+                <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
+                  A name for your own benefit — it is never part of getting in.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button disabled={busy} onClick={addKey}>
+                    {busy ? "Adding…" : "Add key"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      setKeyAction({ kind: "idle" });
+                      setLabel("");
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {keyAction.kind === "failed" && (
+              <p role="alert" className="mt-3 max-w-prose text-xs text-danger">
+                {keyAction.message}
+              </p>
+            )}
+
+            {(keyAction.kind === "idle" || keyAction.kind === "failed") && (
+              <div className="mt-4">
+                <Button
+                  variant="secondary"
+                  onClick={() => setKeyAction({ kind: "adding" })}
+                >
+                  Add another key
+                </Button>
               </div>
             )}
           </div>

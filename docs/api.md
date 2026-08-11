@@ -56,18 +56,39 @@ What the caller's key holds. Takes no identifier.
   "anonymous": true,
   "recordings": 3,
   "analysed_recordings": 3,
-  "ai_feedback": 3
+  "ai_feedback": 3,
+  "credentials": [
+    {
+      "credential_id": "0f2e1a44-6c1b-4f7e-9d2a-8b5c0e1f3a77",
+      "label": "Original key",
+      "created_at": "2026-08-11T10:03:19.499435Z",
+      "current": true
+    },
+    {
+      "credential_id": "8c4d2b91-3a70-4e55-b1c2-5d9f7e0a1b34",
+      "label": "Phone",
+      "created_at": "2026-08-12T18:41:02.113900Z",
+      "current": false
+    }
+  ]
 }
 ```
 
-`anonymous: true` means the identity is a bearer key and nothing else — no
-password, no revocation, no server-side recovery. The field exists now so a
-client is not rewritten when credentials are added.
+`anonymous: true` means every way in is a bearer key — no password, no second
+factor, no server-side recovery. Holding several named keys does not change
+that; the field becomes `false` only when a credential that is not a bearer key
+is attached.
 
-**No owner id and no key are returned.** Only a SHA-256 hash of the key is
-stored, so the server *could not* return one; the browser holding it is the only
-place it exists in the clear. Echoing the internal owner id would put a second
-permanent handle on the same person into logs and screenshots for no benefit.
+`credentials` lists every way in, oldest first, with `current` marking the one
+this request was made with. **All of them resolve to the same owner**, so adding
+a key to a second device does not create a second identity.
+
+**No owner id, no key and no hash are returned.** Only a SHA-256 hash of each key
+is stored, so the server *could not* return one; the browser holding it is the
+only place a key exists in the clear. Echoing the internal owner id would put a
+second permanent handle on the same person into logs and screenshots for no
+benefit. A `credential_id` is not credential material: knowing one grants
+nothing, and revoking needs it.
 
 `ai_feedback` is counted separately because generating it costs a provider call:
 measurements can be recomputed from the audio, generated prose cannot.
@@ -92,8 +113,64 @@ rather than hidden.
 Repeating the request is safe. The caller is issued a fresh, empty identity on
 its next request.
 
-Neither identity route accepts a parameter, so there is nothing through which a
-caller could name somebody else.
+Neither of these two routes accepts a parameter, so there is nothing through
+which a caller could name somebody else.
+
+### `POST /api/v1/identity/credentials`
+
+Add another way in to the identity the caller already has. **This does not
+create a new identity**: the new key resolves to the same owner, so it sees the
+same recordings, analyses and history. Nothing is copied and nothing changes
+hands.
+
+**Request**
+
+```json
+{ "label": "Phone" }
+```
+
+`label` is optional and display-only — it is never part of resolving anything,
+so it needs no uniqueness and carries no security weight. Omitted, blank or
+whitespace-only gets `"New key"`; longer than 60 characters is rejected.
+
+**201 Created**
+
+```json
+{
+  "credential_id": "8c4d2b91-3a70-4e55-b1c2-5d9f7e0a1b34",
+  "label": "Phone",
+  "created_at": "2026-08-12T18:41:02.113900Z",
+  "key": "Yb3xK9pQ2mLrT8wZ4nE1aQ"
+}
+```
+
+**The key is returned once, here, and never again.** Only a hash of it is
+stored, so no later request can show it. Anyone holding it is this identity: it
+is a bearer key, not a password.
+
+There is no field for an owner. The owner comes from whoever the request
+resolved to, so a client cannot attach a key to somebody else's identity.
+
+### `DELETE /api/v1/identity/credentials/{credential_id}`
+
+Revoke one key. The recordings, analyses and other keys are untouched — this
+removes a way in, not any data.
+
+**200 OK** — the credentials that remain, in the same shape `GET /identity`
+returns them.
+
+**409 `LAST_CREDENTIAL`** — the caller's only remaining key. Removing it would
+strand the identity: the recordings would still exist, still owned, and nobody
+could ever reach them again. Deleting the identity is the honest way to get rid
+of everything, and it is a different endpoint.
+
+**404 `CREDENTIAL_NOT_FOUND`** — no such key *for this caller*. A credential
+belonging to somebody else gets this answer too, including when it is that
+owner's last one: a different status would confirm both that the id is real and
+that the identity is down to one key.
+
+Revoking the key the request was made with is allowed when others remain. The
+request finishes; that key stops working afterwards.
 
 ### `GET /api/v1/recordings`
 
@@ -787,6 +864,18 @@ The first six are *analysis* outcomes, not request outcomes: they are persisted
 on the analysis record and returned by `GET` inside a `200` response, never as
 an HTTP error status. `ANALYSIS_NOT_FOUND` is the exception — it describes the
 request, and is a real 404.
+
+Credentials (Step 10.2) add two more. Both describe the *request*, so both are
+real HTTP statuses:
+
+| `error_code` | HTTP | Meaning |
+| --- | --- | --- |
+| `CREDENTIAL_NOT_FOUND` | 404 | No key with that id belongs to the caller |
+| `LAST_CREDENTIAL` | 409 | Refusing to revoke an owner's only remaining key |
+
+`CREDENTIAL_NOT_FOUND` is deliberately the same answer for "no such key" and
+"somebody else's key", including somebody else's *last* key — so neither the
+existence of an id nor another identity's key count can be probed.
 
 A provider's own error text never reaches a client. Each code carries our
 wording; the vendor's exception class or status is logged as a short `reason`

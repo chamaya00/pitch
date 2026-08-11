@@ -1,4 +1,4 @@
-import type { Identity } from "@/types/api";
+import type { Credential, Identity } from "@/types/api";
 
 /**
  * Wording and rules for the recovery key.
@@ -93,4 +93,57 @@ export function formatIssued(iso: string): string {
     month: "long",
     day: "numeric",
   });
+}
+
+/* --- Keys ------------------------------------------------------------------
+ *
+ * An identity can have several keys. All of them reach the same recordings, so
+ * the wording below never implies otherwise: adding one is "another way in",
+ * not "another account", and revoking one removes a key, not any data.
+ */
+
+/** Longest label the server will keep. Anything longer is trimmed there too. */
+export const MAX_KEY_LABEL = 60;
+
+/** The label used when somebody names a key nothing. Matches the server's. */
+export const DEFAULT_KEY_LABEL = "New key";
+
+/**
+ * How a key is described in a list.
+ *
+ * Never its value, and never its hash — neither is available to this browser
+ * for any key but the one it holds, and printing that one in a list is how a
+ * bearer credential ends up in a screenshot.
+ */
+export function describeKey(credential: Credential): string {
+  const issued = formatIssued(credential.created_at);
+  return credential.current
+    ? `${credential.label} — this browser, added ${issued}`
+    : `${credential.label} — added ${issued}`;
+}
+
+/**
+ * Why a key cannot be revoked, or `null` if it can.
+ *
+ * The last one is refused by the server, and the reason is worth stating rather
+ * than showing a failure: removing it would leave the recordings owned and
+ * unreachable, which is a different thing from deleting them.
+ */
+export function revocationProblem(all: readonly Credential[]): string | null {
+  if (all.length <= 1) {
+    return "This is the only way in to your recordings. Add another key first, or delete everything if that is what you want.";
+  }
+  // Revoking the key this browser is holding is allowed once another exists.
+  // It is a deliberate thing to do — from a device you are handing on — and
+  // the warning says what happens next rather than the button refusing.
+  return null;
+}
+
+/** What revoking this key does, and what it does not do. */
+export function revocationWarning(credential: Credential): string {
+  const base =
+    "This removes a way in. Your recordings, measurements and feedback all stay exactly as they are.";
+  return credential.current
+    ? `${base} It is the key this browser is using, so you will need one of your other keys here afterwards.`
+    : base;
 }

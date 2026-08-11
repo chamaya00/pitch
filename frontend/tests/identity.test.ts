@@ -13,13 +13,26 @@ import { test } from "node:test";
 import {
   DELETE_CONFIRMATION,
   deletionWarning,
+  describeKey,
   formatIssued,
   isDeletionConfirmed,
   isRecoveryKey,
   recoveryKeyProblem,
+  revocationProblem,
+  revocationWarning,
   summarise,
 } from "../lib/identity.ts";
-import type { Identity } from "../types/api.ts";
+import type { Credential, Identity } from "../types/api.ts";
+
+function credential(overrides: Partial<Credential> = {}): Credential {
+  return {
+    credential_id: "6f1c9d0e-0000-4000-8000-000000000001",
+    label: "Phone",
+    created_at: "2026-08-02T09:00:00Z",
+    current: false,
+    ...overrides,
+  };
+}
 
 function identity(overrides: Partial<Identity> = {}): Identity {
   return {
@@ -28,6 +41,7 @@ function identity(overrides: Partial<Identity> = {}): Identity {
     recordings: 5,
     analysed_recordings: 4,
     ai_feedback: 1,
+    credentials: [],
     ...overrides,
   };
 }
@@ -158,5 +172,69 @@ test("no wording implies the key can be recovered or reset", () => {
 
   for (const phrase of ["reset", "email you", "send you a new", "forgot", "recover your key"]) {
     assert.ok(!surfaces.includes(phrase), `"${phrase}" implies help the server cannot give`);
+  }
+});
+
+
+// --- Keys --------------------------------------------------------------------
+
+test("a key is described by its label and date, never by its value", () => {
+  const described = describeKey(credential());
+
+  assert.match(described, /Phone/);
+  assert.match(described, /2026/);
+  // Nothing in a Credential is credential material, and the id is not shown
+  // either: it is a handle for revoking, not something to read out.
+  assert.ok(!described.includes("6f1c9d0e"));
+});
+
+test("the key this browser holds says so", () => {
+  assert.match(describeKey(credential({ current: true })), /this browser/);
+});
+
+test("the only key cannot be revoked, and the reason is given", () => {
+  const problem = revocationProblem([credential({ current: true })]);
+
+  assert.notEqual(problem, null);
+  assert.match(problem ?? "", /only way in/);
+});
+
+test("a key can be revoked once another exists", () => {
+  assert.equal(
+    revocationProblem([credential(), credential({ credential_id: "other" })]),
+    null,
+  );
+});
+
+test("the current key can be revoked when another exists", () => {
+  const all = [credential({ current: true }), credential({ credential_id: "other" })];
+
+  assert.equal(revocationProblem(all), null);
+});
+
+test("revoking is described as removing a way in, not as deleting data", () => {
+  const warning = revocationWarning(credential()).toLowerCase();
+
+  assert.match(warning, /recordings, measurements and feedback all stay/);
+  for (const phrase of ["delete your recordings", "permanently", "cannot be undone"]) {
+    assert.ok(!warning.includes(phrase), `"${phrase}" overstates what revoking does`);
+  }
+});
+
+test("revoking the key in use warns that this browser will need another", () => {
+  assert.match(revocationWarning(credential({ current: true })), /other keys/);
+});
+
+test("no key wording implies a second identity", () => {
+  const surfaces = [
+    describeKey(credential()),
+    revocationWarning(credential()),
+    revocationProblem([credential()]) ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  for (const phrase of ["new account", "second account", "another account", "sign in"]) {
+    assert.ok(!surfaces.includes(phrase), `"${phrase}" implies an account system`);
   }
 });

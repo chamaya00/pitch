@@ -3,6 +3,8 @@ import { captureOwnerToken, ownerHeaders } from "@/lib/owner";
 import type {
   AnalysisResponse,
   ApiErrorBody,
+  CreatedCredential,
+  Credential,
   DeletionReport,
   Identity,
   AudioAnalysisResponse,
@@ -416,4 +418,43 @@ export function getIdentity(signal?: AbortSignal): Promise<Identity> {
  */
 export function deleteIdentity(signal?: AbortSignal): Promise<DeletionReport> {
   return apiFetch<DeletionReport>("/identity", { method: "DELETE", signal });
+}
+
+/**
+ * Add another way in to the identity this browser already has.
+ *
+ * **This does not create a second identity.** The new key resolves to the same
+ * owner, so it reaches the same recordings — which is the whole point of having
+ * one: another device, or a copy kept somewhere safe.
+ *
+ * The returned key is the only copy that will ever exist outside the holder's
+ * hands. The server stores a hash, so nothing can show it again.
+ */
+export function createCredential(
+  label: string,
+  signal?: AbortSignal,
+): Promise<CreatedCredential> {
+  return apiFetch<CreatedCredential>("/identity/credentials", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+    signal,
+  });
+}
+
+/**
+ * Revoke one key, and return the ones that remain.
+ *
+ * The recordings are untouched: this removes a way in, not any data. The last
+ * remaining key cannot be revoked — the server refuses, because removing it
+ * would leave the recordings owned and unreachable.
+ */
+export function revokeCredential(
+  credentialId: string,
+  signal?: AbortSignal,
+): Promise<Credential[]> {
+  return apiFetch<Credential[]>(
+    `/identity/credentials/${encodeURIComponent(credentialId)}`,
+    { method: "DELETE", signal },
+  );
 }

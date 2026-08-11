@@ -138,9 +138,9 @@ docker compose up --build
 ```
 
 Starts PostgreSQL, the backend on `:8000` and the frontend on `:3000`.
-PostgreSQL is the source of truth for recordings, analyses and owners; the
-backend applies its migrations at startup and will not serve the recording
-endpoints without it.
+PostgreSQL is the source of truth for recordings, analyses, owners and the
+credentials that resolve to them; the backend applies its migrations at startup
+and will not serve the recording endpoints without it.
 
 ## Checks
 

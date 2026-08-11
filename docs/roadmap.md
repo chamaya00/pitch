@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2) |
 
 ## Phase 0 — delivered
 
@@ -94,7 +94,28 @@ Delivered in 7P:
 - `IdentityResolver`, the documented seam where a real authentication provider
   will resolve to the **existing** `owner_id`
 
-**Not yet built** in Phase 10: real credentials (email, password, sessions),
-rate limiting, error pages, and deployment hardening. Credentials need a way to
-prove you are an existing anonymous owner — which is exactly the portable key
-7P delivers — so this was the first step rather than a substitute for it.
+Delivered in 10.2 — *credentials attached to the existing owner*:
+
+- A `credentials` table. An owner no longer *is* a key: it *has* keys, several
+  of them, each named and each revocable. The migration copies every existing
+  `token_hash` across and drops the column in the same transaction, so every key
+  that worked before resolves to the same owner id afterwards.
+- `POST /api/v1/identity/credentials` — another way in, returned once
+- `DELETE /api/v1/identity/credentials/{id}` — revoke one, never the last
+- `GET /api/v1/identity` now lists the ways in and marks the one in use
+- The seam made real: `IdentityResolver` was declared in 10.1 and consumed
+  nowhere. The API now depends on the protocol, with `BearerKeyResolver` behind
+  it, and `tests/test_resolver.py` drives the whole owner-scoped product through
+  a substituted resolver to prove no route knows how identity is established.
+
+**Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
+email, OAuth, sessions, password reset, email verification, MFA, account
+recovery, rate limiting, email delivery and account merging. Passwords were
+considered and rejected for this slice — adding them while deferring reset,
+verification and rate limiting would make the system *less* safe than 128 random
+bits, not more. Also still outstanding in Phase 10: error pages, performance
+work and deployment hardening.
+
+The step's success criterion was not "a login works". It was that a credential
+can resolve to an already-existing owner **without changing ownership**, while
+the entire existing owner-scoped product continues to work unchanged.
