@@ -330,3 +330,15 @@ def test_build_doubles_registers_its_owner() -> None:
 
     resolved = anyio.run(lambda: prepared.owners.get_by_token(prepared.token))
     assert resolved == prepared.owner
+
+
+def test_the_owner_header_is_exposed_to_cross_origin_javascript(client: TestClient) -> None:
+    """Without this the browser receives the token and withholds it from the page.
+
+    The failure mode is silent: every request would mint a fresh identity and
+    history would never accumulate, with no error anywhere to explain why.
+    """
+    response = client.get(RECORDINGS_URL, headers={"Origin": "http://localhost:3000"})
+
+    exposed = response.headers.get("access-control-expose-headers", "")
+    assert OWNER_HEADER.lower() in exposed.lower()

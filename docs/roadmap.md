@@ -6,13 +6,13 @@ tests, error states, lint, type checks and documentation are all in place.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 0 | Project foundation: structure, config, health check, homepage, docs | ✅ Complete |
-| 1 | Audio upload: UI, endpoint, validation, storage, metadata | Next |
-| 2 | Pitch engine: preprocessing, detection, confidence filter, Hz→MIDI→note→cents | Planned |
-| 3 | Analysis dashboard: summary cards, range, accuracy, pitch timeline, note distribution | Planned |
-| 4 | Microphone recording in the browser | Planned |
-| 5 | Advanced metrics: RMS, peak, spectral features | Planned |
-| 6 | Claude integration: structured payload, service, feedback UI | Planned |
-| 7 | User history: users, recordings, analyses, comparison, progress chart | Planned |
+| 1 | Audio upload: UI, endpoint, validation, storage, metadata | ✅ Complete |
+| 2 | Pitch engine: preprocessing, detection, confidence filter, Hz→MIDI→note→cents | ✅ Complete |
+| 3 | Analysis dashboard: summary cards, range, accuracy, pitch timeline, note distribution | ✅ Complete |
+| 4 | Microphone recording in the browser | ✅ Complete |
+| 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
+| 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
+| 7 | User history: users, recordings, analyses, comparison, progress chart | Partly — see below |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Planned |
@@ -38,3 +38,26 @@ calls. Dependencies for those land with the phase that uses them.
 A user can upload a valid audio file and see its filename, duration, file size
 and an audio player. Invalid files (wrong type, too large, too long, corrupted)
 fail with a clear message driven by the documented error codes.
+
+## Phase 7 — where it stands
+
+Built through Step 7M:
+
+- Upload, validation, storage and metadata (7A)
+- Provider protocols and the mock adapters behind them (7B)
+- Deepgram and Claude adapters, selected by configuration (7C–7D)
+- Speech analysis: transcript, metrics, feedback, background execution (7E)
+- The analysis experience in the browser (7F)
+- Microphone recording, WAV encoding, explicit upload (7G–7H)
+- Live pitch detection in the browser, and Live Vocal Practice (7H, 7J)
+- Deterministic backend audio analysis: pitch, range, stability, loudness,
+  spectrum (7I)
+- Note breakdown from the stored pitch timeline (7K)
+- AI interpretation of the audio measurements (7L)
+- PostgreSQL as the source of truth, anonymous owners, recording history (7M)
+
+**Not yet built** in Phase 7: comparison between two recordings, and the
+progress chart over time. Both need what 7M just added — persistent, owned,
+queryable history — and neither is claimed to exist. `docs/limitations.md` notes
+that two recordings are only comparable when captured under similar conditions,
+which is the first thing a comparison feature has to confront honestly.

@@ -321,3 +321,31 @@ export interface AudioFeedbackState {
   error_code: string | null;
   feedback: AudioFeedback | null;
 }
+
+/* --- Recording history ----------------------------------------------------- */
+
+/**
+ * One recording in an owner's history, with how far its analyses got.
+ *
+ * The statuses are nullable and the distinction is load-bearing: `null` means
+ * that analysis has **never been run**, which is not `pending` and not a
+ * failure. Rendering the two the same way would tell somebody their recording
+ * failed when nobody ever asked for it to be analysed.
+ *
+ * No measurements here on purpose — a list is not the place for a pitch
+ * timeline, and comparing two recordings whose conditions nobody controlled is
+ * exactly the reading this type should not invite.
+ */
+export interface RecordingHistoryItem {
+  recording: Recording;
+  speech_status: AnalysisStatus | null;
+  audio_status: AudioAnalysisStatus | null;
+  feedback_status: AudioFeedbackStatus | null;
+  last_analysed_at: string | null;
+}
+
+export interface RecordingHistory {
+  items: RecordingHistoryItem[];
+  count: number;
+  limit: number;
+}

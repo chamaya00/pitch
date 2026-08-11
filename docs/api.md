@@ -8,7 +8,95 @@ Interactive documentation is served by FastAPI at `/docs` (Swagger UI) and
 
 ---
 
+## Identity: `X-VocalLens-Owner`
+
+Every recording belongs to an owner, and the owner is resolved from this header.
+
+- **Send it** on every request once you have one.
+- **Omit it** on a first request. The response carries a newly minted value in
+  the same header; store it and send it from then on. It is returned **only**
+  when minted, never on later responses.
+- A well-formed value the server does not recognise **mints a new identity**
+  rather than failing. A `401` would be right for authentication; this is not
+  authentication, and a client holding a token from a reset database would
+  otherwise be permanently stuck with an error it cannot clear.
+- A **malformed** value is refused with `VALIDATION_ERROR`. It cannot be a token
+  this server issued, so treating it as absent would hide a client bug behind a
+  silently changing identity.
+
+The header is listed in the CORS `expose_headers`, so browser JavaScript can
+read the minted value cross-origin.
+
+**This is not authentication.** There is no password, no second factor and no
+revocation: anyone holding the token is the owner, and losing it loses the
+history. What it provides is a server-side answer to "whose recordings are
+these?" — enforced in SQL, on every read, on every route.
+
+### What another owner sees
+
+A recording that belongs to somebody else answers exactly as one that does not
+exist: `404 RECORDING_NOT_FOUND`, with the same message. The two are
+deliberately indistinguishable — a different answer would confirm that an id is
+real to somebody with no right to know. This applies to every recording-scoped
+path, `GET` and `POST` alike.
+
+---
+
 ## Implemented
+
+### `GET /api/v1/recordings`
+
+The caller's own recordings, newest first. Whose they are is decided entirely
+from the owner header; there is no parameter that could name a different owner.
+
+**Query parameters**
+
+| Name | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `limit` | `50` | 1–200 | Largest number of recordings to return |
+
+**200 OK**
+
+```json
+{
+  "items": [
+    {
+      "recording": {
+        "recording_id": "0c07991ba858449e976cb93f933f5dde",
+        "original_filename": "take-a.wav",
+        "format": "wav",
+        "duration_seconds": 2.0,
+        "sample_rate": 22050,
+        "channels": 1,
+        "size_bytes": 88244,
+        "bits_per_sample": 16,
+        "created_at": "2026-08-11T05:12:29.705890Z"
+      },
+      "speech_status": "completed",
+      "audio_status": "completed",
+      "feedback_status": "not_requested",
+      "last_analysed_at": "2026-08-11T05:12:39.429850Z"
+    }
+  ],
+  "count": 1,
+  "limit": 50
+}
+```
+
+**Statuses, not results.** Each item says how far its analyses got; the
+measurements come from the per-recording endpoints. Embedding them here would
+make a fifty-row history a multi-megabyte response, and would invite comparing
+two recordings whose conditions nobody controlled.
+
+**`null` means "never run".** It is not `pending` and not a failure, and a
+client must not render it as either. A recording nobody has analysed has
+`speech_status: null`, which is a statement about what was asked for, not about
+how it went.
+
+### `GET /api/v1/recordings/{recording_id}`
+
+The stored metadata of one recording, provided it belongs to the caller.
+Otherwise `404 RECORDING_NOT_FOUND` — see above.
 
 ### `GET /health`
 

@@ -1,4 +1,5 @@
 import { API_V1 } from "@/lib/config";
+import { captureOwnerToken, ownerHeaders } from "@/lib/owner";
 import type {
   AnalysisResponse,
   ApiErrorBody,
@@ -9,6 +10,7 @@ import type {
   PitchTimeline,
   PublicConfig,
   Recording,
+  RecordingHistory,
 } from "@/types/api";
 
 /** Error thrown for any non-2xx API response or transport failure. */
@@ -42,7 +44,13 @@ export async function apiFetch<T>(
   try {
     response = await fetch(`${API_V1}${path}`, {
       ...init,
-      headers: { Accept: "application/json", ...init?.headers },
+      // The owner header goes on every request. A caller that passes its own
+      // wins, which is what lets a test drive two identities against one app.
+      headers: {
+        Accept: "application/json",
+        ...ownerHeaders(),
+        ...init?.headers,
+      },
     });
   } catch (cause) {
     // An aborted request is a caller's own decision — a poller cleaning up on
@@ -56,6 +64,10 @@ export async function apiFetch<T>(
       "NETWORK_ERROR",
     );
   }
+
+  // Before anything else, including the error path: a first request that
+  // fails still minted an identity, and dropping it would mint another.
+  captureOwnerToken(response.headers);
 
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
@@ -140,6 +152,9 @@ export function uploadRecording(
 
     request.open("POST", `${API_V1}/recordings`);
     request.setRequestHeader("Accept", "application/json");
+    for (const [name, value] of Object.entries(ownerHeaders())) {
+      request.setRequestHeader(name, value);
+    }
     request.responseType = "text";
 
     if (onProgress) {
@@ -153,6 +168,11 @@ export function uploadRecording(
     }
 
     request.addEventListener("load", () => {
+      // `XMLHttpRequest` has no `Headers`; adapt it to the same shape so the
+      // capture logic has one implementation rather than two.
+      captureOwnerToken({
+        get: (name: string) => request.getResponseHeader(name),
+      });
       const parsed = parseJson(request.responseText);
 
       if (request.status === 201) {
@@ -317,4 +337,25 @@ export function getAudioFeedback(
     `/recordings/${recordingId}/audio-analysis/feedback`,
     { signal, cache: "no-store" },
   );
+}
+
+/* --- Recording history ------------------------------------------------------ */
+
+/**
+ * The caller's own recordings, newest first.
+ *
+ * Whose recordings those are is decided entirely on the server, from the owner
+ * header this client attaches. There is no parameter that could name a
+ * different owner, which is the point: the browser is not trusted to filter
+ * anything.
+ */
+export function getRecordingHistory(
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<RecordingHistory> {
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  return apiFetch<RecordingHistory>(`/recordings${query}`, {
+    signal,
+    cache: "no-store",
+  });
 }

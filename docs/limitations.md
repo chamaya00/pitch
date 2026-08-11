@@ -166,6 +166,26 @@ one of them into a label such as "bright", "dark" or "breathy" — those mapping
 are not validated, and the numbers are strongly influenced by the microphone and
 the room.
 
+## Recording history and identity
+
+Recordings are linked to an **anonymous identifier stored in the browser**, not
+to an account:
+
+- **There is no login and no password.** Anyone holding the identifier is the
+  owner of those recordings.
+- **There is no recovery.** Clearing site data, using private browsing, or
+  opening VocalLens in a different browser or on a different device starts a new
+  identity with an empty history. The old recordings still exist on the server
+  and are simply unreachable.
+- **It is not a security boundary against a determined attacker.** The
+  identifier is a 128-bit random value, which makes guessing one impractical,
+  but the guarantee is the entropy — not an access-control system.
+- **A take that is recorded but never submitted is never listed**, because it
+  was never uploaded. It exists only in the browser tab.
+
+What it *does* guarantee is that one visitor never sees another's recordings.
+That check happens on the server, in the database query, on every route.
+
 ## Songs and mixed audio (Phase 8+)
 
 Pitch detection on a full mix is substantially less reliable than on an isolated

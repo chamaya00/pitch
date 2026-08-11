@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.owner import OWNER_HEADER
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
@@ -81,6 +82,12 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # A cross-origin response header is invisible to JavaScript unless it is
+        # named here. Without this the browser receives the minted owner token
+        # and silently withholds it, so every request would mint a new identity
+        # and history would never accumulate — a failure with no error message
+        # anywhere. `allow_headers=["*"]` covers the request direction only.
+        expose_headers=[OWNER_HEADER],
     )
 
     # Registered after CORS so it runs *inside* it: an oversized upload still

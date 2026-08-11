@@ -62,8 +62,13 @@ See [audio-analysis.md](audio-analysis.md).
 | `app/core/config.py` | Environment-backed settings (`get_settings`, cached) |
 | `app/core/logging.py` | JSON log formatter, stdlib only |
 | `app/schemas/` | Pydantic request/response models — the API contract |
-| `app/models/` | Database models (Phase 7) |
-| `app/services/audio/` | Upload validation, metadata, filesystem storage |
+| `app/api/owner.py` | Resolving (or minting) the caller's anonymous owner |
+| `app/db/pool.py` | The connection pool, and the one place a DSN is read |
+| `app/db/migrate.py` | Numbered `.sql` files, applied once, checksum-verified |
+| `app/db/migrations/` | The schema, in order |
+| `app/db/import_filesystem.py` | One-off import of pre-7M JSON documents |
+| `app/services/owners/` | Owner identity: model and repository |
+| `app/services/audio/` | Upload validation, metadata, filesystem storage of the bytes |
 | `app/services/analysis/` | Speech domain: transcript, metrics, records |
 | `app/services/audio_analysis/` | Audio domain: pitch maths, detector, features, analyzer |
 | `app/services/ai/` | Provider adapters behind protocols |
@@ -80,6 +85,70 @@ Conventions:
   injected via `Depends`, so tests can override them.
 - Everything user-facing is versioned under `/api/v1`. `/health` is also
   exposed unversioned for infrastructure probes.
+
+## Persistence
+
+PostgreSQL is the source of truth for recordings, speech analyses, audio
+analyses and owners. The audio *bytes* stay on disk under `RecordingStorage`: a
+database is a poor place for megabytes of WAV, and nothing queries inside them.
+
+**No ORM.** The repositories already map domain objects to storage by hand and
+have since Step 7A; an ORM would be a second mapping layer to keep in step with
+the pydantic models, for a schema of five tables. What is actually needed —
+transactions, constraints, indexes, parameterised queries, pooling — `psycopg`
+provides, in async mode so a query never blocks the event loop.
+
+The domain object is stored as a JSONB `document` and is authoritative. The
+columns beside it (`status`, `created_at`, `recording_id`, …) exist so queries
+and indexes have something to work with, and are written from the same object in
+the same statement.
+
+Migrations are numbered `.sql` files plus a table recording which have run. Each
+runs inside a transaction with the row that records it, so a migration cannot be
+half-applied or applied twice; an applied file whose contents changed is a hard
+error rather than a silent skip. They are applied at startup under a PostgreSQL
+advisory lock, so several processes booting together apply them once between
+them.
+
+### Concurrency belongs to the database
+
+Until Step 7M both orchestrators guarded their find-or-create decision with a
+process-local `asyncio.Lock`. That could only ever serialise coroutines inside
+one interpreter — a second worker process reopened the race, and the lock's own
+docstring said so. It is gone. Three database properties replace it:
+
+| Invariant | How it holds |
+| --- | --- |
+| One analysis per recording at a time | Partial unique index on `recording_id` where the status is non-terminal |
+| A stale worker cannot overwrite a finished result | Every `UPDATE` carries the status the caller last read; zero rows affected means it lost |
+| Feedback generation happens once | A single conditional `UPDATE ... RETURNING` that moves `feedback_status` and returns the row only to the caller that moved it |
+
+All three hold across processes and machines. The read that precedes an insert
+is an optimisation; the index is the guarantee, and the caller that loses the
+race is handed the winner's record rather than an error.
+
+### Ownership
+
+Every recording has an owner, and **every repository read is scoped by owner id
+in SQL** — another owner's recording is never selected, rather than selected and
+filtered. Authorisation that happens in a `WHERE` clause cannot be bypassed by a
+client, and no frontend is trusted to hide anything. A recording belonging to
+somebody else answers `404`, identical to one that does not exist, because a
+different answer would confirm an id is real to somebody with no right to know.
+
+An owner is a server-generated bearer token and a row: no password, no email, no
+session, no login. **This is ownership, not authentication**, and it is
+documented that way rather than dressed up as more. It gives Phase 10 a clean
+path — real credentials would resolve *to* an owner id, and nothing pointing at
+an owner has to change. The token is stored SHA-256-hashed, which is appropriate
+precisely because it is a 128-bit random value rather than a human-chosen
+secret. See `app/services/owners/models.py` for the limits, stated plainly.
+
+The `X-VocalLens-Owner` header carries it in both directions: inbound to name an
+owner, outbound **only** when one is minted. It is named in the CORS
+`expose_headers` list — without that the browser receives the token and
+withholds it from the page, so every request would mint a new identity and
+history would never accumulate, with no error anywhere to explain why.
 
 ## Frontend layout
 
