@@ -48,11 +48,12 @@ router = APIRouter(prefix="/identity", tags=["identity"])
     summary="Who you are, and what you have",
     description=(
         "A summary of the caller's own identity.\n\n"
-        "**This is not an account.** `anonymous: true` means the identity is a "
-        "bearer key and nothing else: no password, no revocation, and no way "
-        "for the server to recover it. Only a hash of the key is stored, so "
+        "**This is not an account.** `anonymous: true` means every way in is a "
+        "bearer key and nothing else: no password, no second factor, and no way "
+        "for the server to recover one. Only a hash of each key is stored, so "
         "this endpoint cannot return one — the browser holding it is the only "
-        "place it exists in the clear.\n\n"
+        "place it exists in the clear. Keys *can* be revoked individually since "
+        "Step 10.2; see `DELETE /identity/credentials/{credential_id}`.\n\n"
         "The counts say what a lost key would cost. `ai_feedback` is listed "
         "separately because generating it costs a provider call: measurements "
         "can be recomputed from the audio, generated prose cannot.\n\n"
