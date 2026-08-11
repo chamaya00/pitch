@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.owner import OWNER_HEADER
+from app.api.rate_limit import RateLimits
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
@@ -93,6 +94,12 @@ def create_app() -> FastAPI:
     # Registered after CORS so it runs *inside* it: an oversized upload still
     # gets the headers a browser needs to read the error.
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_audio_size_bytes)
+
+    # Per-application rather than module-level: two applications in one test
+    # process must not share counters and refuse each other's requests. Built
+    # here rather than in the lifespan so a test client that never runs the
+    # lifespan is still limited exactly as production is.
+    app.state.rate_limits = RateLimits(settings)
 
     register_exception_handlers(app)
 

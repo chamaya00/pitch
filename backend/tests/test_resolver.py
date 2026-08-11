@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 from app.api import deps
 from app.api.owner import OWNER_HEADER, clean_key
-from app.core.errors import ApiError
+from app.core.errors import ApiError, ErrorCode
 from app.main import create_app
 from app.services.owners.credentials import new_credential
 from app.services.owners.identity import IdentityResolver
@@ -43,12 +43,36 @@ def run(factory: Any) -> Any:
     return anyio.run(factory)
 
 
-def resolver_for(doubles: Doubles, key: str | None, minted: list[str]) -> BearerKeyResolver:
+class CountingGuard:
+    """A mint guard that records how often it was consulted, and may refuse.
+
+    Substituted for the real rate limiter so these tests assert the *seam* —
+    that the resolver asks before it writes — without depending on a window, a
+    clock or an address. ``api/rate_limit.py`` is where the policy is tested.
+    """
+
+    def __init__(self, allow: bool = True) -> None:
+        self.allow = allow
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+        if not self.allow:
+            raise ApiError(ErrorCode.RATE_LIMITED, "no more identities from here")
+
+
+def resolver_for(
+    doubles: Doubles,
+    key: str | None,
+    minted: list[str],
+    guard: CountingGuard | None = None,
+) -> BearerKeyResolver:
     return BearerKeyResolver(
         owners=doubles.owners,
         credentials=doubles.credentials,
         key=key,
         on_mint=minted.append,
+        before_mint=guard or CountingGuard(),
     )
 
 
@@ -204,3 +228,63 @@ def test_the_substituted_resolver_owns_nothing_it_was_not_given(doubles: Doubles
 
     assert client.get(f"{RECORDINGS_URL}/{recording.recording_id}").status_code == 404
     assert client.get(IDENTITY_URL).json()["recordings"] == 0
+
+
+# --- The mint guard --------------------------------------------------------
+
+
+def test_a_recognised_key_never_consults_the_mint_guard(doubles: Doubles) -> None:
+    """The property that makes a per-address limit safe.
+
+    Returning users share an address with strangers — an office, a school, a
+    phone network. If resolving a *known* key consulted the guard, one
+    stranger's behaviour could lock out everybody behind that address. It does
+    not, so it cannot.
+    """
+    guard = CountingGuard()
+
+    run(lambda: resolver_for(doubles, doubles.token, [], guard).resolve())
+
+    assert guard.calls == 0
+
+
+def test_minting_consults_the_guard_first(doubles: Doubles) -> None:
+    guard = CountingGuard()
+
+    run(lambda: resolver_for(doubles, None, [], guard).resolve())
+
+    assert guard.calls == 1
+
+
+def test_an_unrecognised_key_consults_the_guard(doubles: Doubles) -> None:
+    """It is about to mint, so it is about to write."""
+    guard = CountingGuard()
+
+    run(lambda: resolver_for(doubles, new_owner_token(), [], guard).resolve())
+
+    assert guard.calls == 1
+
+
+def test_a_refused_mint_writes_nothing(doubles: Doubles) -> None:
+    """The whole point: a refusal that still created the rows is not a refusal."""
+    before = len(doubles.owners._by_id)  # noqa: SLF001 - counting rows is the assertion
+    minted: list[str] = []
+    guard = CountingGuard(allow=False)
+
+    with pytest.raises(ApiError) as raised:
+        run(lambda: resolver_for(doubles, None, minted, guard).resolve())
+
+    assert raised.value.code is ErrorCode.RATE_LIMITED
+    assert len(doubles.owners._by_id) == before  # noqa: SLF001
+    assert minted == []
+
+
+def test_a_refused_mint_leaves_existing_identities_reachable(doubles: Doubles) -> None:
+    """Refusing a newcomer must not touch anybody who already has a key."""
+    guard = CountingGuard(allow=False)
+
+    with pytest.raises(ApiError):
+        run(lambda: resolver_for(doubles, None, [], guard).resolve())
+
+    resolved = run(lambda: resolver_for(doubles, doubles.token, []).resolve())
+    assert resolved.owner_id == doubles.owner.owner_id

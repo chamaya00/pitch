@@ -21,6 +21,11 @@ export const UPLOAD_ERROR_MESSAGES: Readonly<Record<string, string>> = {
     "We couldn't read this audio file. Please try another recording.",
   VALIDATION_ERROR: "Please choose an audio file.",
   RECORDING_NOT_FOUND: "That recording could no longer be found.",
+  // Our own limit, not a provider's, and not a fault of the recording. Phrased
+  // so nobody reads it as "your file was rejected": the upload did not happen,
+  // and everything already stored is untouched.
+  RATE_LIMITED:
+    "You've made a lot of requests in a short time. Please wait a moment and try again — nothing you've already recorded is affected.",
   INTERNAL_ERROR: "Something went wrong on our side. Please try again.",
   NETWORK_ERROR:
     "We couldn't reach VocalLens. Check your connection and try again.",

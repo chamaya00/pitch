@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3) |
 
 ## Phase 0 — delivered
 
@@ -108,13 +108,29 @@ Delivered in 10.2 — *credentials attached to the existing owner*:
   it, and `tests/test_resolver.py` drives the whole owner-scoped product through
   a substituted resolver to prove no route knows how identity is established.
 
+Delivered in 10.3 — *bounding anonymous identity creation, and rate limiting*:
+
+- The failure was measured before it was fixed: 60 concurrent requests carrying
+  no credential created 60 owners and 60 credentials in 0.47 s (~128 identities
+  per second), and an anonymous caller could reach a billable provider call.
+- New identities are limited per client address; the guard runs **before** the
+  rows exist, so a refusal writes nothing.
+- Costly requests — upload, either analysis, feedback, adding a key — are
+  limited per *owner*, so a shared address cannot spend somebody else's
+  allowance.
+- A recognised key never touches the identity limit; reading is never limited;
+  deleting an identity and revoking a key are never limited.
+- `RATE_LIMITED` / `429` with `Retry-After`, in the existing envelope.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
 considered and rejected for this slice — adding them while deferring reset,
 verification and rate limiting would make the system *less* safe than 128 random
-bits, not more. Also still outstanding in Phase 10: error pages, performance
-work and deployment hardening.
+bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
+in Phase 10 are error pages, deployment hardening (there is no reverse proxy,
+no TLS termination and no edge body cap), a retention policy for unused
+identities, performance work, and every credential feature 10.2 deferred.
 
 The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while

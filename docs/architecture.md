@@ -169,6 +169,48 @@ Three rules the code enforces rather than documents:
 - **A credential belonging to somebody else is "not found", not "refused"**, so
   the endpoint cannot be used to discover that an id is real.
 
+### Rate limiting (10.3)
+
+Added against a measurement, not a worry. Every owner-scoped route mints an
+identity when the key is absent or unrecognised, so **an unauthenticated read is
+a write**: sixty concurrent requests carrying no credential created sixty owner
+rows and sixty credential rows in 0.47 seconds — about 128 identities per second
+from one client, with no bound anywhere, no cleanup, and an anonymous path all
+the way through to a billable provider call.
+
+Two limits, keyed by two different things, because they answer two different
+questions:
+
+- **New identities, per client address.** There is no identity to key this on —
+  creating one is the thing being limited. The guard is consulted **before** the
+  rows exist, so a refusal writes nothing.
+- **Costly requests, per owner.** Uploading, either analysis, feedback, adding a
+  key. Keyed by owner so one person on a shared address cannot spend another's
+  allowance, and so reading your own history is never charged.
+
+The identity limit is reached through `MintGuard`, a one-method collaborator the
+HTTP adapter passes to `BearerKeyResolver`. The resolver learns nothing about
+addresses, counters or quotas — it asks "may I?" and writes only if the answer
+is yes. It is a *required* constructor argument rather than an optional one with
+a permissive default, because a default that allows silently removes the limit
+the day somebody adds a second construction site.
+
+`X-Forwarded-For` is **ignored** unless `RATE_LIMIT_TRUSTED_PROXIES` is set. The
+header is client-supplied, so honouring it by default would make the limit
+bypassable by anyone who read this paragraph — worse than no limit, because it
+would look like protection. With *n* trusted proxies the client is *n* hops back
+from the right-hand end, which is the only part a proxy you trust actually
+wrote.
+
+**What it is not.** One process's memory. Two API workers have two counters, so
+the effective limit multiplies by worker count — the same honest caveat
+`0001_initial.sql` records about the `asyncio.Lock` the partial unique indexes
+replaced. It is defence in depth beside a real edge limiter, exactly as
+`MaxBodySizeMiddleware` is beside a proxy's body cap, and it is not a defence
+against a distributed attacker. A database-backed counter was rejected for this
+slice: it would add a write to every request in order to bound the cost of
+writes.
+
 ### The identity seam
 
 Every domain service takes `owner_id: uuid.UUID` and nothing else. No service

@@ -457,7 +457,11 @@ export function IdentityPanel() {
               </div>
             )}
 
-            {keyAction.kind === "adding" && (
+            {(keyAction.kind === "adding" || keyAction.kind === "failed") && (
+              // The form stays open on failure, with what was typed still in
+              // it. Rate limiting is temporary by definition, so collapsing the
+              // form and making somebody retype the label to retry is friction
+              // for no reason.
               <div className="mt-4">
                 <label
                   htmlFor="key-label"
@@ -477,6 +481,11 @@ export function IdentityPanel() {
                 <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
                   A name for your own benefit — it is never part of getting in.
                 </p>
+                {keyAction.kind === "failed" && (
+                  <p role="alert" className="mt-2 max-w-prose text-xs text-danger">
+                    {keyAction.message}
+                  </p>
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button disabled={busy} onClick={addKey}>
                     {busy ? "Adding…" : "Add key"}
@@ -495,13 +504,7 @@ export function IdentityPanel() {
               </div>
             )}
 
-            {keyAction.kind === "failed" && (
-              <p role="alert" className="mt-3 max-w-prose text-xs text-danger">
-                {keyAction.message}
-              </p>
-            )}
-
-            {(keyAction.kind === "idle" || keyAction.kind === "failed") && (
+            {keyAction.kind === "idle" && (
               <div className="mt-4">
                 <Button
                   variant="secondary"

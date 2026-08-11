@@ -23,7 +23,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Path, Query, Response, status
 
-from app.api.deps import AudioAnalysisServiceDep, OwnerIdDep
+from app.api.deps import AudioAnalysisServiceDep, CostlyRequestDep, OwnerIdDep
 from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
 from app.schemas.audio_analysis import (
@@ -92,6 +92,7 @@ MAX_POINTS_LIMIT = 50000
         **error_responses(
             ErrorCode.RECORDING_NOT_FOUND,
             ErrorCode.VALIDATION_ERROR,
+            ErrorCode.RATE_LIMITED,
             ErrorCode.INTERNAL_ERROR,
         ),
     },
@@ -100,6 +101,7 @@ async def start_audio_analysis(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
     owner_id: OwnerIdDep,
+    _limit: CostlyRequestDep,
     background_tasks: BackgroundTasks,
     response: Response,
 ) -> AudioAnalysisResponse:
@@ -281,6 +283,7 @@ async def get_note_breakdown(
             ErrorCode.RECORDING_NOT_FOUND,
             ErrorCode.ANALYSIS_NOT_CONFIGURED,
             ErrorCode.VALIDATION_ERROR,
+            ErrorCode.RATE_LIMITED,
             ErrorCode.INTERNAL_ERROR,
         ),
     },
@@ -289,6 +292,7 @@ async def start_audio_feedback(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
     owner_id: OwnerIdDep,
+    _limit: CostlyRequestDep,
     background_tasks: BackgroundTasks,
     response: Response,
 ) -> AudioFeedbackStateResponse:

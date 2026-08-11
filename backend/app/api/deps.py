@@ -17,6 +17,7 @@ from typing import Annotated
 from fastapi import Depends, Request, Response
 
 from app.api.owner import OwnerTokenHeader, clean_key, resolve_owner
+from app.api.rate_limit import limit_costly_request
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError, ErrorCode
 from app.db.pool import Database
@@ -153,6 +154,24 @@ async def get_owner_id(owner: OwnerDep) -> uuid.UUID:
 
 
 OwnerIdDep = Annotated[uuid.UUID, Depends(get_owner_id)]
+
+
+async def costly_request(request: Request, owner_id: OwnerIdDep) -> None:
+    """Charge this request against the owner's costly-request allowance.
+
+    Declared on the handful of routes that consume disk, CPU or provider
+    budget — uploading, starting either analysis, asking for feedback, adding a
+    key. Reads are never charged: nobody should be told to slow down for looking
+    at their own history.
+
+    Keyed by owner, so the allowance follows the identity rather than the
+    address it arrived from. Depends on ``OwnerIdDep``, so the caller is
+    resolved first and the charge always lands on the right identity.
+    """
+    await limit_costly_request(request, owner_id)
+
+
+CostlyRequestDep = Annotated[None, Depends(costly_request)]
 
 
 def get_speech_to_text_provider(settings: SettingsDep) -> SpeechToTextProvider:

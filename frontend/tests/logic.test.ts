@@ -132,6 +132,7 @@ test("every backend upload code maps to a friendly message", () => {
     "AUDIO_TOO_LONG",
     "CORRUPTED_AUDIO",
     "VALIDATION_ERROR",
+    "RATE_LIMITED",
     "INTERNAL_ERROR",
     "NETWORK_ERROR",
   ];
@@ -226,4 +227,26 @@ test("duration limits are phrased for a sentence", () => {
   assert.equal(formatDurationLimit(300), "5 minutes");
   assert.equal(formatDurationLimit(60), "1 minute");
   assert.equal(formatDurationLimit(90), "90 seconds");
+});
+
+test("being rate-limited reads as a pause, not as a rejected recording", () => {
+  const message = messageForErrorCode("RATE_LIMITED");
+
+  assert.match(message, /wait a moment/i);
+  assert.match(message, /nothing you've already recorded is affected/i);
+  // It is our limit, so it must not blame the file, the audio or the person.
+  for (const wrong of ["invalid", "unsupported", "corrupt", "too large", "rejected"]) {
+    assert.ok(
+      !message.toLowerCase().includes(wrong),
+      `"${wrong}" blames the recording for a limit we imposed`,
+    );
+  }
+});
+
+test("the rate-limit message never exposes the limit or the window", () => {
+  const message = messageForErrorCode("RATE_LIMITED");
+
+  for (const leak of ["per hour", "per minute", "quota", "3600", "requests per"]) {
+    assert.ok(!message.toLowerCase().includes(leak), `"${leak}" describes the defence`);
+  }
 });

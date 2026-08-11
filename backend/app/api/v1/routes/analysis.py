@@ -17,7 +17,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Path, Response, status
 
-from app.api.deps import AnalysisServiceDep, OwnerIdDep
+from app.api.deps import AnalysisServiceDep, CostlyRequestDep, OwnerIdDep
 from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
 from app.schemas.analysis import AnalysisResponse
@@ -71,6 +71,7 @@ RecordingIdPath = Annotated[
         **error_responses(
             ErrorCode.RECORDING_NOT_FOUND,
             ErrorCode.VALIDATION_ERROR,
+            ErrorCode.RATE_LIMITED,
             ErrorCode.INTERNAL_ERROR,
         ),
     },
@@ -79,6 +80,7 @@ async def start_analysis(
     recording_id: RecordingIdPath,
     service: AnalysisServiceDep,
     owner_id: OwnerIdDep,
+    _limit: CostlyRequestDep,
     background_tasks: BackgroundTasks,
     response: Response,
 ) -> AnalysisResponse:

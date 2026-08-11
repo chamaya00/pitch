@@ -539,7 +539,12 @@ def test_both_routes_are_documented(schema: dict[str, Any]):
 
 @pytest.mark.parametrize(
     ("method", "expected"),
-    [("post", {"200", "202", "404", "422", "500"}), ("get", {"200", "404", "422", "500"})],
+    [
+        # 429 on POST only: starting an analysis is charged against the owner's
+        # costly-request allowance (Step 10.3); reading one never is.
+        ("post", {"200", "202", "404", "422", "429", "500"}),
+        ("get", {"200", "404", "422", "500"}),
+    ],
 )
 def test_the_documented_responses_match_the_real_ones(
     schema: dict[str, Any], method: str, expected: set[str]

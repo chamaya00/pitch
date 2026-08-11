@@ -37,6 +37,22 @@ logger = get_logger(__name__)
 #: else is allowed to see it.
 MintCallback = Callable[[str], None]
 
+#: Asked immediately before an identity would be created, and only then.
+#:
+#: It raises to refuse — the resolver's job is to resolve, not to decide policy,
+#: and a boolean would leave it inventing an error message for a rule it does
+#: not own. Returning ``None`` means "go ahead".
+#:
+#: Deliberately shaped so the resolver learns nothing about *why*: no address,
+#: no counter, no quota. Step 10.3 counts identity creation per client address,
+#: but ``BearerKeyResolver`` cannot tell that from any other rule, and a later
+#: rule can replace it without touching this module.
+#:
+#: It is a **required** collaborator rather than an optional one with a
+#: permissive default. A default that allows is a default that silently removes
+#: the limit the day somebody adds a second construction site.
+MintGuard = Callable[[], None]
+
 
 class BearerKeyResolver:
     """Resolves the anonymous bearer key, minting an identity when there is none.
@@ -58,6 +74,14 @@ class BearerKeyResolver:
     A **malformed** key still raises: it cannot be one this server issued, so
     treating it as absent would hide a client bug behind a silently changing
     identity.
+
+    Since Step 10.3 minting is not unconditional. ``before_mint`` is consulted
+    first and may refuse, because an unauthenticated request that mints is an
+    unauthenticated *write*: sixty concurrent requests carrying no credential
+    were measured creating sixty owners and sixty credentials in under half a
+    second. A caller presenting a **recognised** key returns above without ever
+    reaching the guard, so no rule about newcomers can lock out somebody who
+    already has a key.
     """
 
     def __init__(
@@ -67,11 +91,13 @@ class BearerKeyResolver:
         credentials: CredentialRepository,
         key: str | None,
         on_mint: MintCallback,
+        before_mint: MintGuard,
     ) -> None:
         self._owners = owners
         self._credentials = credentials
         self._key = key
         self._on_mint = on_mint
+        self._before_mint = before_mint
 
     async def resolve(self) -> Owner:
         """Return the caller's owner. See the class docstring for the rules."""
@@ -87,6 +113,11 @@ class BearerKeyResolver:
                 logger.warning("credential_without_owner")
             else:
                 logger.info("owner_key_unrecognised")
+
+        # Asked before the rows exist, not after: the whole point is that
+        # creating an identity is a write, and a refusal that still wrote would
+        # be no refusal at all.
+        self._before_mint()
 
         owner, minted = new_owner()
         await self._owners.create(owner, minted)
@@ -105,4 +136,4 @@ def malformed_key_error(header: str) -> ApiError:
     )
 
 
-__all__ = ["BearerKeyResolver", "MintCallback", "malformed_key_error"]
+__all__ = ["BearerKeyResolver", "MintCallback", "MintGuard", "malformed_key_error"]

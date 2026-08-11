@@ -6,6 +6,7 @@ from typing import Annotated, Final
 from fastapi import APIRouter, File, Path, Query, UploadFile, status
 
 from app.api.deps import (
+    CostlyRequestDep,
     OwnerIdDep,
     RecordingRepositoryDep,
     RecordingStorageDep,
@@ -51,6 +52,7 @@ async def _iter_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
         ErrorCode.UNSUPPORTED_FORMAT,
         ErrorCode.AUDIO_TOO_LONG,
         ErrorCode.CORRUPTED_AUDIO,
+        ErrorCode.RATE_LIMITED,
         ErrorCode.INTERNAL_ERROR,
     ),
 )
@@ -59,6 +61,7 @@ async def upload_recording(
     storage: RecordingStorageDep,
     repository: RecordingRepositoryDep,
     owner_id: OwnerIdDep,
+    _limit: CostlyRequestDep,
     file: Annotated[
         UploadFile | str,
         File(description="The audio file to analyse (WAV or MP3)."),

@@ -274,6 +274,28 @@ to an account:
 What it *does* guarantee is that one visitor never sees another's recordings.
 That check happens on the server, in the database query, on every route.
 
+### Rate limits
+
+Requests are limited: how many new identities one address may create, and how
+many costly requests one identity may make. What that does **not** guarantee:
+
+- **It is not a defence against a distributed attacker.** The identity limit is
+  per address, so somebody with many addresses is bounded per address and not
+  in total.
+- **It is one process's memory.** A deployment running several API workers
+  multiplies the effective limit by the number of workers. A shared limit would
+  need a shared counter, which this deliberately does not have.
+- **A shared address shares the newcomer allowance.** An office, a school or a
+  phone network arriving for the first time all count against one bucket.
+  Anyone who already has a key is unaffected — presenting a recognised key never
+  touches that limit — but a genuine burst of *first* visits from one address
+  can be refused.
+- **It does not reclaim anything.** Identities created before the limit existed,
+  and those created within it, are never cleaned up. There is no retention
+  policy and this step did not add one.
+- **Reading is never limited**, so it is not a defence against someone reading
+  their own history repeatedly.
+
 ## Songs and mixed audio (Phase 8+)
 
 Pitch detection on a full mix is substantially less reliable than on an isolated

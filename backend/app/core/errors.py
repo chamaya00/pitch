@@ -90,6 +90,12 @@ class ErrorCode(StrEnum):
     #: nobody could ever reach them again.
     LAST_CREDENTIAL = "LAST_CREDENTIAL"
 
+    # Rate limiting (Step 10.3)
+    #: Too many requests from this caller, too quickly. Always accompanied by a
+    #: ``Retry-After`` header, because a limit a client cannot wait out
+    #: correctly is a limit that produces retry storms.
+    RATE_LIMITED = "RATE_LIMITED"
+
 
 #: Default HTTP status for each code. Every member of ``ErrorCode`` must appear
 #: here; ``test_errors.py`` enforces that so a new code cannot be added without
@@ -122,6 +128,7 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.ANALYSIS_NOT_FOUND: 404,
     ErrorCode.CREDENTIAL_NOT_FOUND: 404,
     ErrorCode.LAST_CREDENTIAL: 409,
+    ErrorCode.RATE_LIMITED: 429,
 }
 
 _STATUS_FALLBACK: Final[dict[int, ErrorCode]] = {
@@ -147,11 +154,17 @@ class ApiError(Exception):
         message: str,
         *,
         status_code: int | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code if status_code is not None else STATUS_BY_CODE[code]
+        #: Response headers this failure needs in order to be actionable. Only
+        #: ``Retry-After`` uses this today: a 429 without one tells a client to
+        #: back off but not by how much, which is how retry storms start.
+        #: Never a channel for anything the body would not also carry.
+        self.headers = headers
 
     def to_response_model(self) -> ErrorResponse:
         return ErrorResponse(error_code=self.code.value, message=self.message)
@@ -160,9 +173,14 @@ class ApiError(Exception):
         return f"ApiError(code={self.code.value!r}, status_code={self.status_code})"
 
 
-def _render(status_code: int, code: ErrorCode, message: str) -> JSONResponse:
+def _render(
+    status_code: int,
+    code: ErrorCode,
+    message: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     body = ErrorResponse(error_code=code.value, message=message)
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    return JSONResponse(status_code=status_code, content=body.model_dump(), headers=headers)
 
 
 def _log(request: Request, status_code: int, code: ErrorCode) -> None:
@@ -189,7 +207,7 @@ async def api_error_handler(request: Request, exc: Exception) -> JSONResponse:
     if not isinstance(exc, ApiError):  # pragma: no cover - registration guarantees the type
         raise exc
     _log(request, exc.status_code, exc.code)
-    return _render(exc.status_code, exc.code, exc.message)
+    return _render(exc.status_code, exc.code, exc.message, exc.headers)
 
 
 async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:

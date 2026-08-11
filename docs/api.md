@@ -865,6 +865,36 @@ on the analysis record and returned by `GET` inside a `200` response, never as
 an HTTP error status. `ANALYSIS_NOT_FOUND` is the exception — it describes the
 request, and is a real 404.
 
+Rate limiting (Step 10.3) adds one:
+
+| `error_code` | HTTP | Meaning |
+| --- | --- | --- |
+| `RATE_LIMITED` | 429 | Too many requests from this caller, too quickly |
+
+It always carries a `Retry-After` header giving whole seconds, and never less
+than 1 — a `Retry-After: 0` is an invitation to retry immediately, which is a
+retry storm rather than a back-off. The body is the ordinary envelope and
+deliberately says nothing about the limit, the window, the count or the key the
+request was counted under.
+
+There are two limits, keyed by two different things:
+
+- **New identities, per client address.** Every owner-scoped route mints an
+  identity when the key is absent or unrecognised, so an unauthenticated *read*
+  is a *write*. This bounds how many identities one client may create.
+  **A request presenting a recognised key never touches this limit**, so a
+  returning user on a shared address (an office, a school, a phone network) is
+  never refused because of a stranger.
+- **Costly requests, per owner.** Uploading, starting either analysis, asking
+  for generated feedback, and adding a key. Keyed by owner rather than by
+  address, so one person on a shared address cannot spend anybody else's
+  allowance.
+
+Reading is never limited: listing recordings, reading an analysis, comparison,
+progress and the identity summary are not charged. Neither is deleting an
+identity nor revoking a key — being told to come back later is the wrong answer
+to "delete my data" and to "revoke this key".
+
 Credentials (Step 10.2) add two more. Both describe the *request*, so both are
 real HTTP statuses:
 

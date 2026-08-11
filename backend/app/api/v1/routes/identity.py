@@ -22,6 +22,7 @@ import uuid
 from fastapi import APIRouter, status
 
 from app.api.deps import (
+    CostlyRequestDep,
     CredentialRepositoryDep,
     OwnerDataRepositoryDep,
     OwnerDeletionServiceDep,
@@ -132,11 +133,14 @@ async def delete_identity(
         "The optional `label` is for the holder's benefit — 'Phone', 'Laptop' — "
         "and carries no security weight."
     ),
-    responses=error_responses(ErrorCode.VALIDATION_ERROR, ErrorCode.INTERNAL_ERROR),
+    responses=error_responses(
+        ErrorCode.VALIDATION_ERROR, ErrorCode.RATE_LIMITED, ErrorCode.INTERNAL_ERROR
+    ),
 )
 async def create_credential(
     owner: OwnerDep,
     credentials: CredentialRepositoryDep,
+    _limit: CostlyRequestDep,
     body: CreateCredentialRequest | None = None,
 ) -> CreatedCredentialResponse:
     """Mint a credential for the **already resolved** owner.

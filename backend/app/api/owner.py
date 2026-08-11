@@ -7,6 +7,10 @@ One header in, one header out:
   then. A client stores it and sends it back; a client that does not simply gets
   a new identity next time and sees no history.
 
+Since Step 10.3 the adapter also supplies the resolver's mint guard: creating an
+identity is a write, so it is rate-limited per client address. Presenting a
+recognised key never reaches that guard.
+
 **This is not authentication and is not presented as one.** The key is a bearer
 credential with no password and no second factor — see
 ``services/owners/credentials.py`` for the limits, stated plainly. What it buys
@@ -26,6 +30,7 @@ from typing import Annotated, Final
 
 from fastapi import Header, Request, Response
 
+from app.api.rate_limit import guard_new_identity
 from app.core.logging import get_logger
 from app.services.owners.credentials import CredentialRepository
 from app.services.owners.identity import IdentityResolver
@@ -80,6 +85,11 @@ async def resolve_owner(
         credentials=credentials,
         key=clean_key(token),
         on_mint=lambda minted: response.headers.__setitem__(OWNER_HEADER, minted),
+        # The one place the identity boundary meets the rate limit. It is passed
+        # in rather than reached for, so the resolver stays a domain object that
+        # knows nothing about addresses, and a test can substitute a guard that
+        # counts calls.
+        before_mint=lambda: guard_new_identity(request),
     )
     return await resolver.resolve()
 
