@@ -366,6 +366,13 @@ def test_concurrent_revocations_cannot_strand_an_identity() -> None:
     one, and the owner is left with none — recordings still theirs, and no way
     in. The rule "never the last" is only true if it is enforced against a
     concurrent revocation, which is what this asserts.
+
+    The pool is warmed first, and that is load-bearing rather than tidy-up.
+    ``min_size`` is 1, so the second task would otherwise spend the race opening
+    a TCP connection and authenticating while the first ran to completion: the
+    two transactions never overlap and the test passes with the lock removed.
+    Removing ``FOR UPDATE`` must make this fail, so the connections have to
+    already exist when the race starts.
     """
 
     async def work(database: Database) -> None:
@@ -374,6 +381,10 @@ def test_concurrent_revocations_cannot_strand_an_identity() -> None:
         first = (await credentials.list_for_owner(owner.owner_id))[0]
         second, second_key = new_credential(owner.owner_id, "Phone")
         await credentials.create(second, second_key)
+
+        async with database.connection() as warm_one, database.connection() as warm_two:
+            await warm_one.execute("SELECT 1")
+            await warm_two.execute("SELECT 1")
 
         removed: list[uuid.UUID] = []
         refused: list[str] = []
