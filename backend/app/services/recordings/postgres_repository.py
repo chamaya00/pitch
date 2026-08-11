@@ -27,6 +27,11 @@ from app.services.comparison.sources import (
     ComparisonSource,
     source_from_row,
 )
+from app.services.progress.sources import (
+    PROGRESS_SQL,
+    ProgressRow,
+    row_from_record,
+)
 from app.services.recordings.history import (
     HISTORY_SQL,
     RecordingHistoryEntry,
@@ -68,6 +73,15 @@ class OwnedRecordingRepository(Protocol):
 
         An id that is unknown or belongs to somebody else is absent from the
         result rather than reported — see ``services/comparison/sources.py``.
+        """
+
+    async def progress_rows(self, owner_id: uuid.UUID, limit: int) -> list[ProgressRow]:
+        """The owner's most recent ``limit`` recordings as progress rows, oldest first.
+
+        Reads scalars out of the analysis documents rather than the documents
+        themselves — see ``services/progress/sources.py`` for why that is the
+        difference between a few hundred bytes per recording and most of a
+        megabyte.
         """
 
     async def owner_of(self, recording_id: str) -> uuid.UUID | None:
@@ -140,6 +154,11 @@ class PostgresRecordingRepository:
         async with self._db.connection() as connection:
             rows = await fetch_all(connection, HISTORY_SQL, (owner_id, limit))
         return [entry_from_row(row) for row in rows]
+
+    async def progress_rows(self, owner_id: uuid.UUID, limit: int) -> list[ProgressRow]:
+        async with self._db.connection() as connection:
+            rows = await fetch_all(connection, PROGRESS_SQL, (owner_id, limit))
+        return [row_from_record(row) for row in rows]
 
     async def comparison_sources(
         self, owner_id: uuid.UUID, recording_ids: list[str]

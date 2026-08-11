@@ -69,6 +69,7 @@ See [audio-analysis.md](audio-analysis.md).
 | `app/db/import_filesystem.py` | One-off import of pre-7M JSON documents |
 | `app/services/owners/` | Owner identity: model and repository |
 | `app/services/comparison/` | Comparing two recordings: pure arithmetic, eligibility, the owner-scoped query |
+| `app/services/progress/` | Measurements over time: the owner-scoped query, the window, the pure series build |
 | `app/services/audio/` | Upload validation, metadata, filesystem storage of the bytes |
 | `app/services/analysis/` | Speech domain: transcript, metrics, records |
 | `app/services/audio_analysis/` | Audio domain: pitch maths, detector, features, analyzer |
@@ -310,6 +311,7 @@ category errors, and this table exists to make them visible.
 | One-analysis-at-a-time | Partial unique indexes | PostgreSQL | Not an `asyncio.Lock` — that was removed in 7M |
 | One feedback run | `claim_feedback`, a single conditional `UPDATE` | PostgreSQL | Not a read-then-write |
 | Recording comparison | `services/comparison/` | Deterministic | Measurement comparison, never a score; four of seven metrics have no better direction |
+| Progress over time | `services/progress/` | Deterministic | Measurements over time, never a level or a trend line; `null` is a gap, never a zero |
 
 Two allocations are worth restating because they are the ones most likely to
 erode:
@@ -349,10 +351,37 @@ The query is targeted by primary key, not by owner history: see the comment on
 `COMPARISON_SOURCES_SQL` for the type cast that makes the difference, and the
 measurements behind it.
 
+### Progress (7O)
+
+The same three layers as comparison, for the same reason:
+
+| Layer | Module | May do |
+| --- | --- | --- |
+| Query | `progress/sources.py` + the recording repository | Load one owner's window, owner in the `WHERE` clause |
+| Service | `progress/service.py` | Bound the window and delegate |
+| Domain | `progress/series.py` | Build the series. No IO, no provider, no re-measurement |
+
+Two decisions are worth stating.
+
+**The analysis document is never selected.** Metrics live in a JSONB document
+that also holds the pitch timeline, so a document grows with the *length* of the
+recording rather than with the number of measurements in it. The query extracts
+each scalar by path. Measured on 200 owners × 50 two-minute recordings, one
+30-recording window: **125 ms and 14 KB** extracting scalars versus **676 ms and
+18 MB** reading the documents. The gap widens with recording length.
+
+**SQL selects, filters and orders; the domain defines progress.** What a null
+means, which analyses are eligible, what may be said about a change — all of it
+is in `series.py`, where it tests in microseconds without a database. The
+ordering is not re-derived there: SQL returned the window oldest-first with a
+deterministic `recording_id` tie-break, and re-sorting would put two definitions
+of "in order" in the codebase for one concept.
+
+**No AI, structurally.** `ProgressService` takes only the recording repository.
+There is no object in its graph through which a model could produce or judge a
+trend, which is a stronger guarantee than a rule saying it must not.
+
 ### Not built in Phase 7
 
-The progress chart over time. It is the last item in the phase and does not
-exist. Comparison says how two recordings differ; it says nothing about a
-direction of travel, and the caveat in [limitations.md](limitations.md) — that
-two recordings are only comparable under reasonably similar conditions — is the
-first thing a trend feature has to confront, over many more than two.
+Nothing. The phase is complete. **Phase 8 has not started** — no song analysis,
+key detection, BPM, melody extraction or transposition exists.

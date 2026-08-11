@@ -9,6 +9,7 @@ import type {
   NoteBreakdown,
   PitchTimeline,
   PublicConfig,
+  ProgressHistory,
   Recording,
   RecordingComparison,
   RecordingHistory,
@@ -376,6 +377,24 @@ export function compareRecordings(
 ): Promise<RecordingComparison> {
   const query = new URLSearchParams({ left_id: leftId, right_id: rightId });
   return apiFetch<RecordingComparison>(`/recordings/compare?${query}`, {
+    signal,
+    cache: "no-store",
+  });
+}
+
+/**
+ * The caller's own measurements over time, oldest first.
+ *
+ * Takes no recording ids: whose measurements come back is decided entirely on
+ * the server from the owner header, so there is no parameter through which a
+ * client could ask about somebody else.
+ */
+export function getProgressHistory(
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<ProgressHistory> {
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  return apiFetch<ProgressHistory>(`/recordings/progress${query}`, {
     signal,
     cache: "no-store",
   });

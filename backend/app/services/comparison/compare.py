@@ -26,6 +26,7 @@ from app.services.audio_analysis.models import (
     AudioMetrics,
     NoteSummary,
 )
+from app.services.audio_analysis.vocabulary import MetricDirection, MetricUnit
 from app.services.comparison.models import (
     CLIPPING_RATIO,
     DURATION_RATIO,
@@ -34,8 +35,6 @@ from app.services.comparison.models import (
     ComparedMetric,
     ComparedNote,
     ComparisonCaveat,
-    MetricDirection,
-    MetricUnit,
     NotePresence,
     compared_metric,
 )

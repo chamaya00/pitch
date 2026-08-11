@@ -23,6 +23,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import anyio
@@ -644,5 +645,151 @@ def test_comparison_sources_preserve_the_stored_pitch_timeline(backend: Any) -> 
         assert analysis is not None
         assert len(analysis.pitch_points) == 1
         assert analysis.pitch_points[0].note_name == "A4"
+
+    backend(work)
+
+
+# --- Progress rows ---------------------------------------------------------
+
+
+def test_progress_rows_come_back_oldest_first(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        for day in (3, 1, 2):
+            await prepared.recordings.create(
+                make_recording(created_at=datetime(2026, 8, day, tzinfo=UTC)), owner.owner_id
+            )
+
+        rows = await prepared.recordings.progress_rows(owner.owner_id, 10)
+
+        assert [row.recorded_at.day for row in rows] == [1, 2, 3]
+
+    backend(work)
+
+
+def test_progress_rows_tie_break_on_recording_id(backend: Any) -> None:
+    """Two recordings saved in the same instant must have one stable order."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        same = datetime(2026, 8, 5, tzinfo=UTC)
+        for recording_id in ("b" * 32, "a" * 32):
+            await prepared.recordings.create(
+                make_recording(recording_id=recording_id, created_at=same), owner.owner_id
+            )
+
+        rows = await prepared.recordings.progress_rows(owner.owner_id, 10)
+
+        assert [row.recording_id for row in rows] == ["a" * 32, "b" * 32]
+
+    backend(work)
+
+
+def test_progress_rows_window_the_most_recent_recordings(backend: Any) -> None:
+    """The window is taken from the newest end, then returned oldest first."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        for day in range(1, 6):
+            await prepared.recordings.create(
+                make_recording(created_at=datetime(2026, 8, day, tzinfo=UTC)), owner.owner_id
+            )
+
+        rows = await prepared.recordings.progress_rows(owner.owner_id, 2)
+
+        assert [row.recorded_at.day for row in rows] == [4, 5]
+
+    backend(work)
+
+
+def test_progress_rows_read_the_metrics_out_of_a_completed_analysis(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id))
+
+        row = (await prepared.recordings.progress_rows(owner.owner_id, 10))[0]
+
+        assert row.analysed is True
+        assert row.in_tune_ratio is not None
+        assert row.voiced_frames is not None
+        assert row.hop_length_samples is not None
+        assert row.sample_rate_hz is not None
+        assert row.lowest_note == "G2"
+
+    backend(work)
+
+
+def test_progress_rows_include_a_recording_with_no_analysis(backend: Any) -> None:
+    """It still belongs in its own history; the gap has to be visible."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+
+        rows = await prepared.recordings.progress_rows(owner.owner_id, 10)
+
+        assert [row.recording_id for row in rows] == [stored.recording_id]
+        assert rows[0].analysed is False
+        assert rows[0].in_tune_ratio is None
+
+    backend(work)
+
+
+@pytest.mark.parametrize("status", [AudioAnalysisStatus.PENDING, AudioAnalysisStatus.ANALYZING])
+def test_progress_rows_ignore_an_unfinished_analysis(backend: Any, status: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(make_audio(stored.recording_id, status=status))
+
+        rows = await prepared.recordings.progress_rows(owner.owner_id, 10)
+
+        assert rows[0].analysed is False
+
+    backend(work)
+
+
+def test_progress_rows_ignore_a_failed_analysis(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            make_audio(
+                stored.recording_id,
+                status=AudioAnalysisStatus.FAILED,
+                error_code="INSUFFICIENT_PITCH_SIGNAL",
+            )
+        )
+
+        rows = await prepared.recordings.progress_rows(owner.owner_id, 10)
+
+        assert rows[0].analysed is False
+        assert rows[0].in_tune_ratio is None
+
+    backend(work)
+
+
+def test_progress_rows_never_include_another_owners_recording(backend: Any) -> None:
+    """The security property of the progress query, asserted against real SQL."""
+
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        await prepared.recordings.create(make_recording(), theirs.owner_id)
+        ours = await prepared.recordings.create(make_recording(), mine.owner_id)
+
+        rows = await prepared.recordings.progress_rows(mine.owner_id, 10)
+
+        assert [row.recording_id for row in rows] == [ours.recording_id]
+
+    backend(work)
+
+
+def test_progress_rows_are_empty_for_an_owner_with_nothing(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+
+        assert await prepared.recordings.progress_rows(owner.owner_id, 10) == []
 
     backend(work)

@@ -200,6 +200,44 @@ there is no field in the response that could hold one.
   nothing about a direction of travel, and there is no progress tracking in this
   product yet.
 
+## Measurements over time
+
+Progress tracking shows **your recorded measurements over time**. That is the
+whole claim. It is not a level, a grade, a ranking, or evidence that anyone is
+becoming a better singer.
+
+- **Every point came from a recording made under conditions this system cannot
+  measure.** Microphone, room, distance, effort, warm-up and physical condition
+  all move these numbers, and none of them is measured or corrected for. A
+  change between two points may be entirely about the room. There is no
+  "condition score", because there is nothing to compute one from.
+- **Four of the seven series have no better direction.** Detected range, voiced
+  share, pitched time and recording length are described, never framed as
+  improvement. A wider detected range is bounded by what was performed and by
+  the microphone.
+- **The three directed series are about equal temperament, not singing.** A
+  higher share of pitched time within 25 cents of a note, a smaller typical
+  distance from that note, and a smaller spread of placement. Slides, vibrato,
+  bends and non-Western intonation move all three without anything being wrong.
+- **No trend is calculated.** There is no slope, regression, moving average,
+  percentage-improvement figure or forecast. The strongest statement made is how
+  the latest measured value compares with the previous measured one.
+- **Two points are not a trend**, and the product says so rather than letting a
+  line between two dots imply otherwise. Three measured recordings is the
+  minimum before a line is drawn as a line.
+- **Unmeasured recordings are gaps, never zeroes.** A recording with no
+  completed analysis, or one whose analysis completed without a particular
+  measurement, contributes no point — and still appears in the table with the
+  reason, because it belongs in its own history.
+- **Loudness and spectral measurements are not plotted.** RMS and peak depend on
+  input gain; the spectral features have no validated interpretation here; note
+  count is not an achievement.
+- **Comparable practice sessions would need controlled conditions** — the same
+  microphone, room, distance and warm-up — which this product does not record
+  and does not ask for. Until it does, the honest answer is to show the
+  measurements with the caveat rather than to filter points by a condition model
+  that does not exist.
+
 ## Recording history and identity
 
 Recordings are linked to an **anonymous identifier stored in the browser**, not

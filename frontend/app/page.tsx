@@ -1,6 +1,7 @@
 import { BackendStatus } from "@/components/backend-status";
 import { CapturePanel } from "@/components/capture-panel";
 import { RecordingHistory } from "@/components/history/recording-history";
+import { ProgressPanel } from "@/components/progress/progress-panel";
 
 const MEASURED = [
   {
@@ -45,6 +46,10 @@ export default function Home() {
 
       <div className="mt-16">
         <RecordingHistory />
+      </div>
+
+      <div className="mt-16">
+        <ProgressPanel />
       </div>
 
       <section className="border-t border-border py-14 mt-16">

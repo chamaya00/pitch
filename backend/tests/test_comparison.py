@@ -26,6 +26,7 @@ from app.services.audio_analysis.models import (
     SpectralFeatures,
     VocalRange,
 )
+from app.services.audio_analysis.vocabulary import MetricDirection, MetricUnit
 from app.services.comparison.compare import (
     compare_metrics,
     compare_notes,
@@ -36,8 +37,6 @@ from app.services.comparison.models import (
     ComparedMetric,
     ComparisonCaveat,
     MetricAvailability,
-    MetricDirection,
-    MetricUnit,
     NotePresence,
     compared_metric,
 )

@@ -6,8 +6,9 @@ the types here are shaped to make anything more ambitious impossible to express:
 
 * There is no field that could hold a composite score, a rating or a ranking.
   The absence is the guarantee — the same technique ``AudioFeedback`` uses.
-* Every delta carries its **unit** and its **direction semantics**. A number
-  without those is not a comparison, it is a coincidence.
+* Every delta carries its **unit** and its **direction semantics** — both from
+  ``audio_analysis/vocabulary.py``, shared with the progress series. A number
+  without them is not a comparison, it is a coincidence.
 * Every metric carries its **availability**. A measurement one recording has and
   the other does not produces no delta at all, rather than a delta against zero.
 
@@ -27,36 +28,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.core.errors import ErrorCode
 from app.services.audio_analysis.models import NoteSummary
 
-
-class MetricUnit(StrEnum):
-    """What a delta is expressed in.
-
-    ``PERCENTAGE_POINTS`` exists as its own unit because the alternative is the
-    most common numerical lie in software: a ratio moving from 0.50 to 0.56 is
-    **6 percentage points**, not 6 percent (it is 12 percent). Ratios are
-    converted once, here, and every consumer reads the unit rather than guessing.
-    """
-
-    PERCENTAGE_POINTS = "percentage_points"
-    CENTS = "cents"
-    SEMITONES = "semitones"
-    SECONDS = "seconds"
-
-
-class MetricDirection(StrEnum):
-    """Whether a direction of change means anything, and exactly what.
-
-    Only two metrics in this system have a defensible desirable direction, and
-    both are defined relative to equal-tempered pitch rather than to singing:
-    being nearer the nearest semitone, and being steadier about it. Everything
-    else is ``NEUTRAL`` — including the detected range, which is bounded by what
-    was performed and by the microphone, so a wider one is not an achievement.
-    """
-
-    HIGHER_IS_NEARER_THE_NOTE = "higher_is_nearer_the_note"
-    LOWER_IS_NEARER_THE_NOTE = "lower_is_nearer_the_note"
-    LOWER_IS_STEADIER = "lower_is_steadier"
-    NEUTRAL = "neutral"
+# The units and directions live beside the measurements they describe, so the
+# progress series and this comparison cannot drift into two vocabularies.
+from app.services.audio_analysis.vocabulary import MetricDirection, MetricUnit
 
 
 class MetricAvailability(StrEnum):

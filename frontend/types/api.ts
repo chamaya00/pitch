@@ -447,3 +447,93 @@ export interface RecordingComparison {
   notes: ComparedNote[];
   caveats: string[];
 }
+
+/* --- Progress over time ---------------------------------------------------- */
+
+/** The measurements that may be plotted over time. */
+export type ProgressMetricKey =
+  | "in_tune_ratio"
+  | "mean_abs_cents_deviation"
+  | "cents_std"
+  | "semitone_span"
+  | "voiced_ratio"
+  | "voiced_seconds"
+  | "duration_seconds";
+
+/**
+ * Whether a recording contributed a number, and if not, why.
+ *
+ * Only `measured` carries a value. The other two are gaps in the line — never
+ * zeroes, and never omitted from the table, because a recording belongs in its
+ * own history whether or not it could be measured.
+ */
+export type PointStatus = "measured" | "not_measured" | "not_eligible";
+
+export interface ProgressPoint {
+  recording_id: string;
+  recorded_at: string;
+  status: PointStatus;
+  value: number | null;
+}
+
+/**
+ * How the latest measured value compares with the previous measured one.
+ *
+ * `insufficient_data` is not `unchanged`: one means there is no basis for
+ * saying, the other is a claim.
+ */
+export type ObservationDirection =
+  | "higher"
+  | "lower"
+  | "unchanged"
+  | "insufficient_data";
+
+export interface LatestObservation {
+  direction: ObservationDirection;
+  latest: number | null;
+  previous: number | null;
+  delta: number | null;
+  latest_recording_id: string | null;
+  previous_recording_id: string | null;
+}
+
+export interface ProgressSeries {
+  metric: ProgressMetricKey;
+  label: string;
+  unit: MetricUnit;
+  direction: MetricDirection;
+  points: ProgressPoint[];
+  observation: LatestObservation;
+  measured_count: number;
+}
+
+export interface ProgressRecording {
+  recording_id: string;
+  recorded_at: string;
+  original_filename: string;
+  duration_seconds: number;
+  audio_format: string;
+  analysed: boolean;
+  lowest_note: string | null;
+  highest_note: string | null;
+}
+
+/**
+ * How much measured history exists, and therefore what may honestly be shown.
+ *
+ * `pair` is two measurements — a comparison, emphatically not a trend.
+ */
+export type HistoryDepth = "empty" | "single" | "pair" | "series";
+
+/**
+ * An owner's recorded measurements over time.
+ *
+ * Note what has no field here: a score, a level, a rank, or any claim that the
+ * singing changed.
+ */
+export interface ProgressHistory {
+  series: ProgressSeries[];
+  recordings: ProgressRecording[];
+  depth: HistoryDepth;
+  limit: number;
+}

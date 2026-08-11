@@ -98,6 +98,122 @@ how it went.
 The stored metadata of one recording, provided it belongs to the caller.
 Otherwise `404 RECORDING_NOT_FOUND` — see above.
 
+### `GET /api/v1/recordings/progress`
+
+The caller's recorded measurements over time, oldest first.
+
+**Query parameters**
+
+| Name | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `limit` | `30` | 1–200 | How many of the most recent recordings to include |
+
+**This is a history of measurements, not a score.** There is no level, no grade,
+no ranking and no claim that the singing improved — the response has no field
+that could hold one. Four of the seven series carry `direction: "neutral"`,
+because a change in them means nothing in particular: a wider detected range,
+more pitched time, a higher voiced share and a longer recording are facts about
+what was recorded.
+
+**The three directed series are defined against equal temperament**, not against
+singing. Slides, vibrato, bends and non-Western intonation move all three
+without anything being wrong, and none of them measures skill.
+
+**No trend line is computed.** There is no slope, regression, moving average,
+percentage-improvement figure or forecast. The strongest statement made is how
+the latest measured value compares with the previous measured one.
+
+**200 OK**
+
+```json
+{
+  "series": [
+    {
+      "metric": "in_tune_ratio",
+      "label": "Share of pitched time within 25 cents of a note",
+      "unit": "percentage_points",
+      "direction": "higher_is_nearer_the_note",
+      "points": [
+        { "recording_id": "4b20…", "recorded_at": "2026-08-11T09:07:12.400Z",
+          "status": "measured", "value": 0.0 },
+        { "recording_id": "78 67…", "recorded_at": "2026-08-11T09:07:20.100Z",
+          "status": "not_eligible", "value": null }
+      ],
+      "observation": {
+        "direction": "higher", "latest": 100.0, "previous": 0.0, "delta": 100.0,
+        "latest_recording_id": "…", "previous_recording_id": "…"
+      },
+      "measured_count": 2
+    }
+  ],
+  "recordings": [
+    { "recording_id": "4b20…", "recorded_at": "2026-08-11T09:07:12.400Z",
+      "original_filename": "take-one.wav", "duration_seconds": 2.0,
+      "audio_format": "wav", "analysed": true,
+      "lowest_note": "A4", "highest_note": "A4" }
+  ],
+  "depth": "series",
+  "limit": 30
+}
+```
+
+#### The seven series
+
+| `metric` | `unit` | `direction` |
+| --- | --- | --- |
+| `in_tune_ratio` | percentage_points | higher_is_nearer_the_note |
+| `mean_abs_cents_deviation` | cents | lower_is_nearer_the_note |
+| `cents_std` | cents | lower_is_steadier |
+| `semitone_span` | semitones | **neutral** — wider is not better |
+| `voiced_ratio` | percentage_points | neutral |
+| `voiced_seconds` | seconds | neutral |
+| `duration_seconds` | seconds | neutral |
+
+The same seven the comparison endpoint uses, so the vocabulary is learned once.
+
+**No loudness or spectral measurement is plotted.** RMS and peak depend on input
+gain; the spectral features have no validated interpretation in this project;
+clipping is a recording condition, not progress; and note count is not an
+achievement. Plotting any of them over time would invent an interpretation this
+system refuses to make.
+
+#### Point statuses
+
+| `status` | Meaning | Carries a value |
+| --- | --- | --- |
+| `measured` | A real measurement | yes |
+| `not_measured` | The analysis completed; this metric was unavailable | no |
+| `not_eligible` | No completed analysis: never run, running, failed, or no reliable pitch | no |
+
+`null` is **never** a zero. A client draws the last two as gaps, and must not
+plot them at the axis. Both still appear in `recordings`, because a recording
+belongs in its own history whether or not it could be measured.
+
+#### Ordering
+
+By the recording's server-assigned `created_at`, oldest first, with
+`recording_id` as the tie-break so two recordings created in the same instant
+have one deterministic order. The client clock is never consulted. The window is
+taken from the most recent end and then returned oldest-first.
+
+#### `depth`
+
+How much *measured* history exists, so a client can be honest about it:
+
+| `depth` | Meaning |
+| --- | --- |
+| `empty` | Nothing measured |
+| `single` | One measurement — nothing to compare it with |
+| `pair` | Two — a comparison, **not** a trend |
+| `series` | Three or more |
+
+#### No AI
+
+Progress is deterministic arithmetic over stored measurements. No provider is
+consulted, and `ProgressService` has no provider dependency through which one
+could be — a model producing one of these numbers would be producing a
+measurement.
+
 ### `GET /api/v1/recordings/compare`
 
 Place two recordings' measurements side by side.

@@ -12,7 +12,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 4 | Microphone recording in the browser | ✅ Complete |
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
-| 7 | User history: users, recordings, analyses, comparison, progress chart | Partly — see below |
+| 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Planned |
@@ -57,11 +57,22 @@ Built through Step 7M:
 - PostgreSQL as the source of truth, anonymous owners, recording history (7M)
 - Recording comparison: two owned recordings side by side, with deterministic
   deltas, explicit units and measurable condition caveats (7N)
+- Progress tracking: an owner's measurements over time, with per-point
+  measured/unmeasured/ineligible states, an accessible chart and table, and no
+  trend line (7O)
 
-**Not yet built** in Phase 7: the progress chart over time. It is the last
-item in the phase and is not claimed to exist.
+Phase 7 is complete. What it deliberately does **not** contain, in any of its
+three user-facing features:
 
-Comparison deliberately does **not** produce an overall figure, a ranking or
-a judgement about which recording is better; four of its seven metrics have no
-desirable direction at all. See [api.md](api.md) and
-[limitations.md](limitations.md).
+- an overall figure, a level, a grade or a ranking — no type in the system has a
+  field that could hold one;
+- a claim that anyone's singing improved;
+- an AI judgement of comparison or progress. Both are deterministic arithmetic
+  over stored measurements, and neither service takes a provider.
+
+Four of the seven measurements have no desirable direction, and the three that
+do are defined against equal temperament rather than against singing. See
+[api.md](api.md) and [limitations.md](limitations.md).
+
+**Phase 8 has not started.** Nothing about song analysis, key, BPM, melody
+extraction or transposition exists.

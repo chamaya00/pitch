@@ -46,6 +46,7 @@ from app.services.orchestration.analysis import AnalysisService
 from app.services.orchestration.audio_analysis import AudioAnalysisService
 from app.services.owners.models import Owner
 from app.services.owners.repository import OwnerRepository, PostgresOwnerRepository
+from app.services.progress.service import ProgressService
 from app.services.recordings.postgres_repository import (
     OwnedRecordingRepository,
     PostgresRecordingRepository,
@@ -251,3 +252,16 @@ def get_comparison_service(recordings: RecordingRepositoryDep) -> ComparisonServ
 
 
 ComparisonServiceDep = Annotated[ComparisonService, Depends(get_comparison_service)]
+
+
+def get_progress_service(recordings: RecordingRepositoryDep) -> ProgressService:
+    """Assemble the progress workflow.
+
+    Like the comparison service, it takes only the recording repository — and
+    like it, the absence of a provider dependency is the guarantee that no model
+    can produce or judge a trend, rather than a promise that none will.
+    """
+    return ProgressService(recordings=recordings)
+
+
+ProgressServiceDep = Annotated[ProgressService, Depends(get_progress_service)]

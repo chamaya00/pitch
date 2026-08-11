@@ -43,6 +43,7 @@ from app.services.audio_analysis.postgres_repository import (
 )
 from app.services.comparison.sources import ComparisonSource
 from app.services.owners.models import Owner, hash_token, new_owner
+from app.services.progress.sources import ProgressRow
 from app.services.recordings.history import RecordingHistoryEntry
 from app.services.recordings.models import Recording
 from app.services.recordings.postgres_repository import RecordingAlreadyExistsError
@@ -160,6 +161,29 @@ class InMemoryRecordingRepository:
             )
             sources[recording_id] = ComparisonSource(recording=recording, audio_analysis=analysis)
         return sources
+
+    async def progress_rows(self, owner_id: uuid.UUID, limit: int) -> list[ProgressRow]:
+        """Mirrors the SQL: the latest `limit` recordings, returned oldest first.
+
+        The window is taken from the *newest* end and then reversed, which is
+        what the real query's inner/outer ordering does — a double that sliced
+        the oldest `limit` instead would pass its own tests and disagree with
+        the database.
+        """
+        newest = await self.list_for_owner(owner_id, limit)
+        rows: list[ProgressRow] = []
+        for recording in reversed(newest):
+            analysis = (
+                await self._audio_analyses.latest_for_recording(recording.recording_id)
+                if self._audio_analyses is not None
+                else None
+            )
+            # The query asks only for completed analyses, so anything else reads
+            # the same as none.
+            if analysis is not None and analysis.status is not AudioAnalysisStatus.COMPLETED:
+                analysis = None
+            rows.append(_progress_row(recording, analysis))
+        return rows
 
     async def owner_of(self, recording_id: str) -> uuid.UUID | None:
         entry = self._records.get(recording_id)
@@ -325,3 +349,36 @@ def override_repositories(app: FastAPI, doubles: Doubles) -> None:
     app.dependency_overrides[deps.get_recording_repository] = lambda: doubles.recordings
     app.dependency_overrides[deps.get_analysis_repository] = lambda: doubles.analyses
     app.dependency_overrides[deps.get_audio_analysis_repository] = lambda: doubles.audio_analyses
+
+
+def _progress_row(recording: Recording, analysis: AudioAnalysis | None) -> ProgressRow:
+    """Read the same scalars the SQL extracts by JSONB path."""
+    metrics = analysis.metrics if analysis is not None else None
+    if metrics is None:
+        return ProgressRow(
+            recording_id=recording.recording_id,
+            recorded_at=recording.created_at,
+            original_filename=recording.original_filename,
+            recording_duration_seconds=recording.duration_seconds,
+            audio_format=recording.audio_format.value,
+            analysed=False,
+        )
+    return ProgressRow(
+        recording_id=recording.recording_id,
+        recorded_at=recording.created_at,
+        original_filename=recording.original_filename,
+        recording_duration_seconds=recording.duration_seconds,
+        audio_format=recording.audio_format.value,
+        analysed=True,
+        duration_seconds=metrics.duration_seconds,
+        in_tune_ratio=metrics.stability.in_tune_ratio,
+        mean_abs_cents_deviation=metrics.stability.mean_abs_cents_deviation,
+        cents_std=metrics.stability.cents_std,
+        voiced_ratio=metrics.stability.voiced_ratio,
+        voiced_frames=metrics.stability.voiced_frames,
+        hop_length_samples=metrics.settings.hop_length_samples,
+        sample_rate_hz=metrics.settings.sample_rate_hz,
+        semitone_span=None if metrics.pitch is None else metrics.pitch.semitone_span,
+        lowest_note=None if metrics.pitch is None else metrics.pitch.lowest_note,
+        highest_note=None if metrics.pitch is None else metrics.pitch.highest_note,
+    )
