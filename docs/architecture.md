@@ -281,3 +281,49 @@ cd frontend && npm run lint && npm run typecheck && npm run build
 
 `mypy` runs in strict mode over `app/`. `ruff` lints and formats both `app/` and
 `tests/`.
+
+## Feature allocation, Steps 7A–7M
+
+Where each capability lives, and what it is *not*. Read the "Not" column as
+part of the feature: most of the mistakes available in this product are
+category errors, and this table exists to make them visible.
+
+| Capability | Where it lives | Layer | Not |
+| --- | --- | --- | --- |
+| Upload, validation, metadata | `services/audio/`, `routes/recordings.py` | Deterministic | Not transcoding; format is decided by content, never by extension |
+| Recording bytes | `services/audio/storage.py` (filesystem) | Deterministic | Not in the database |
+| Recording metadata, analyses, owners | `db/`, `services/*/postgres_repository.py` | PostgreSQL | Not an ORM; not the filesystem |
+| Owner identity | `api/owner.py`, `services/owners/` | PostgreSQL | **Not authentication**: no password, no revocation, no recovery |
+| Ownership enforcement | Every repository read, in SQL | PostgreSQL | Not frontend filtering; not a `403` |
+| Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed |
+| Speech transcription | `services/ai/deepgram.py` behind `SpeechToTextProvider` | Provider | Not a measurement; provenance travels with it |
+| Speech metrics | `services/analysis/metrics.py` | Deterministic | Counted from the transcript, never estimated |
+| Speech feedback | `services/ai/claude.py` | Provider | Prose about numbers; never produces a number |
+| Backend pitch detection | `services/audio_analysis/detector.py` (NSDF) | Deterministic | Not CREPE, not librosa, not the browser detector |
+| Detected range, stability, loudness, spectrum | `services/audio_analysis/analyzer.py` | Deterministic | Range is *this recording*, never physiological; RMS/peak are not LUFS |
+| Note breakdown | `services/audio_analysis/notes.py` | Deterministic | Share of **voiced** time, not of duration; not musical transcription |
+| Audio feedback | `services/ai/claude.py` via `AudioFeedbackProvider` | Provider | Never invoked on `INSUFFICIENT_PITCH_SIGNAL`; no timbre labels, no score |
+| Live pitch readout | `frontend/lib/pitch-detector.ts` | Browser-local | Never uploaded; never compared with the backend result |
+| Live Vocal Practice | `frontend/lib/live-practice.ts`, `hooks/use-live-stats.ts` | Browser-local | "Not enough yet" ≠ 0%; not a singing-ability score |
+| Microphone recording | `frontend/lib/live-pitch-engine.ts`, `lib/wav.ts` | Browser-local | Uploaded only on an explicit action |
+| One-analysis-at-a-time | Partial unique indexes | PostgreSQL | Not an `asyncio.Lock` — that was removed in 7M |
+| One feedback run | `claim_feedback`, a single conditional `UPDATE` | PostgreSQL | Not a read-then-write |
+
+Two allocations are worth restating because they are the ones most likely to
+erode:
+
+- **Every number in the UI comes from the deterministic column.** A model is
+  given already-computed measurements and returns language. It has no field in
+  which to return a measurement, which is the cheapest guarantee available.
+- **The live browser estimate and the backend audio analysis are different
+  measurements** of the same kind of quantity, by different algorithms over
+  different windows. Neither validates the other and the UI never implies they
+  agree.
+
+### Not built in Phase 7
+
+Comparison between two recordings, and a progress chart over time. Both were in
+the phase's original scope and neither exists. They now have the persistent,
+owned, queryable history they need — and the caveat in
+[limitations.md](limitations.md) that two recordings are only comparable when
+captured under similar conditions is the first thing either has to confront.

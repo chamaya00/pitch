@@ -17,8 +17,10 @@ from typing import Any
 
 import anyio
 import pytest
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
+from app.api.deps import get_owner_id
 from app.api.owner import OWNER_HEADER
 from app.core.config import Settings, get_settings
 from app.main import create_app
@@ -342,3 +344,73 @@ def test_the_owner_header_is_exposed_to_cross_origin_javascript(client: TestClie
 
     exposed = response.headers.get("access-control-expose-headers", "")
     assert OWNER_HEADER.lower() in exposed.lower()
+
+
+# --- The dependency graph itself -------------------------------------------
+
+
+def _api_routes(container: Any, seen: set[int] | None = None) -> list[APIRoute]:
+    """Every route in the app, including ones behind an included router.
+
+    Recursive because this FastAPI nests included routers behind a wrapper whose
+    real routes hang off ``original_router``. Walking only ``app.routes`` finds
+    one route and would make the check below pass while inspecting nothing.
+    """
+    seen = seen if seen is not None else set()
+    if id(container) in seen:
+        return []
+    seen.add(id(container))
+
+    found: list[APIRoute] = []
+    for route in getattr(container, "routes", []):
+        if isinstance(route, APIRoute):
+            found.append(route)
+        else:
+            found.extend(_api_routes(route, seen))
+    inner = getattr(container, "original_router", None)
+    if inner is not None:
+        found.extend(_api_routes(inner, seen))
+    return found
+
+
+def _resolves_an_owner(dependant: Any, depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    return any(
+        sub.call is get_owner_id or _resolves_an_owner(sub, depth + 1)
+        for sub in dependant.dependencies
+    )
+
+
+def test_every_recording_route_resolves_an_owner(
+    app_and_doubles: tuple[Any, Doubles],
+) -> None:
+    """Enumerated from the dependency graph, so a new route cannot skip it.
+
+    The per-route tests above check the routes that exist today. This one checks
+    the routes that exist *at all*: adding an endpoint under `/recordings` and
+    forgetting the owner dependency fails here rather than shipping a leak
+    nobody wrote a test for.
+    """
+    app, _ = app_and_doubles
+    routes = _api_routes(app)
+
+    assert len(routes) > 10, "the walk found almost nothing; it is not inspecting the app"
+
+    unscoped = [
+        f"{sorted(route.methods - {'HEAD', 'OPTIONS'})} {route.path}"
+        for route in routes
+        if "/recordings" in route.path and not _resolves_an_owner(route.dependant)
+    ]
+    assert unscoped == []
+
+
+def test_the_route_walk_would_notice_an_unscoped_route(
+    app_and_doubles: tuple[Any, Doubles],
+) -> None:
+    """Guards the guard: a walk that finds nothing would pass vacuously."""
+    app, _ = app_and_doubles
+    paths = {route.path for route in _api_routes(app)}
+
+    assert "/recordings" in paths
+    assert "/recordings/{recording_id}/audio-analysis/pitch" in paths
