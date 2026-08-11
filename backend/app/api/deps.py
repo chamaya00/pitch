@@ -1,16 +1,25 @@
 """Shared FastAPI dependencies.
 
-Services are constructed per request from settings. Construction is trivial —
-both hold a path and no open resources — so this costs nothing and keeps tests
-able to point the whole stack at a temporary directory by overriding
-``get_settings`` alone.
+Services are constructed per request from settings and from the application's
+one open connection pool. Construction stays trivial — a repository holds a
+reference to the pool and nothing else — so this costs nothing and keeps tests
+able to point the whole stack somewhere else by overriding a single dependency.
+
+**The pool is not built here.** It is opened once at startup and closed at
+shutdown (see ``app/main.py``); this module only reads it off the application
+state. A pool built per request would open a connection per request, which is
+the problem a pool exists to solve.
 """
 
+import uuid
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request, Response
 
+from app.api.owner import OwnerTokenHeader, resolve_owner
 from app.core.config import Settings, get_settings
+from app.core.errors import ApiError, ErrorCode
+from app.db.pool import Database
 from app.services.ai.errors import ProviderError
 from app.services.ai.factory import (
     build_audio_feedback_provider,
@@ -22,35 +31,89 @@ from app.services.ai.protocols import (
     FeedbackProvider,
     SpeechToTextProvider,
 )
-from app.services.analysis.repository import AnalysisRepository, JsonFileAnalysisRepository
+from app.services.analysis.postgres_repository import (
+    AsyncAnalysisRepository,
+    PostgresAnalysisRepository,
+)
 from app.services.audio.storage import RecordingStorage
 from app.services.audio_analysis.analyzer import AudioAnalyzer, SignalAudioAnalyzer
-from app.services.audio_analysis.repository import (
-    AudioAnalysisRepository,
-    JsonFileAudioAnalysisRepository,
+from app.services.audio_analysis.postgres_repository import (
+    AsyncAudioAnalysisRepository,
+    PostgresAudioAnalysisRepository,
 )
 from app.services.orchestration.analysis import AnalysisService
 from app.services.orchestration.audio_analysis import AudioAnalysisService
-from app.services.recordings.repository import (
-    JsonFileRecordingRepository,
-    RecordingRepository,
+from app.services.owners.models import Owner
+from app.services.owners.repository import OwnerRepository, PostgresOwnerRepository
+from app.services.recordings.postgres_repository import (
+    OwnedRecordingRepository,
+    PostgresRecordingRepository,
 )
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+
+def get_database(request: Request) -> Database:
+    """The pool opened at startup.
+
+    Raises:
+        ApiError: ``INTERNAL_ERROR`` if no pool is attached. That means the
+            application started without ``DATABASE_URL``; failing loudly here
+            beats serving requests against a store that is not there.
+    """
+    database: Database | None = getattr(request.app.state, "database", None)
+    if database is None:
+        raise ApiError(ErrorCode.INTERNAL_ERROR, "Storage is not available.")
+    return database
+
+
+DatabaseDep = Annotated[Database, Depends(get_database)]
 
 
 def get_recording_storage(settings: SettingsDep) -> RecordingStorage:
     return RecordingStorage(settings.storage_root)
 
 
-def get_recording_repository(settings: SettingsDep) -> RecordingRepository:
-    """Return the active repository.
+def get_recording_repository(database: DatabaseDep) -> OwnedRecordingRepository:
+    """Return the active repository, annotated as the protocol.
 
-    The annotation is the protocol, not the implementation: routes depend on
-    the interface, so a database-backed repository can replace this in Phase 7
-    without any route changing.
+    Every method on that protocol takes an owner id, so no route can read a
+    recording without saying whose it is.
     """
-    return JsonFileRecordingRepository(settings.storage_root)
+    return PostgresRecordingRepository(database)
+
+
+def get_owner_repository(database: DatabaseDep) -> OwnerRepository:
+    return PostgresOwnerRepository(database)
+
+
+OwnerRepositoryDep = Annotated[OwnerRepository, Depends(get_owner_repository)]
+
+
+async def get_owner(
+    request: Request,
+    response: Response,
+    owners: OwnerRepositoryDep,
+    token: OwnerTokenHeader = None,
+) -> Owner:
+    """Resolve — or mint — the caller's identity. See ``app/api/owner.py``."""
+    return await resolve_owner(request, response, owners, token)
+
+
+OwnerDep = Annotated[Owner, Depends(get_owner)]
+
+
+async def get_owner_id(owner: OwnerDep) -> uuid.UUID:
+    """The id every owner-scoped service call is given.
+
+    Routes depend on this rather than on the ``Owner``: an id is all a service
+    needs, and handing it the whole record would invite reading anything else
+    off it.
+    """
+    return owner.owner_id
+
+
+OwnerIdDep = Annotated[uuid.UUID, Depends(get_owner_id)]
 
 
 def get_speech_to_text_provider(settings: SettingsDep) -> SpeechToTextProvider:
@@ -88,14 +151,14 @@ def get_audio_feedback_provider(settings: SettingsDep) -> AudioFeedbackProvider:
         raise exc.to_api_error() from exc
 
 
-def get_analysis_repository(settings: SettingsDep) -> AnalysisRepository:
+def get_analysis_repository(database: DatabaseDep) -> AsyncAnalysisRepository:
     """Return the active analysis repository, annotated as the protocol."""
-    return JsonFileAnalysisRepository(settings.storage_root)
+    return PostgresAnalysisRepository(database)
 
 
-def get_audio_analysis_repository(settings: SettingsDep) -> AudioAnalysisRepository:
+def get_audio_analysis_repository(database: DatabaseDep) -> AsyncAudioAnalysisRepository:
     """Return the active audio-analysis repository, annotated as the protocol."""
-    return JsonFileAudioAnalysisRepository(settings.storage_root)
+    return PostgresAudioAnalysisRepository(database)
 
 
 def get_audio_analyzer() -> AudioAnalyzer:
@@ -110,12 +173,12 @@ def get_audio_analyzer() -> AudioAnalyzer:
 
 
 RecordingStorageDep = Annotated[RecordingStorage, Depends(get_recording_storage)]
-RecordingRepositoryDep = Annotated[RecordingRepository, Depends(get_recording_repository)]
+RecordingRepositoryDep = Annotated[OwnedRecordingRepository, Depends(get_recording_repository)]
 SpeechToTextProviderDep = Annotated[SpeechToTextProvider, Depends(get_speech_to_text_provider)]
 FeedbackProviderDep = Annotated[FeedbackProvider, Depends(get_feedback_provider)]
-AnalysisRepositoryDep = Annotated[AnalysisRepository, Depends(get_analysis_repository)]
+AnalysisRepositoryDep = Annotated[AsyncAnalysisRepository, Depends(get_analysis_repository)]
 AudioAnalysisRepositoryDep = Annotated[
-    AudioAnalysisRepository, Depends(get_audio_analysis_repository)
+    AsyncAudioAnalysisRepository, Depends(get_audio_analysis_repository)
 ]
 AudioAnalyzerDep = Annotated[AudioAnalyzer, Depends(get_audio_analyzer)]
 AudioFeedbackProviderDep = Annotated[AudioFeedbackProvider, Depends(get_audio_feedback_provider)]

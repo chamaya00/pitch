@@ -15,8 +15,9 @@ them.** Every test that could be satisfied by a model inventing a number is
 written so that it is not.
 """
 
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import anyio
 import pytest
@@ -50,10 +51,12 @@ from app.services.audio_analysis.models import (
     SpectralFeatures,
     VocalRange,
 )
-from app.services.audio_analysis.repository import JsonFileAudioAnalysisRepository
 from app.services.orchestration.audio_analysis import AudioAnalysisService
 from app.services.recordings.models import Recording
-from app.services.recordings.repository import JsonFileRecordingRepository
+from tests.doubles import (
+    InMemoryAudioAnalysisRepository,
+    InMemoryRecordingRepository,
+)
 from tests.fixtures import harmonic_samples, silence_samples, write_signal_wav
 
 SAMPLE_RATE = 22050
@@ -358,14 +361,20 @@ def storage_root(tmp_path: Path) -> Path:
     return tmp_path / "storage"
 
 
-@pytest.fixture
-def recordings(storage_root: Path) -> JsonFileRecordingRepository:
-    return JsonFileRecordingRepository(storage_root)
+#: One fixed owner for this module. Ownership is exercised in the API and
+#: contract suites; here it is a constant so the feedback assertions stay about
+#: feedback.
+OWNER_ID: Final = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
 
 
 @pytest.fixture
-def analyses(storage_root: Path) -> JsonFileAudioAnalysisRepository:
-    return JsonFileAudioAnalysisRepository(storage_root)
+def analyses() -> InMemoryAudioAnalysisRepository:
+    return InMemoryAudioAnalysisRepository()
+
+
+@pytest.fixture
+def recordings(analyses: InMemoryAudioAnalysisRepository) -> InMemoryRecordingRepository:
+    return InMemoryRecordingRepository(audio_analyses=analyses)
 
 
 @pytest.fixture
@@ -376,21 +385,24 @@ def storage(storage_root: Path) -> RecordingStorage:
 def store(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
+    recordings: InMemoryRecordingRepository,
     samples: list[float],
     name: str,
 ) -> str:
     source = write_signal_wav(tmp_path / name, samples, sample_rate=SAMPLE_RATE)
     stored = storage.save(source, extension=".wav")
-    recordings.create(
-        Recording(
-            recording_id=stored.recording_id,
-            original_filename=name,
-            audio_format="wav",
-            duration_seconds=2.0,
-            sample_rate=SAMPLE_RATE,
-            channels=1,
-            size_bytes=stored.size_bytes,
+    run(
+        lambda: recordings.create(
+            Recording(
+                recording_id=stored.recording_id,
+                original_filename=name,
+                audio_format="wav",
+                duration_seconds=2.0,
+                sample_rate=SAMPLE_RATE,
+                channels=1,
+                size_bytes=stored.size_bytes,
+            ),
+            OWNER_ID,
         )
     )
     return stored.recording_id
@@ -398,9 +410,9 @@ def store(
 
 def service(
     *,
-    recordings: JsonFileRecordingRepository,
+    recordings: InMemoryRecordingRepository,
     storage: RecordingStorage,
-    analyses: JsonFileAudioAnalysisRepository,
+    analyses: InMemoryAudioAnalysisRepository,
     feedback: AudioFeedbackProvider,
 ) -> AudioAnalysisService:
     from app.services.audio_analysis.analyzer import SignalAudioAnalyzer
@@ -418,8 +430,8 @@ def service(
 def analysed(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
     provider: AudioFeedbackProvider,
     *,
     samples: list[float] | None = None,
@@ -429,20 +441,20 @@ def analysed(
     audio = samples or harmonic_samples(440.0, seconds=2.0, sample_rate=SAMPLE_RATE)
     recording_id = store(tmp_path, storage, recordings, audio, name)
     built = service(recordings=recordings, storage=storage, analyses=analyses, feedback=provider)
-    run(lambda: built.analyze(recording_id))
+    run(lambda: built.analyze(recording_id, OWNER_ID))
     return built, recording_id
 
 
 def test_the_provider_receives_the_structured_payload(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     provider = StubFeedbackProvider()
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, provider)
 
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
     assert len(provider.requests) == 1
@@ -456,18 +468,18 @@ def test_the_provider_receives_the_structured_payload(
 def test_feedback_is_persisted_on_the_analysis(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, StubFeedbackProvider())
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     completed = run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
     assert completed.feedback_status is AudioFeedbackStatus.COMPLETED
     assert completed.feedback is not None
     assert completed.feedback.summary == "A stub interpretation."
 
-    stored = analyses.get(completed.audio_analysis_id)
+    stored = run(lambda: analyses.get(completed.audio_analysis_id))
     assert stored is not None
     assert stored.feedback is not None
 
@@ -475,16 +487,16 @@ def test_feedback_is_persisted_on_the_analysis(
 def test_feedback_is_not_generated_twice(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     """A re-render must not run up a provider bill."""
     provider = StubFeedbackProvider()
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, provider)
 
-    first = run(lambda: built.start_feedback(recording_id))
+    first = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     run(lambda: built.run_feedback(first.audio_analysis_id))
-    second = run(lambda: built.start_feedback(recording_id))
+    second = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     run(lambda: built.run_feedback(second.audio_analysis_id))
 
     assert len(provider.requests) == 1
@@ -494,13 +506,13 @@ def test_feedback_is_not_generated_twice(
 def test_a_claimed_run_is_not_executed_twice(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     provider = StubFeedbackProvider()
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, provider)
 
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     run(lambda: built.run_feedback(claimed.audio_analysis_id))
     run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
@@ -510,14 +522,14 @@ def test_a_claimed_run_is_not_executed_twice(
 def test_a_provider_failure_leaves_the_measurements_intact(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     """The whole point of separating measurement from interpretation."""
     provider = StubFeedbackProvider(error=ProviderUnavailableError("stub", reason="down"))
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, provider)
 
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     failed = run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
     assert failed.feedback_status is AudioFeedbackStatus.FAILED
@@ -533,15 +545,15 @@ def test_a_provider_failure_leaves_the_measurements_intact(
 def test_invalid_model_output_fails_safely(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     provider = StubFeedbackProvider(
         error=ProviderResponseError("stub", reason="invalid_structured_output")
     )
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, provider)
 
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     failed = run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
     assert failed.feedback_error_code is ErrorCode.ANALYSIS_PROVIDER_ERROR
@@ -551,13 +563,13 @@ def test_invalid_model_output_fails_safely(
 def test_an_unexpected_exception_does_not_take_the_process_down(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     provider = StubFeedbackProvider(error=ZeroDivisionError("boom"))
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, provider)
 
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     failed = run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
     assert failed.feedback_status is AudioFeedbackStatus.FAILED
@@ -567,19 +579,19 @@ def test_an_unexpected_exception_does_not_take_the_process_down(
 def test_a_failed_run_can_be_retried(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     failing = StubFeedbackProvider(error=ProviderUnavailableError("stub", reason="down"))
     built, recording_id = analysed(tmp_path, storage, recordings, analyses, failing)
-    claimed = run(lambda: built.start_feedback(recording_id))
+    claimed = run(lambda: built.start_feedback(recording_id, OWNER_ID))
     run(lambda: built.run_feedback(claimed.audio_analysis_id))
 
     working = StubFeedbackProvider()
     retried_service = service(
         recordings=recordings, storage=storage, analyses=analyses, feedback=working
     )
-    again = run(lambda: retried_service.start_feedback(recording_id))
+    again = run(lambda: retried_service.start_feedback(recording_id, OWNER_ID))
     completed = run(lambda: retried_service.run_feedback(again.audio_analysis_id))
 
     assert completed.feedback_status is AudioFeedbackStatus.COMPLETED
@@ -589,8 +601,8 @@ def test_a_failed_run_can_be_retried(
 def test_insufficient_pitch_never_reaches_the_provider(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     """Ordinary speech must not come back as a vocal assessment."""
     provider = StubFeedbackProvider()
@@ -605,7 +617,7 @@ def test_insufficient_pitch_never_reaches_the_provider(
     )
 
     with pytest.raises(ApiError) as caught:
-        run(lambda: built.start_feedback(recording_id))
+        run(lambda: built.start_feedback(recording_id, OWNER_ID))
 
     assert caught.value.code is ErrorCode.INSUFFICIENT_PITCH_SIGNAL
     assert provider.requests == [], "a provider was called with nothing to interpret"
@@ -614,8 +626,8 @@ def test_insufficient_pitch_never_reaches_the_provider(
 def test_an_unanalysed_recording_never_reaches_the_provider(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     provider = StubFeedbackProvider()
     recording_id = store(
@@ -628,7 +640,7 @@ def test_an_unanalysed_recording_never_reaches_the_provider(
     built = service(recordings=recordings, storage=storage, analyses=analyses, feedback=provider)
 
     with pytest.raises(ApiError) as caught:
-        run(lambda: built.start_feedback(recording_id))
+        run(lambda: built.start_feedback(recording_id, OWNER_ID))
 
     assert caught.value.code is ErrorCode.AUDIO_ANALYSIS_NOT_FOUND
     assert provider.requests == []
@@ -637,14 +649,14 @@ def test_an_unanalysed_recording_never_reaches_the_provider(
 def test_an_unknown_recording_never_reaches_the_provider(
     tmp_path: Path,
     storage: RecordingStorage,
-    recordings: JsonFileRecordingRepository,
-    analyses: JsonFileAudioAnalysisRepository,
+    recordings: InMemoryRecordingRepository,
+    analyses: InMemoryAudioAnalysisRepository,
 ) -> None:
     provider = StubFeedbackProvider()
     built = service(recordings=recordings, storage=storage, analyses=analyses, feedback=provider)
 
     with pytest.raises(ApiError) as caught:
-        run(lambda: built.start_feedback("0" * 32))
+        run(lambda: built.start_feedback("0" * 32, OWNER_ID))
 
     assert caught.value.code is ErrorCode.RECORDING_NOT_FOUND
     assert provider.requests == []

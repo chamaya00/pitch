@@ -18,11 +18,12 @@ never a ``POST`` error: it surfaces on ``GET`` as ``200`` with
 ``status: "failed"``.
 """
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Path, Query, Response, status
 
-from app.api.deps import AudioAnalysisServiceDep
+from app.api.deps import AudioAnalysisServiceDep, OwnerIdDep
 from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
 from app.schemas.audio_analysis import (
@@ -31,7 +32,12 @@ from app.schemas.audio_analysis import (
     NoteBreakdownResponse,
     PitchTimelineResponse,
 )
-from app.services.audio_analysis.models import AudioAnalysisStatus, AudioFeedbackStatus
+from app.services.audio_analysis.models import (
+    AudioAnalysis,
+    AudioAnalysisStatus,
+    AudioFeedbackStatus,
+)
+from app.services.orchestration.audio_analysis import AudioAnalysisService
 
 router = APIRouter(prefix="/recordings", tags=["audio-analysis"])
 
@@ -93,11 +99,12 @@ MAX_POINTS_LIMIT = 50000
 async def start_audio_analysis(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
     background_tasks: BackgroundTasks,
     response: Response,
 ) -> AudioAnalysisResponse:
     """Create or return the audio analysis for a recording."""
-    started = await service.start(recording_id)
+    started = await service.start(recording_id, owner_id)
 
     if started.created:
         # Scheduled only for an analysis this request created; scheduling one
@@ -134,9 +141,12 @@ async def start_audio_analysis(
 async def get_audio_analysis(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
 ) -> AudioAnalysisResponse:
     """Return the recording's most recent audio analysis."""
-    return AudioAnalysisResponse.from_domain(_require_analysis(service, recording_id))
+    return AudioAnalysisResponse.from_domain(
+        await _require_analysis(service, recording_id, owner_id)
+    )
 
 
 @router.get(
@@ -165,6 +175,7 @@ async def get_audio_analysis(
 async def get_pitch_timeline(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
     max_points: Annotated[
         int,
         Query(
@@ -175,7 +186,7 @@ async def get_pitch_timeline(
     ] = DEFAULT_MAX_POINTS,
 ) -> PitchTimelineResponse:
     """Return the analysis's pitch points, decimated to ``max_points``."""
-    analysis = _require_analysis(service, recording_id)
+    analysis = await _require_analysis(service, recording_id, owner_id)
     if analysis.status is not AudioAnalysisStatus.COMPLETED:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
@@ -222,10 +233,11 @@ async def get_pitch_timeline(
 async def get_note_breakdown(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
 ) -> NoteBreakdownResponse:
     """Return the analysis's pitched time, aggregated by note."""
-    analysis = _require_analysis(service, recording_id)
-    notes = service.notes(recording_id)
+    analysis = await _require_analysis(service, recording_id, owner_id)
+    notes = await service.notes(recording_id, owner_id)
     if notes is None:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
@@ -276,11 +288,12 @@ async def get_note_breakdown(
 async def start_audio_feedback(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
     background_tasks: BackgroundTasks,
     response: Response,
 ) -> AudioFeedbackStateResponse:
     """Claim the analysis for feedback and schedule the provider call."""
-    analysis = await service.start_feedback(recording_id)
+    analysis = await service.start_feedback(recording_id, owner_id)
 
     if analysis.feedback_status is AudioFeedbackStatus.GENERATING:
         background_tasks.add_task(service.run_feedback, analysis.audio_analysis_id)
@@ -314,13 +327,18 @@ async def start_audio_feedback(
 async def get_audio_feedback(
     recording_id: RecordingIdPath,
     service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
 ) -> AudioFeedbackStateResponse:
     """Return the recording's audio feedback and its state."""
-    return AudioFeedbackStateResponse.from_domain(_require_analysis(service, recording_id))
+    return AudioFeedbackStateResponse.from_domain(
+        await _require_analysis(service, recording_id, owner_id)
+    )
 
 
-def _require_analysis(service: AudioAnalysisServiceDep, recording_id: str):  # type: ignore[no-untyped-def]
-    analysis = service.current(recording_id)
+async def _require_analysis(
+    service: AudioAnalysisService, recording_id: str, owner_id: uuid.UUID
+) -> AudioAnalysis:
+    analysis = await service.current(recording_id, owner_id)
     if analysis is None:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,

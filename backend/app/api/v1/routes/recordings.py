@@ -1,13 +1,19 @@
-"""Recording upload routes."""
+"""Recording upload and history routes."""
 
 from collections.abc import AsyncIterator
 from typing import Annotated, Final
 
-from fastapi import APIRouter, File, UploadFile, status
+from fastapi import APIRouter, File, Path, Query, UploadFile, status
 
-from app.api.deps import RecordingRepositoryDep, RecordingStorageDep, SettingsDep
+from app.api.deps import (
+    OwnerIdDep,
+    RecordingRepositoryDep,
+    RecordingStorageDep,
+    SettingsDep,
+)
 from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
+from app.schemas.history import RecordingHistoryResponse
 from app.schemas.recording import RecordingResponse
 from app.services.audio.upload import process_upload
 
@@ -52,6 +58,7 @@ async def upload_recording(
     settings: SettingsDep,
     storage: RecordingStorageDep,
     repository: RecordingRepositoryDep,
+    owner_id: OwnerIdDep,
     file: Annotated[
         UploadFile | str,
         File(description="The audio file to analyse (WAV or MP3)."),
@@ -78,5 +85,80 @@ async def upload_recording(
         settings=settings,
         storage=storage,
         repository=repository,
+        owner_id=owner_id,
     )
+    return RecordingResponse.from_recording(recording)
+
+
+#: How many history rows a request may ask for. History is a list screen, not a
+#: bulk export: a client that needs everything is a client this API does not
+#: have, and an unbounded LIMIT is how a cheap query becomes an expensive one.
+DEFAULT_HISTORY_LIMIT: Final = 50
+MAX_HISTORY_LIMIT: Final = 200
+
+#: Recording ids are ``uuid4().hex``. Constraining the path parameter means a
+#: malformed id never reaches a query.
+RecordingIdPath = Annotated[
+    str,
+    Path(pattern=r"^[0-9a-f]{32}$", description="Server-generated recording identifier."),
+]
+
+
+@router.get(
+    "",
+    response_model=RecordingHistoryResponse,
+    summary="List your recordings",
+    description=(
+        "Every recording belonging to the caller, newest first.\n\n"
+        "**Ownership is resolved from the `X-VocalLens-Owner` header and "
+        "enforced in the database.** A caller with no header is issued a new "
+        "identity and sees an empty history — never somebody else's. A caller "
+        "cannot ask for another owner's recordings, because there is no "
+        "parameter that would let them name one.\n\n"
+        "**Statuses, not results.** Each item says how far its analyses got; "
+        "the measurements themselves come from the per-recording endpoints. A "
+        "`null` status means that analysis has never been run, which is not the "
+        "same as pending and not a failure."
+    ),
+    responses=error_responses(ErrorCode.VALIDATION_ERROR, ErrorCode.INTERNAL_ERROR),
+)
+async def list_recordings(
+    repository: RecordingRepositoryDep,
+    owner_id: OwnerIdDep,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_HISTORY_LIMIT, description="Largest number of recordings to return."),
+    ] = DEFAULT_HISTORY_LIMIT,
+) -> RecordingHistoryResponse:
+    """Return this owner's recordings with the state of each one's analyses."""
+    entries = await repository.list_history(owner_id, limit)
+    return RecordingHistoryResponse.from_entries(entries, limit=limit)
+
+
+@router.get(
+    "/{recording_id}",
+    response_model=RecordingResponse,
+    summary="Get one of your recordings",
+    description=(
+        "The stored metadata of a single recording.\n\n"
+        "A recording belonging to somebody else answers exactly as one that "
+        "does not exist: `404`. The two are deliberately indistinguishable, "
+        "because a different answer would confirm that an id is real to "
+        "somebody with no right to know."
+    ),
+    responses=error_responses(
+        ErrorCode.RECORDING_NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def get_recording(
+    recording_id: RecordingIdPath,
+    repository: RecordingRepositoryDep,
+    owner_id: OwnerIdDep,
+) -> RecordingResponse:
+    """Return one recording, provided it belongs to the caller."""
+    recording = await repository.get(recording_id, owner_id)
+    if recording is None:
+        raise ApiError(ErrorCode.RECORDING_NOT_FOUND, "That recording could not be found.")
     return RecordingResponse.from_recording(recording)

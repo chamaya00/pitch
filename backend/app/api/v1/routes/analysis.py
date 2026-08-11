@@ -17,7 +17,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Path, Response, status
 
-from app.api.deps import AnalysisServiceDep
+from app.api.deps import AnalysisServiceDep, OwnerIdDep
 from app.api.responses import error_responses
 from app.core.errors import ApiError, ErrorCode
 from app.schemas.analysis import AnalysisResponse
@@ -78,11 +78,12 @@ RecordingIdPath = Annotated[
 async def start_analysis(
     recording_id: RecordingIdPath,
     service: AnalysisServiceDep,
+    owner_id: OwnerIdDep,
     background_tasks: BackgroundTasks,
     response: Response,
 ) -> AnalysisResponse:
     """Create or return the analysis for a recording."""
-    started = await service.start(recording_id)
+    started = await service.start(recording_id, owner_id)
 
     if started.created:
         # Scheduled only for an analysis this request created. Scheduling one
@@ -119,9 +120,10 @@ async def start_analysis(
 async def get_analysis(
     recording_id: RecordingIdPath,
     service: AnalysisServiceDep,
+    owner_id: OwnerIdDep,
 ) -> AnalysisResponse:
     """Return the recording's most recent analysis."""
-    analysis = service.current(recording_id)
+    analysis = await service.current(recording_id, owner_id)
     if analysis is None:
         raise ApiError(
             ErrorCode.ANALYSIS_NOT_FOUND,

@@ -11,6 +11,8 @@ from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import MaxBodySizeMiddleware
+from app.db.migrate import apply_migrations
+from app.db.pool import Database
 from app.schemas.health import HealthResponse
 from app.version import __version__
 
@@ -33,8 +35,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "detail": "analysis output will be demo data, not real analysis",
             },
         )
-    yield
-    logger.info("api_stopped")
+
+    # The pool is opened once, here, and every repository shares it. Migrations
+    # run in the same startup so a deployment cannot serve requests against a
+    # schema older than the code — and they take an advisory lock, so several
+    # processes starting together apply them once between them.
+    #
+    # The DSN itself is never logged. A failure to connect surfaces as a startup
+    # error, which is the point of opening eagerly rather than lazily.
+    database = Database(settings.database_url) if settings.database_url else None
+    app.state.database = database
+    if database is not None:
+        await database.open()
+        async with database.transaction() as connection:
+            applied = await apply_migrations(connection)
+        logger.info("database_migrations_applied", extra={"count": len(applied)})
+    else:
+        logger.error(
+            "database_not_configured",
+            extra={"detail": "DATABASE_URL is unset; recording endpoints will fail"},
+        )
+
+    try:
+        yield
+    finally:
+        if database is not None:
+            await database.close()
+        logger.info("api_stopped")
 
 
 def create_app() -> FastAPI:

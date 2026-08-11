@@ -24,9 +24,24 @@ the numbers it describes.
 Split into :meth:`AnalysisService.start` and :meth:`AnalysisService.run` so
 Step 7E can return a record immediately and hand the slow part to a background
 task. :meth:`AnalysisService.analyze` runs both, which is what tests use.
+
+**Concurrency is the database's job, not this module's.** Step 7M removed the
+``asyncio.Lock`` that used to guard the find-or-create decision. It could only
+ever serialise coroutines inside one interpreter — two worker processes reopened
+the race, and its own docstring admitted as much. What replaces it is two
+database properties:
+
+* a partial unique index over ``recording_id`` where the status is non-terminal,
+  so a second insert for a recording already being analysed fails outright; and
+* compare-and-set on every write, so a worker that resumes after its record was
+  swept cannot overwrite the result that replaced it.
+
+Both hold across processes and machines, which is precisely what the lock could
+not do. Every ownership check is a ``WHERE`` clause for the same reason.
 """
 
 import asyncio
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,33 +60,22 @@ from app.services.analysis.models import (
     Transcript,
     new_analysis_id,
 )
-from app.services.analysis.repository import AnalysisRepository, AnalysisRepositoryError
+from app.services.analysis.postgres_repository import (
+    ActiveAnalysisExistsError,
+    AnalysisConflictError,
+    AsyncAnalysisRepository,
+)
 from app.services.audio.storage import RecordingStorage, StorageError
 from app.services.recordings.models import utc_now
-from app.services.recordings.repository import RecordingRepository
+from app.services.recordings.postgres_repository import OwnedRecordingRepository
 
 logger = get_logger(__name__)
 
 #: Statuses that mean an analysis is in flight and a second one must not start.
+#: The same set the ``speech_analyses_one_active_idx`` predicate names.
 ACTIVE_STATUSES: Final[frozenset[AnalysisStatus]] = frozenset(
     {AnalysisStatus.PENDING, AnalysisStatus.TRANSCRIBING, AnalysisStatus.ANALYZING}
 )
-
-#: Serialises the find-or-create decision so two concurrent requests for one
-#: recording cannot both start a paid provider call.
-#:
-#: Today the guarded section does not await anything — the filesystem store is
-#: synchronous, so the scan and the write already run to completion without
-#: yielding, and the lock changes nothing. It is here for the store that
-#: replaces it: the moment the repository becomes async, the section acquires
-#: yield points and the invariant would quietly disappear without it.
-#:
-#: Process-wide and deliberately coarse — the section is a directory scan and one
-#: small write, so serialising across recordings costs nothing worth measuring
-#: and needs no per-key bookkeeping. It is **not** a substitute for a database
-#: constraint: run more than one worker process and the race returns. That is a
-#: known limit of the filesystem store, not of this design.
-_START_LOCK: Final = asyncio.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,9 +114,9 @@ class AnalysisService:
     def __init__(
         self,
         *,
-        recordings: RecordingRepository,
+        recordings: OwnedRecordingRepository,
         storage: RecordingStorage,
-        analyses: AnalysisRepository,
+        analyses: AsyncAnalysisRepository,
         speech_to_text: SpeechToTextProvider,
         feedback: FeedbackProvider,
         stale_after_seconds: float,
@@ -126,18 +130,18 @@ class AnalysisService:
 
     # --- Entry points ------------------------------------------------------
 
-    async def analyze(self, recording_id: str) -> Analysis:
+    async def analyze(self, recording_id: str, owner_id: uuid.UUID) -> Analysis:
         """Start an analysis and run it to completion.
 
         Returns an existing analysis untouched when one is already in flight or
         already finished — see :meth:`start`.
         """
-        started = await self.start(recording_id)
+        started = await self.start(recording_id, owner_id)
         if not started.created:
             return started.analysis
         return await self.run(started.analysis.analysis_id)
 
-    def current(self, recording_id: str) -> Analysis | None:
+    async def current(self, recording_id: str, owner_id: uuid.UUID) -> Analysis | None:
         """The most recent analysis of a recording, whatever state it is in.
 
         Read-only, and deliberately different from what :meth:`start` looks at:
@@ -146,18 +150,17 @@ class AnalysisService:
         analyse the recording needs a fresh attempt.
 
         Raises:
-            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown. The
-                stored audio is not required — an analysis that already ran
-                stays readable even if the recording's bytes were since removed.
+            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown **or
+                belongs to someone else** — the two are deliberately the same
+                answer, because distinguishing them would confirm the existence
+                of a recording to somebody with no right to know. The stored
+                audio is not required: an analysis that already ran stays
+                readable even if the recording's bytes were since removed.
         """
-        if self._recordings.get(recording_id) is None:
-            raise ApiError(ErrorCode.RECORDING_NOT_FOUND, "That recording could not be found.")
+        await self._require_owned(recording_id, owner_id)
+        return await self._analyses.latest_for_recording(recording_id)
 
-        for analysis in self._analyses.list_for_recording(recording_id):
-            return analysis
-        return None
-
-    async def start(self, recording_id: str) -> StartedAnalysis:
+    async def start(self, recording_id: str, owner_id: uuid.UUID) -> StartedAnalysis:
         """Return the analysis to work with, creating one only if needed.
 
         The idempotency rule, in order:
@@ -167,32 +170,39 @@ class AnalysisService:
         * otherwise (including after a failure) → a new ``pending`` record
 
         A "failed" analysis is therefore retried by calling this again, which
-        produces a *new* record; the failed one stays on disk and inspectable.
+        produces a *new* record; the failed one stays stored and inspectable.
+
+        The read below is an optimisation, not the guarantee. Two callers can
+        both find nothing and both try to insert; the unique index lets exactly
+        one through and the loser is handed the winner's record. That is why
+        this holds with several worker processes, where a lock would not.
 
         Raises:
-            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown. No
-                analysis record is created — there is nothing to analyse, and a
-                record pointing at a recording that does not exist would be a
-                lie on disk.
+            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown or is
+                not this owner's. No analysis record is created — there is
+                nothing to analyse, and a record pointing at a recording that
+                does not exist would be a lie in the database.
         """
-        self._require_recording(recording_id)
+        await self._require_recording(recording_id, owner_id)
 
-        async with _START_LOCK:
-            existing = self._existing_for(recording_id)
-            if existing is not None:
-                logger.info(
-                    "analysis_reused",
-                    extra={
-                        "analysis_id": existing.analysis_id,
-                        "recording_id": recording_id,
-                        "status": existing.status.value,
-                    },
-                )
-                return StartedAnalysis(analysis=existing, created=False)
+        existing = await self._existing_for(recording_id)
+        if existing is not None:
+            return self._reused(existing, recording_id)
 
-            analysis = self._analyses.create(
+        try:
+            analysis = await self._analyses.create(
                 Analysis(analysis_id=new_analysis_id(), recording_id=recording_id)
             )
+        except ActiveAnalysisExistsError:
+            # Lost the insert race. Whoever won has a record for this recording;
+            # returning theirs is the same answer this call would have given a
+            # moment earlier.
+            existing = await self._analyses.latest_for_recording(recording_id)
+            if existing is None:  # pragma: no cover - the index only fires if a row exists
+                raise ApiError(
+                    ErrorCode.INTERNAL_ERROR, "That analysis could not be started."
+                ) from None
+            return self._reused(existing, recording_id)
 
         logger.info(
             "analysis_created",
@@ -208,13 +218,17 @@ class AnalysisService:
     async def run(self, analysis_id: str) -> Analysis:
         """Execute a pending analysis to a terminal state.
 
+        Takes no owner: ownership was established by :meth:`start`, and this is
+        the continuation of that decision rather than a new request. It is
+        reachable only from a background task the API scheduled itself.
+
         Never raises for a provider failure: the failure is persisted on the
         record and the record is returned, so a background task cannot take the
         process down with it. Cancellation is the one exception — it is
         persisted and then re-raised, because swallowing it would leave the
         event loop believing the task is still running.
         """
-        analysis = self._analyses.get(analysis_id)
+        analysis = await self._analyses.get(analysis_id)
         if analysis is None:
             raise ApiError(ErrorCode.ANALYSIS_NOT_FOUND, "That analysis could not be found.")
         if analysis.status is not AnalysisStatus.PENDING:
@@ -226,49 +240,74 @@ class AnalysisService:
 
         try:
             return await self._execute(analysis)
+        except AnalysisConflictError:
+            # Another worker claimed this record between the read above and the
+            # first write. It owns the run now; report what is actually stored.
+            return await self._latest(analysis)
         except ProviderError as exc:
-            return self._fail(self._latest(analysis), exc.error_code, **exc.log_context())
+            return await self._fail(
+                await self._latest(analysis), exc.error_code, **exc.log_context()
+            )
         except asyncio.CancelledError:
-            self._fail(self._latest(analysis), ErrorCode.INTERNAL_ERROR, reason="cancelled")
+            await self._fail(
+                await self._latest(analysis), ErrorCode.INTERNAL_ERROR, reason="cancelled"
+            )
             raise
         except Exception as exc:  # noqa: BLE001 - a background task must not die
             # Anything unforeseen still leaves an honest record behind.
-            return self._fail(
-                self._latest(analysis), ErrorCode.INTERNAL_ERROR, reason=type(exc).__name__
+            return await self._fail(
+                await self._latest(analysis), ErrorCode.INTERNAL_ERROR, reason=type(exc).__name__
             )
+
+    def _reused(self, existing: Analysis, recording_id: str) -> StartedAnalysis:
+        logger.info(
+            "analysis_reused",
+            extra={
+                "analysis_id": existing.analysis_id,
+                "recording_id": recording_id,
+                "status": existing.status.value,
+            },
+        )
+        return StartedAnalysis(analysis=existing, created=False)
 
     # --- The pipeline ------------------------------------------------------
 
     async def _execute(self, analysis: Analysis) -> Analysis:
         audio_path = self._resolve_audio(analysis.recording_id)
 
-        analysis = self._save(
-            _revalidated(analysis, status=AnalysisStatus.TRANSCRIBING, started_at=utc_now())
+        # Claiming the record *is* this write: the update requires the stored
+        # status to still be "pending", so a second worker that read the same
+        # pending record loses here rather than making a second paid call.
+        analysis = await self._save(
+            _revalidated(analysis, status=AnalysisStatus.TRANSCRIBING, started_at=utc_now()),
+            expect_status=AnalysisStatus.PENDING,
         )
         transcript = await self._speech_to_text.transcribe(audio_path)
 
         metrics = compute_metrics(
             transcript,
-            recording_duration_seconds=self._recording_duration(analysis.recording_id),
+            recording_duration_seconds=await self._recording_duration(analysis.recording_id),
         )
-        analysis = self._save(
+        analysis = await self._save(
             _revalidated(
                 analysis,
                 status=AnalysisStatus.ANALYZING,
                 transcript=transcript.model_dump(),
                 metrics=metrics.model_dump(),
-            )
+            ),
+            expect_status=AnalysisStatus.TRANSCRIBING,
         )
 
         feedback = await self._try_feedback(analysis, transcript, metrics)
 
-        completed = self._save(
+        completed = await self._save(
             _revalidated(
                 analysis,
                 status=AnalysisStatus.COMPLETED,
                 feedback=feedback.model_dump() if feedback is not None else None,
                 completed_at=utc_now(),
-            )
+            ),
+            expect_status=AnalysisStatus.ANALYZING,
         )
         logger.info(
             "analysis_completed",
@@ -309,8 +348,19 @@ class AnalysisService:
 
     # --- Helpers -----------------------------------------------------------
 
-    def _require_recording(self, recording_id: str) -> None:
-        if self._recordings.get(recording_id) is None or not self._storage.exists(recording_id):
+    async def _require_owned(self, recording_id: str, owner_id: uuid.UUID) -> None:
+        """Refuse a recording that is unknown *or* is not this owner's.
+
+        The repository does the check in SQL — a recording belonging to someone
+        else is never selected, rather than selected and filtered — so no caller
+        can reach past it, and no frontend is trusted to hide anything.
+        """
+        if await self._recordings.get(recording_id, owner_id) is None:
+            raise ApiError(ErrorCode.RECORDING_NOT_FOUND, "That recording could not be found.")
+
+    async def _require_recording(self, recording_id: str, owner_id: uuid.UUID) -> None:
+        await self._require_owned(recording_id, owner_id)
+        if not self._storage.exists(recording_id):
             raise ApiError(ErrorCode.RECORDING_NOT_FOUND, "That recording could not be found.")
 
     def _resolve_audio(self, recording_id: str) -> Path:
@@ -326,12 +376,19 @@ class AnalysisService:
                 ErrorCode.RECORDING_NOT_FOUND, "That recording could not be found."
             ) from exc
 
-    def _recording_duration(self, recording_id: str) -> float | None:
-        """The duration measured at upload, used only if the provider gave none."""
-        recording = self._recordings.get(recording_id)
+    async def _recording_duration(self, recording_id: str) -> float | None:
+        """The duration measured at upload, used only if the provider gave none.
+
+        Read by id alone. Ownership was checked before the run started, and this
+        is the same recording the run is already measuring.
+        """
+        owner_id = await self._recordings.owner_of(recording_id)
+        if owner_id is None:
+            return None
+        recording = await self._recordings.get(recording_id, owner_id)
         return recording.duration_seconds if recording is not None else None
 
-    def _existing_for(self, recording_id: str) -> Analysis | None:
+    async def _existing_for(self, recording_id: str) -> Analysis | None:
         """The analysis a caller should be given back, if any.
 
         Sweeps abandoned records on the way past: an analysis that has been
@@ -339,10 +396,10 @@ class AnalysisService:
         that is no longer running, and leaving it active would make the
         recording permanently unanalysable.
         """
-        for analysis in self._analyses.list_for_recording(recording_id):
+        for analysis in await self._analyses.list_for_recording(recording_id):
             if analysis.status in ACTIVE_STATUSES:
                 if self._is_stale(analysis):
-                    self._fail(analysis, ErrorCode.INTERNAL_ERROR, reason="abandoned")
+                    await self._fail(analysis, ErrorCode.INTERNAL_ERROR, reason="abandoned")
                     continue
                 return analysis
             if analysis.status is AnalysisStatus.COMPLETED:
@@ -353,10 +410,16 @@ class AnalysisService:
         started = analysis.started_at or analysis.created_at
         return datetime.now(UTC) - started > self._stale_after
 
-    def _save(self, analysis: Analysis) -> Analysis:
-        return self._analyses.update(analysis)
+    async def _save(self, analysis: Analysis, *, expect_status: AnalysisStatus) -> Analysis:
+        """Persist a transition, but only from the status the caller last read.
 
-    def _latest(self, analysis: Analysis) -> Analysis:
+        Raises:
+            AnalysisConflictError: the stored record has moved on, so this
+                worker is no longer the one running the analysis.
+        """
+        return await self._analyses.update(analysis, expect_status=expect_status)
+
+    async def _latest(self, analysis: Analysis) -> Analysis:
         """The most recently persisted state of a record.
 
         The failure handlers work from this rather than from the snapshot the
@@ -364,15 +427,15 @@ class AnalysisService:
         back to "pending" and lose the timestamps and transcript already stored.
         """
         try:
-            return self._analyses.get(analysis.analysis_id) or analysis
-        except AnalysisRepositoryError:
+            return await self._analyses.get(analysis.analysis_id) or analysis
+        except Exception:  # noqa: BLE001 - a failing store must not mask the failure
             return analysis
 
-    def _fail(self, analysis: Analysis, code: ErrorCode, **context: str) -> Analysis:
+    async def _fail(self, analysis: Analysis, code: ErrorCode, **context: str) -> Analysis:
         """Persist a terminal failure. The recording is never touched.
 
-        A failed analysis keeps whatever it managed to produce and stays on
-        disk: it is the record of what went wrong, and a retry creates a new
+        A failed analysis keeps whatever it managed to produce and stays
+        stored: it is the record of what went wrong, and a retry creates a new
         analysis rather than overwriting this one.
         """
         failed = _revalidated(
@@ -382,10 +445,18 @@ class AnalysisService:
             completed_at=utc_now(),
         )
         try:
-            failed = self._save(failed)
-        except AnalysisRepositoryError:
-            # The store is the thing that broke. Report the original failure
-            # rather than replacing it with a write error nobody asked about.
+            failed = await self._save(failed, expect_status=analysis.status)
+        except AnalysisConflictError:
+            # Somebody else already moved this record — a concurrent staleness
+            # sweep, or the worker that owns it. Theirs is the truth; report it.
+            logger.info(
+                "analysis_failure_superseded",
+                extra={"analysis_id": failed.analysis_id, "error_code": code.value},
+            )
+            return await self._latest(analysis)
+        except Exception:  # noqa: BLE001 - the store is what broke
+            # Report the original failure rather than replacing it with a write
+            # error nobody asked about.
             logger.error(
                 "analysis_failure_not_persisted",
                 extra={"analysis_id": failed.analysis_id, "error_code": code.value},

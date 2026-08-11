@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings, get_settings
 from app.main import create_app
+from tests.doubles import Doubles, override_repositories
 from tests.fixtures import (
     harmonic_samples,
     noise_samples,
@@ -42,10 +43,15 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def client(settings: Settings) -> TestClient:
+def client(settings: Settings, doubles: Doubles) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
-    return TestClient(app, raise_server_exceptions=False)
+    override_repositories(app, doubles)
+    return TestClient(
+        app,
+        raise_server_exceptions=False,
+        headers={"X-VocalLens-Owner": doubles.token},
+    )
 
 
 def upload(client: TestClient, path: Path) -> str:

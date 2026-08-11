@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,10 +24,9 @@ from app.core.config import Settings, get_settings
 from app.main import create_app
 from app.services.ai.mock import MockFeedbackProvider, MockSpeechToTextProvider
 from app.services.analysis.models import Analysis, AnalysisStatus, new_analysis_id
-from app.services.analysis.repository import JsonFileAnalysisRepository
 from app.services.audio.storage import RecordingStorage
 from app.services.orchestration.analysis import AnalysisService
-from app.services.recordings.repository import JsonFileRecordingRepository
+from tests.doubles import Doubles, InMemoryAnalysisRepository, override_repositories
 from tests.fixtures import write_wav
 
 RECORDINGS_URL = "/api/v1/recordings"
@@ -46,15 +46,20 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def analyses(settings: Settings) -> JsonFileAnalysisRepository:
-    return JsonFileAnalysisRepository(settings.storage_root)
+def analyses(doubles: Doubles) -> InMemoryAnalysisRepository:
+    return doubles.analyses
 
 
 @pytest.fixture
-def client(settings: Settings) -> TestClient:
+def client(settings: Settings, doubles: Doubles) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
-    return TestClient(app, raise_server_exceptions=False)
+    override_repositories(app, doubles)
+    return TestClient(
+        app,
+        raise_server_exceptions=False,
+        headers={"X-VocalLens-Owner": doubles.token},
+    )
 
 
 @pytest.fixture
@@ -69,14 +74,14 @@ def recording_id(client: TestClient, tmp_path: Path) -> str:
     return str(response.json()["recording_id"])
 
 
-def seed(analyses: JsonFileAnalysisRepository, recording_id: str, **overrides: object) -> Analysis:
-    """Write an analysis straight into the real repository."""
+def seed(analyses: InMemoryAnalysisRepository, recording_id: str, **overrides: object) -> Analysis:
+    """Write an analysis straight into the repository the app is using."""
     payload: dict[str, object] = {
         "analysis_id": new_analysis_id(),
         "recording_id": recording_id,
     }
     payload.update(overrides)
-    return analyses.create(Analysis.model_validate(payload))
+    return anyio.run(analyses.create, Analysis.model_validate(payload))
 
 
 class SchedulingSpy:
@@ -86,11 +91,11 @@ class SchedulingSpy:
     task racing ahead and finishing the analysis first.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, doubles: Doubles) -> None:
         self.scheduled: list[str] = []
-        self._analyses = JsonFileAnalysisRepository(settings.storage_root)
+        self._analyses = doubles.analyses
         self._inner = AnalysisService(
-            recordings=JsonFileRecordingRepository(settings.storage_root),
+            recordings=doubles.recordings,
             storage=RecordingStorage(settings.storage_root),
             analyses=self._analyses,
             speech_to_text=MockSpeechToTextProvider(),
@@ -98,28 +103,33 @@ class SchedulingSpy:
             stale_after_seconds=settings.analysis_stale_after_seconds,
         )
 
-    async def start(self, recording_id: str) -> Any:
-        return await self._inner.start(recording_id)
+    async def start(self, recording_id: str, owner_id: Any) -> Any:
+        return await self._inner.start(recording_id, owner_id)
 
-    def current(self, recording_id: str) -> Any:
-        return self._inner.current(recording_id)
+    async def current(self, recording_id: str, owner_id: Any) -> Any:
+        return await self._inner.current(recording_id, owner_id)
 
     async def run(self, analysis_id: str) -> Any:
         self.scheduled.append(analysis_id)
-        return self._analyses.get(analysis_id)
+        return await self._analyses.get(analysis_id)
 
 
 @pytest.fixture
-def spy(settings: Settings) -> SchedulingSpy:
-    return SchedulingSpy(settings)
+def spy(settings: Settings, doubles: Doubles) -> SchedulingSpy:
+    return SchedulingSpy(settings, doubles)
 
 
 @pytest.fixture
-def spy_client(settings: Settings, spy: SchedulingSpy) -> TestClient:
+def spy_client(settings: Settings, spy: SchedulingSpy, doubles: Doubles) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
+    override_repositories(app, doubles)
     app.dependency_overrides[get_analysis_service] = lambda: spy
-    return TestClient(app, raise_server_exceptions=False)
+    return TestClient(
+        app,
+        raise_server_exceptions=False,
+        headers={"X-VocalLens-Owner": doubles.token},
+    )
 
 
 # --- POST: starting an analysis --------------------------------------------
@@ -167,10 +177,10 @@ def test_the_scheduled_work_actually_completes_the_analysis(client: TestClient, 
 
 
 def test_post_persists_the_analysis(
-    client: TestClient, analyses: JsonFileAnalysisRepository, recording_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, recording_id: str
 ):
     body = client.post(analysis_url(recording_id)).json()
-    assert analyses.get(body["analysis_id"]) is not None
+    assert anyio.run(analyses.get, body["analysis_id"]) is not None
 
 
 # --- POST: idempotency -----------------------------------------------------
@@ -182,7 +192,7 @@ def test_post_persists_the_analysis(
 def test_post_returns_an_analysis_that_is_already_in_flight(
     spy_client: TestClient,
     spy: SchedulingSpy,
-    analyses: JsonFileAnalysisRepository,
+    analyses: InMemoryAnalysisRepository,
     recording_id: str,
     status: AnalysisStatus,
 ):
@@ -213,16 +223,16 @@ def test_post_returns_an_already_completed_analysis_without_re_running_it(
 
 
 def test_repeating_the_request_creates_only_one_analysis(
-    client: TestClient, analyses: JsonFileAnalysisRepository, recording_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, recording_id: str
 ):
     ids = {client.post(analysis_url(recording_id)).json()["analysis_id"] for _ in range(3)}
 
     assert len(ids) == 1
-    assert len(analyses.list_for_recording(recording_id)) == 1
+    assert len(anyio.run(analyses.list_for_recording, recording_id)) == 1
 
 
 def test_post_after_a_failure_starts_a_new_analysis(
-    client: TestClient, analyses: JsonFileAnalysisRepository, recording_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, recording_id: str
 ):
     failed = seed(
         analyses,
@@ -237,14 +247,14 @@ def test_post_after_a_failure_starts_a_new_analysis(
     assert response.status_code == 202
     assert response.json()["analysis_id"] != failed.analysis_id
     # The failed record is still there to look at.
-    assert analyses.get(failed.analysis_id) == failed
+    assert anyio.run(analyses.get, failed.analysis_id) == failed
 
 
 # --- POST: failures --------------------------------------------------------
 
 
 def test_post_for_an_unknown_recording_is_a_structured_404(
-    client: TestClient, analyses: JsonFileAnalysisRepository
+    client: TestClient, analyses: InMemoryAnalysisRepository
 ):
     unknown = new_analysis_id()
     response = client.post(analysis_url(unknown))
@@ -255,7 +265,7 @@ def test_post_for_an_unknown_recording_is_a_structured_404(
         "error_code": "RECORDING_NOT_FOUND",
         "message": "That recording could not be found.",
     }
-    assert analyses.list_for_recording(unknown) == []
+    assert anyio.run(analyses.list_for_recording, unknown) == []
 
 
 @pytest.mark.parametrize(
@@ -263,7 +273,7 @@ def test_post_for_an_unknown_recording_is_a_structured_404(
     ["not-a-hex-id", "8F14E45FCEEA167A5A36DEDD4BEA2543", "abc", "z" * 32, "8f14e45f" * 5],
 )
 def test_a_malformed_recording_id_is_refused_before_any_service_runs(
-    client: TestClient, analyses: JsonFileAnalysisRepository, bad_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, bad_id: str
 ):
     response = client.post(analysis_url(bad_id))
 
@@ -272,7 +282,7 @@ def test_a_malformed_recording_id_is_refused_before_any_service_runs(
     assert body["error_code"] == "VALIDATION_ERROR"
     assert body["status"] == "failed"
     assert "detail" not in body
-    assert analyses.list_for_recording(bad_id) == []
+    assert anyio.run(analyses.list_for_recording, bad_id) == []
 
 
 @pytest.mark.parametrize(
@@ -316,7 +326,7 @@ def test_get_for_an_unknown_recording_says_so(client: TestClient):
 )
 def test_get_reports_progress_while_the_analysis_runs(
     client: TestClient,
-    analyses: JsonFileAnalysisRepository,
+    analyses: InMemoryAnalysisRepository,
     recording_id: str,
     status: AnalysisStatus,
 ):
@@ -384,13 +394,18 @@ def test_mock_provenance_is_visible_in_the_response(client: TestClient, recordin
 
 
 def test_a_completed_analysis_without_feedback_is_still_a_success(
-    client: TestClient, analyses: JsonFileAnalysisRepository, recording_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, recording_id: str
 ):
     """A feedback outage leaves numbers without prose, not an error."""
     client.post(analysis_url(recording_id))
-    completed = analyses.list_for_recording(recording_id)[0]
-    analyses.update(
-        Analysis.model_validate({**completed.model_dump(exclude={"provenance"}), "feedback": None})
+    completed = anyio.run(analyses.list_for_recording, recording_id)[0]
+    anyio.run(
+        lambda: analyses.update(
+            Analysis.model_validate(
+                {**completed.model_dump(exclude={"provenance"}), "feedback": None}
+            ),
+            expect_status=completed.status,
+        )
     )
 
     body = client.get(analysis_url(recording_id)).json()
@@ -415,7 +430,7 @@ def test_a_completed_analysis_without_feedback_is_still_a_success(
 )
 def test_a_failed_analysis_is_a_successful_request(
     client: TestClient,
-    analyses: JsonFileAnalysisRepository,
+    analyses: InMemoryAnalysisRepository,
     recording_id: str,
     error_code: str,
 ):
@@ -439,7 +454,7 @@ def test_a_failed_analysis_is_a_successful_request(
 
 
 def test_get_returns_the_most_recent_analysis_after_a_retry(
-    client: TestClient, analyses: JsonFileAnalysisRepository, recording_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, recording_id: str
 ):
     seed(
         analyses,
@@ -490,7 +505,7 @@ def test_provenance_exposes_only_its_documented_fields(client: TestClient, recor
 
 
 def test_a_provider_failure_reaches_the_client_as_a_code_not_a_vendor_message(
-    client: TestClient, analyses: JsonFileAnalysisRepository, recording_id: str
+    client: TestClient, analyses: InMemoryAnalysisRepository, recording_id: str
 ):
     seed(
         analyses,

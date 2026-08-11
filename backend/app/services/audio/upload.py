@@ -14,6 +14,7 @@ removes the temporary file.
 
 import os
 import tempfile
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Final
@@ -28,7 +29,7 @@ from app.services.audio.validation import (
     validate_extension,
 )
 from app.services.recordings.models import Recording
-from app.services.recordings.repository import RecordingRepository, RepositoryError
+from app.services.recordings.postgres_repository import OwnedRecordingRepository
 
 logger = get_logger(__name__)
 
@@ -109,12 +110,17 @@ async def process_upload(
     content_type: str | None,
     settings: Settings,
     storage: RecordingStorage,
-    repository: RecordingRepository,
+    repository: OwnedRecordingRepository,
+    owner_id: uuid.UUID,
 ) -> Recording:
     """Run the upload pipeline and return the stored recording.
 
     ``content_type`` is recorded for logs only. A client that mislabels its
     upload changes nothing: the detected content decides.
+
+    ``owner_id`` is who the recording belongs to. It is resolved from the
+    request before this runs and is the only thing that ever makes the recording
+    visible again — there is no unowned recording.
 
     Raises:
         ApiError: for every rejection a client can act on.
@@ -149,8 +155,8 @@ async def process_upload(
         )
 
         try:
-            repository.create(recording)
-        except RepositoryError as exc:
+            await repository.create(recording, owner_id)
+        except Exception as exc:  # noqa: BLE001 - any store failure needs the rollback
             # The bytes are already stored. Roll them back so a failed upload
             # never leaves a recording nobody can reach.
             _rollback(storage, stored.recording_id)
@@ -167,6 +173,7 @@ async def process_upload(
             "size_bytes": size_bytes,
             "duration_seconds": round(metadata.duration_seconds, 3),
             "declared_content_type": content_type or "unknown",
+            "owner_id": str(owner_id),
         },
     )
     return recording

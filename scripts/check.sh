@@ -12,7 +12,13 @@ if [ ! -x "$BACKEND_PY/pytest" ]; then
   exit 1
 fi
 
-echo "==> backend: pytest"
+# The PostgreSQL suites skip without TEST_DATABASE_URL. Point it at a scratch
+# database to run them — they TRUNCATE between tests, so never at a real one.
+if [ -n "${TEST_DATABASE_URL:-}" ]; then
+  echo "==> backend: pytest (with PostgreSQL)"
+else
+  echo "==> backend: pytest (PostgreSQL suites will skip; set TEST_DATABASE_URL to run them)"
+fi
 (cd "$ROOT/backend" && "$BACKEND_PY/pytest")
 
 echo "==> backend: ruff check"

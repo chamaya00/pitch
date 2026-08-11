@@ -9,12 +9,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings, get_settings
 from app.main import create_app
-from app.services.recordings.repository import JsonFileRecordingRepository
+from tests.doubles import Doubles, override_repositories
 from tests.fixtures import (
     ELF_BYTES,
     FLAC_SIGNATURE,
@@ -44,10 +45,18 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def client(settings: Settings) -> TestClient:
+def client(settings: Settings, doubles: Doubles) -> TestClient:
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
-    return TestClient(app, raise_server_exceptions=False)
+    override_repositories(app, doubles)
+    # Every request carries the fixture owner, so uploads land somewhere the
+    # test can read them back. A request without the header would be issued a
+    # brand-new identity instead — see ``test_an_upload_without_a_token_...``.
+    return TestClient(
+        app,
+        raise_server_exceptions=False,
+        headers={"X-VocalLens-Owner": doubles.token},
+    )
 
 
 def upload(client: TestClient, name: str, content: bytes, content_type: str = "audio/wav"):
@@ -145,11 +154,10 @@ def test_stored_bytes_match_what_was_uploaded(
     assert stored[0].read_bytes() == content
 
 
-def test_metadata_record_is_persisted(client: TestClient, tmp_path: Path, settings: Settings):
+def test_metadata_record_is_persisted(client: TestClient, tmp_path: Path, doubles: Doubles):
     body = upload(client, "take.wav", wav_bytes(tmp_path)).json()
 
-    repository = JsonFileRecordingRepository(settings.storage_root)
-    recording = repository.get(body["recording_id"])
+    recording = anyio.run(doubles.recordings.get, body["recording_id"], doubles.owner.owner_id)
 
     assert recording is not None
     assert recording.original_filename == "take.wav"
@@ -471,7 +479,7 @@ def test_a_recording_within_the_duration_limit_is_accepted(client: TestClient, t
     assert response.status_code == 201
 
 
-def test_a_recording_over_the_duration_limit_is_rejected(tmp_path: Path):
+def test_a_recording_over_the_duration_limit_is_rejected(tmp_path: Path, doubles: Doubles):
     settings = Settings(
         _env_file=None,
         storage_root=tmp_path / "storage",
@@ -480,6 +488,7 @@ def test_a_recording_over_the_duration_limit_is_rejected(tmp_path: Path):
     )
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
+    override_repositories(app, doubles)
     client = TestClient(app, raise_server_exceptions=False)
     content = write_wav(tmp_path / "long.wav", seconds=3.0).read_bytes()
 
@@ -490,13 +499,14 @@ def test_a_recording_over_the_duration_limit_is_rejected(tmp_path: Path):
     assert_nothing_stored(settings)
 
 
-def test_duration_comes_from_the_audio_not_the_filename(tmp_path: Path):
+def test_duration_comes_from_the_audio_not_the_filename(tmp_path: Path, doubles: Doubles):
     """A short file named to suggest otherwise is judged on its contents."""
     settings = Settings(
         _env_file=None, storage_root=tmp_path / "storage", max_audio_duration_seconds=2
     )
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
+    override_repositories(app, doubles)
     client = TestClient(app, raise_server_exceptions=False)
 
     content = write_wav(tmp_path / "s.wav", seconds=1.0).read_bytes()
@@ -531,15 +541,18 @@ def test_storage_failure_returns_a_safe_internal_error(
 
 
 def test_a_failed_metadata_record_rolls_back_the_stored_bytes(
-    client: TestClient, tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    tmp_path: Path,
+    settings: Settings,
+    doubles: Doubles,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Bytes are stored before the record is written; a failure must undo them."""
-    from app.services.recordings import repository as repository_module
 
-    def failing_create(*args: object, **kwargs: object) -> None:
-        raise repository_module.RepositoryError("record write failed")
+    async def failing_create(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("record write failed")
 
-    monkeypatch.setattr(repository_module.JsonFileRecordingRepository, "create", failing_create)
+    monkeypatch.setattr(doubles.recordings, "create", failing_create)
 
     response = upload(client, "take.wav", wav_bytes(tmp_path))
 
