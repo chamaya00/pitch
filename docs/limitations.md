@@ -245,10 +245,17 @@ to an account:
 
 - **There is no login and no password.** Anyone holding the identifier is the
   owner of those recordings.
-- **There is no recovery.** Clearing site data, using private browsing, or
-  opening VocalLens in a different browser or on a different device starts a new
-  identity with an empty history. The old recordings still exist on the server
-  and are simply unreachable.
+- **The server cannot recover a lost key.** Only a SHA-256 hash of it is
+  stored, so there is no "forgot my key" and no reset. What the product does
+  give you is the key itself, shown in the browser that holds it: save it and
+  you can paste it on another device; lose it without saving it and the history
+  is unreachable for good.
+- **You can delete everything.** "Delete everything" under *Your key* removes
+  every recording, every measurement, every generated interpretation and the
+  stored audio itself, irreversibly.
+- **Clearing site data without saving the key still loses the history.** The old
+  recordings remain on the server, unreachable, until they are deleted through
+  an identity that can still reach them.
 - **It is not a security boundary against a determined attacker.** The
   identifier is a 128-bit random value, which makes guessing one impractical,
   but the guarantee is the entropy — not an access-control system.

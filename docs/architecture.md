@@ -67,7 +67,7 @@ See [audio-analysis.md](audio-analysis.md).
 | `app/db/migrate.py` | Numbered `.sql` files, applied once, checksum-verified |
 | `app/db/migrations/` | The schema, in order |
 | `app/db/import_filesystem.py` | One-off import of pre-7M JSON documents |
-| `app/services/owners/` | Owner identity: model and repository |
+| `app/services/owners/` | Owner identity: model, repository, the resolver seam, deletion |
 | `app/services/comparison/` | Comparing two recordings: pure arithmetic, eligibility, the owner-scoped query |
 | `app/services/progress/` | Measurements over time: the owner-scoped query, the window, the pure series build |
 | `app/services/audio/` | Upload validation, metadata, filesystem storage of the bytes |
@@ -145,6 +145,38 @@ path — real credentials would resolve *to* an owner id, and nothing pointing a
 an owner has to change. The token is stored SHA-256-hashed, which is appropriate
 precisely because it is a 128-bit random value rather than a human-chosen
 secret. See `app/services/owners/models.py` for the limits, stated plainly.
+
+### The identity seam
+
+Every domain service takes `owner_id: uuid.UUID` and nothing else. No service
+knows what a token is, how a header is spelled, or how identity was established
+— identity is established in exactly one place, and
+`services/owners/identity.py` states that as a protocol rather than leaving it
+as a property the next change could quietly lose.
+
+A real credential-based resolver is therefore a **second implementation of one
+function**, resolving to the *same* `owner_id` that already owns the recordings.
+No migration would reassign anything, and nothing in `services/recordings`,
+`services/analysis`, `services/audio_analysis`, `services/comparison` or
+`services/progress` would change.
+
+One schema constraint would need relaxing first, recorded so it is not
+rediscovered the hard way: `owners.token_hash` is `NOT NULL UNIQUE`, so every
+owner must currently carry a bearer key. An owner who signs in with credentials
+and never held one needs that column made nullable — additive, one migration,
+and deliberately not done until a credential system exists to justify it.
+
+### Portability and deletion (7P)
+
+The key is shown in the browser because the server *cannot* show it: only a hash
+is stored. That display is the entire recovery mechanism, which is why the copy
+states plainly what happens if it is lost.
+
+Deletion removes the stored audio **before** the rows. The database half is one
+`DELETE` — everything cascades from `owners` — but the audio lives on disk, and
+removing the rows alone would report success while leaving every recording on
+the server. Files first means a crash mid-way leaves the rows and a retry
+finishes the job; the reverse would leave orphaned audio nobody can name.
 
 The `X-VocalLens-Owner` header carries it in both directions: inbound to name an
 owner, outbound **only** when one is minted. It is named in the CORS
@@ -297,6 +329,7 @@ category errors, and this table exists to make them visible.
 | Recording metadata, analyses, owners | `db/`, `services/*/postgres_repository.py` | PostgreSQL | Not an ORM; not the filesystem |
 | Owner identity | `api/owner.py`, `services/owners/` | PostgreSQL | **Not authentication**: no password, no revocation, no recovery |
 | Ownership enforcement | Every repository read, in SQL | PostgreSQL | Not frontend filtering; not a `403` |
+| Identity portability and deletion | `services/owners/`, `routes/identity.py` | PostgreSQL + browser | Not authentication; the server cannot recover a lost key |
 | Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed |
 | Speech transcription | `services/ai/deepgram.py` behind `SpeechToTextProvider` | Provider | Not a measurement; provenance travels with it |
 | Speech metrics | `services/analysis/metrics.py` | Deterministic | Counted from the transcript, never estimated |

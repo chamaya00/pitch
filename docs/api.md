@@ -44,6 +44,57 @@ path, `GET` and `POST` alike.
 
 ## Implemented
 
+### `GET /api/v1/identity`
+
+What the caller's key holds. Takes no identifier.
+
+**200 OK**
+
+```json
+{
+  "created_at": "2026-08-11T10:03:19.499435Z",
+  "anonymous": true,
+  "recordings": 3,
+  "analysed_recordings": 3,
+  "ai_feedback": 3
+}
+```
+
+`anonymous: true` means the identity is a bearer key and nothing else — no
+password, no revocation, no server-side recovery. The field exists now so a
+client is not rewritten when credentials are added.
+
+**No owner id and no key are returned.** Only a SHA-256 hash of the key is
+stored, so the server *could not* return one; the browser holding it is the only
+place it exists in the clear. Echoing the internal owner id would put a second
+permanent handle on the same person into logs and screenshots for no benefit.
+
+`ai_feedback` is counted separately because generating it costs a provider call:
+measurements can be recomputed from the audio, generated prose cannot.
+
+### `DELETE /api/v1/identity`
+
+Remove the caller's identity and everything belonging to it: every recording,
+every analysis, every generated interpretation, **and the stored audio itself**.
+
+**200 OK**
+
+```json
+{ "recordings": 3, "audio_files_deleted": 3, "audio_files_failed": 0 }
+```
+
+Irreversible, with no soft delete: a row that still exists is not gone. The
+audio files are removed before the rows, so a failure part-way through leaves
+the rows and a retry finishes the job, rather than leaving audio nobody can
+name. A file that could not be removed is reported in `audio_files_failed`
+rather than hidden.
+
+Repeating the request is safe. The caller is issued a fresh, empty identity on
+its next request.
+
+Neither identity route accepts a parameter, so there is nothing through which a
+caller could name somebody else.
+
 ### `GET /api/v1/recordings`
 
 The caller's own recordings, newest first. Whose they are is decided entirely

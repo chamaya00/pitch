@@ -1,0 +1,345 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { deleteIdentity, getIdentity } from "@/lib/api";
+import {
+  DELETE_CONFIRMATION,
+  deletionWarning,
+  formatIssued,
+  isDeletionConfirmed,
+  recoveryKeyProblem,
+  summarise,
+} from "@/lib/identity";
+import { clearOwnerToken, readOwnerToken, storeOwnerToken } from "@/lib/owner";
+import type { Identity } from "@/types/api";
+
+/**
+ * Where the deletion report waits out the page reload.
+ *
+ * `sessionStorage` rather than a query parameter: the message is for this tab
+ * only, must not survive being bookmarked or shared, and says how many files
+ * were removed from somebody's account.
+ */
+const DELETION_MESSAGE_KEY = "vocallens.deleted";
+
+function rememberDeletion(message: string): void {
+  try {
+    window.sessionStorage.setItem(DELETION_MESSAGE_KEY, message);
+  } catch {
+    // Storage disabled. The page still reloads into a correct empty state; only
+    // the confirmation sentence is lost, which is not worth failing over.
+  }
+}
+
+function takeRememberedDeletion(): string | null {
+  try {
+    const message = window.sessionStorage.getItem(DELETION_MESSAGE_KEY);
+    if (message !== null) window.sessionStorage.removeItem(DELETION_MESSAGE_KEY);
+    return message;
+  } catch {
+    return null;
+  }
+}
+
+type State =
+  | { status: "loading" }
+  | { status: "ready"; identity: Identity }
+  | { status: "error"; message: string };
+
+/**
+ * Your recovery key, and the ability to delete everything.
+ *
+ * Until Step 7P a person's entire history sat behind a key held in one browser,
+ * with no way to see it, move it, or remove what it owned. Clearing site data
+ * lost everything silently and permanently — and the audio stayed on the server,
+ * unreachable, so it was not even a privacy-preserving loss.
+ *
+ * Two affordances close that, and neither is authentication:
+ *
+ * **The key is shown.** The server stores only a hash and *cannot* return it, so
+ * this browser is the only place it exists in the clear. Displaying it is the
+ * whole recovery mechanism, which is why the copy says plainly what happens if
+ * it is lost.
+ *
+ * **Everything can be deleted.** Rows and stored audio, irreversibly, confirmed
+ * by typing rather than by a button somebody clicks past.
+ *
+ * The key is revealed only on request. It is a bearer credential, and leaving it
+ * on screen is how it ends up in a screenshot or a shared window.
+ */
+export function IdentityPanel() {
+  const [state, setState] = useState<State>({ status: "loading" });
+  const [nonce, setNonce] = useState(0);
+  const [revealed, setRevealed] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [keyInput, setKeyInput] = useState("");
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const [deleted, setDeleted] = useState<string | null>(null);
+
+  const reload = useCallback(() => setNonce((value) => value + 1), []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getIdentity(controller.signal)
+      .then((identity) => {
+        if (controller.signal.aborted) return;
+        // Picked up here rather than in an effect of its own: reading storage
+        // during render would run on the server, where it does not exist, and a
+        // synchronous setState in an effect body triggers a cascading render.
+        // Inside this callback it is neither.
+        const message = takeRememberedDeletion();
+        if (message !== null) setDeleted(message);
+        setState({ status: "ready", identity });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setState({
+          status: "error",
+          message:
+            error instanceof Error ? error.message : "Your key could not be checked.",
+        });
+      });
+    return () => controller.abort();
+  }, [nonce]);
+
+  const restore = () => {
+    const problem = recoveryKeyProblem(keyInput);
+    if (problem !== null) {
+      setRestoreError(problem);
+      return;
+    }
+    if (!storeOwnerToken(keyInput.trim())) {
+      setRestoreError("This browser would not let us save the key.");
+      return;
+    }
+    setRestoreError(null);
+    setRestoring(false);
+    setKeyInput("");
+    setRevealed(false);
+    setDeleted(null);
+    // Everything on the page is scoped to the key, so a new key means a new
+    // page. Reloading is honest and avoids a half-swapped view.
+    window.location.reload();
+  };
+
+  const remove = () => {
+    deleteIdentity()
+      .then((report) => {
+        clearOwnerToken();
+        const message =
+          `Deleted ${report.recordings} recording${report.recordings === 1 ? "" : "s"} and ${
+            report.audio_files_deleted
+          } stored file${report.audio_files_deleted === 1 ? "" : "s"}.` +
+          (report.audio_files_failed > 0
+            ? ` ${report.audio_files_failed} file${
+                report.audio_files_failed === 1 ? "" : "s"
+              } could not be removed from the server.`
+            : "");
+        // Every panel on this page — history, comparison, progress — is scoped
+        // to the identity that no longer exists, so refreshing this one alone
+        // would leave the page showing deleted recordings beside an empty key.
+        // Reloading is the honest fix; the report is carried across so the
+        // confirmation is not lost in the process.
+        rememberDeletion(message);
+        window.location.reload();
+      })
+      .catch((error: unknown) => {
+        setState({
+          status: "error",
+          message:
+            error instanceof Error ? error.message : "Nothing could be deleted.",
+        });
+      });
+  };
+
+  const storedKey = readOwnerToken();
+
+  return (
+    <section
+      aria-labelledby="identity-heading"
+      className="border-t border-border pt-10"
+    >
+      <h2 id="identity-heading" className="text-sm font-medium">
+        Your key
+      </h2>
+      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
+        Your recordings are linked to a key stored in this browser — not to an
+        account. There is no password, and VocalLens stores only a scrambled copy
+        of the key, so it cannot send you a new one. Save it and you can pick up
+        your history on another device; lose it and the history is gone.
+      </p>
+
+      <p aria-live="polite" className="sr-only">
+        {announcement(state, deleted)}
+      </p>
+
+      {state.status === "loading" && (
+        <p className="mt-6 text-sm text-muted">Checking your key…</p>
+      )}
+
+      {state.status === "error" && (
+        <div role="alert" className="mt-6 rounded-xl border border-danger/40 bg-danger/5 p-5">
+          <p className="text-sm font-medium text-danger">Something went wrong</p>
+          <p className="mt-1 text-sm text-muted">{state.message}</p>
+          <div className="mt-4">
+            <Button variant="secondary" onClick={reload}>
+              Try again
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {state.status === "ready" && (
+        <div className="fade-in mt-6 space-y-4">
+          {deleted && (
+            <p role="status" className="rounded-xl border border-border bg-surface-raised p-4 text-sm">
+              {deleted} You now have a new, empty key.
+            </p>
+          )}
+
+          <div className="rounded-xl border border-border bg-surface p-5">
+            <p className="text-sm">{summarise(state.identity)}</p>
+            <p className="mt-1 text-xs text-muted">
+              Key issued {formatIssued(state.identity.created_at)}.
+              {state.identity.anonymous && " No password is attached to it."}
+            </p>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button variant="secondary" onClick={() => setRevealed((value) => !value)}>
+                {revealed ? "Hide key" : "Show key"}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setRestoring((value) => !value);
+                  setRestoreError(null);
+                }}
+              >
+                {restoring ? "Cancel" : "Use a different key"}
+              </Button>
+            </div>
+
+            {revealed && (
+              <div className="mt-4">
+                <label
+                  htmlFor="recovery-key"
+                  className="block text-xs font-medium text-muted"
+                >
+                  Recovery key — save this somewhere safe
+                </label>
+                <input
+                  id="recovery-key"
+                  readOnly
+                  value={storedKey ?? ""}
+                  onFocus={(event) => event.currentTarget.select()}
+                  className="mt-2 w-full rounded-md border border-border bg-surface-raised px-3 py-2 font-mono text-sm"
+                />
+                <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
+                  Anyone who has this key has your recordings. Treat it like a
+                  password: do not share it or paste it into a screenshot.
+                </p>
+              </div>
+            )}
+
+            {restoring && (
+              <div className="mt-4">
+                <label htmlFor="restore-key" className="block text-xs font-medium text-muted">
+                  Paste a key you saved earlier
+                </label>
+                <input
+                  id="restore-key"
+                  value={keyInput}
+                  onChange={(event) => {
+                    setKeyInput(event.target.value);
+                    setRestoreError(null);
+                  }}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="mt-2 w-full rounded-md border border-border bg-surface-raised px-3 py-2 font-mono text-sm"
+                />
+                {restoreError && (
+                  <p role="alert" className="mt-2 max-w-prose text-xs text-danger">
+                    {restoreError}
+                  </p>
+                )}
+                <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
+                  This replaces the key in this browser. The history it currently
+                  holds stays on the server and can be reached again by pasting
+                  the old key back — so save it first if you have not.
+                </p>
+                <div className="mt-3">
+                  <Button onClick={restore}>Use this key</Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-danger/40 p-5">
+            <p className="text-sm font-medium">Delete everything</p>
+            <p className="mt-1 max-w-prose text-sm leading-relaxed text-muted">
+              {deletionWarning(state.identity)}
+            </p>
+
+            {!confirming ? (
+              <div className="mt-4">
+                <Button
+                  variant="secondary"
+                  disabled={state.identity.recordings === 0}
+                  onClick={() => setConfirming(true)}
+                >
+                  Delete everything
+                </Button>
+              </div>
+            ) : (
+              <div className="mt-4">
+                <label htmlFor="delete-confirm" className="block text-xs font-medium">
+                  Type <span className="font-mono">{DELETE_CONFIRMATION}</span> to
+                  confirm
+                </label>
+                <input
+                  id="delete-confirm"
+                  value={confirmation}
+                  onChange={(event) => setConfirmation(event.target.value)}
+                  autoComplete="off"
+                  className="mt-2 w-full max-w-xs rounded-md border border-border bg-surface-raised px-3 py-2 font-mono text-sm"
+                />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    disabled={!isDeletionConfirmed(confirmation)}
+                    onClick={remove}
+                  >
+                    Delete permanently
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setConfirming(false);
+                      setConfirmation("");
+                    }}
+                  >
+                    Keep my recordings
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function announcement(state: State, deleted: string | null): string {
+  if (deleted) return deleted;
+  switch (state.status) {
+    case "loading":
+      return "Checking your key.";
+    case "error":
+      return state.message;
+    case "ready":
+      return summarise(state.identity);
+  }
+}

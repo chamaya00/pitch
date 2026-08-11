@@ -42,6 +42,7 @@ from app.services.audio_analysis.postgres_repository import (
     AudioAnalysisConflictError,
 )
 from app.services.comparison.sources import ComparisonSource
+from app.services.owners.identity import OwnerDataSummary
 from app.services.owners.models import Owner, hash_token, new_owner
 from app.services.progress.sources import ProgressRow
 from app.services.recordings.history import RecordingHistoryEntry
@@ -66,9 +67,13 @@ class InMemoryOwnerRepository:
     that matters — and the contract suite checks this one against both.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, recordings: "InMemoryRecordingRepository | None" = None) -> None:
         self._by_hash: dict[str, Owner] = {}
         self._by_id: dict[uuid.UUID, Owner] = {}
+        # Optional back-reference so the identity summary and the cascade can be
+        # answered from the same data the other doubles hold, rather than from a
+        # second copy that could disagree with them.
+        self._recordings = recordings
 
     async def create(self, owner: Owner, token: str) -> Owner:
         self._by_hash[hash_token(token)] = owner
@@ -80,6 +85,43 @@ class InMemoryOwnerRepository:
 
     async def get(self, owner_id: uuid.UUID) -> Owner | None:
         return self._by_id.get(owner_id)
+
+    async def data_summary(self, owner_id: uuid.UUID) -> OwnerDataSummary:
+        """Counts, taken from the sibling doubles rather than a second store."""
+        recordings = self._recordings
+        if recordings is None:
+            return OwnerDataSummary(recordings=0, analysed_recordings=0, ai_feedback=0)
+        owned = [record for owner, record in recordings.records() if owner == owner_id]
+        analysed = 0
+        feedback = 0
+        for record in owned:
+            analysis = await recordings.latest_audio_analysis(record.recording_id)
+            if analysis is None:
+                continue
+            if analysis.status is AudioAnalysisStatus.COMPLETED:
+                analysed += 1
+            if analysis.feedback_status is AudioFeedbackStatus.COMPLETED:
+                feedback += 1
+        return OwnerDataSummary(
+            recordings=len(owned), analysed_recordings=analysed, ai_feedback=feedback
+        )
+
+    async def recording_ids(self, owner_id: uuid.UUID) -> list[str]:
+        if self._recordings is None:
+            return []
+        return sorted(
+            record.recording_id for owner, record in self._recordings.records() if owner == owner_id
+        )
+
+    async def delete_owner(self, owner_id: uuid.UUID) -> bool:
+        """Cascades by hand, exactly as the foreign keys do in PostgreSQL."""
+        owner = self._by_id.pop(owner_id, None)
+        for token_hash, stored in list(self._by_hash.items()):
+            if stored.owner_id == owner_id:
+                del self._by_hash[token_hash]
+        if self._recordings is not None:
+            self._recordings.delete_for_owner(owner_id)
+        return owner is not None
 
 
 class InMemoryRecordingRepository:
@@ -189,6 +231,32 @@ class InMemoryRecordingRepository:
         entry = self._records.get(recording_id)
         return None if entry is None else entry[0]
 
+    # --- Accessors for the owner double, not part of any production protocol.
+
+    def records(self) -> list[tuple[uuid.UUID, Recording]]:
+        return list(self._records.values())
+
+    async def latest_audio_analysis(self, recording_id: str) -> AudioAnalysis | None:
+        if self._audio_analyses is None:
+            return None
+        return await self._audio_analyses.latest_for_recording(recording_id)
+
+    def delete_for_owner(self, owner_id: uuid.UUID) -> None:
+        """What ``ON DELETE CASCADE`` does in the real schema.
+
+        Both analysis tables reference ``recordings(id) ON DELETE CASCADE``, so
+        removing a recording removes its analyses too. The contract suite caught
+        this double deleting only the recordings.
+        """
+        for recording_id, (owner, _) in list(self._records.items()):
+            if owner != owner_id:
+                continue
+            del self._records[recording_id]
+            if self._analyses is not None:
+                self._analyses.delete_for_recording(recording_id)
+            if self._audio_analyses is not None:
+                self._audio_analyses.delete_for_recording(recording_id)
+
 
 class InMemoryAnalysisRepository:
     """Speech analyses in a dictionary."""
@@ -233,6 +301,12 @@ class InMemoryAnalysisRepository:
         ]
         matches.sort(key=lambda analysis: (analysis.created_at, analysis.analysis_id), reverse=True)
         return matches
+
+    def delete_for_recording(self, recording_id: str) -> None:
+        """The cascade from ``recordings``. Not part of any production protocol."""
+        for stored_id, analysis in list(self._records.items()):
+            if analysis.recording_id == recording_id:
+                del self._records[stored_id]
 
 
 class InMemoryAudioAnalysisRepository:
@@ -301,6 +375,12 @@ class InMemoryAudioAnalysisRepository:
         )
         return matches
 
+    def delete_for_recording(self, recording_id: str) -> None:
+        """The cascade from ``recordings``. Not part of any production protocol."""
+        for stored_id, analysis in list(self._records.items()):
+            if analysis.recording_id == recording_id:
+                del self._records[stored_id]
+
 
 @dataclass(frozen=True, slots=True)
 class Doubles:
@@ -324,7 +404,7 @@ async def build_doubles() -> Doubles:
     analyses = InMemoryAnalysisRepository()
     audio_analyses = InMemoryAudioAnalysisRepository()
     recordings = InMemoryRecordingRepository(analyses, audio_analyses)
-    owners = InMemoryOwnerRepository()
+    owners = InMemoryOwnerRepository(recordings)
     owner, token = new_owner()
     await owners.create(owner, token)
     return Doubles(
@@ -346,6 +426,7 @@ def override_repositories(app: FastAPI, doubles: Doubles) -> None:
     which is exactly the configuration these overrides then make irrelevant.
     """
     app.dependency_overrides[deps.get_owner_repository] = lambda: doubles.owners
+    app.dependency_overrides[deps.get_owner_data_repository] = lambda: doubles.owners
     app.dependency_overrides[deps.get_recording_repository] = lambda: doubles.recordings
     app.dependency_overrides[deps.get_analysis_repository] = lambda: doubles.analyses
     app.dependency_overrides[deps.get_audio_analysis_repository] = lambda: doubles.audio_analyses

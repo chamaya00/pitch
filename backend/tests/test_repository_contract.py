@@ -88,9 +88,13 @@ class Backend:
 async def _memory_backend() -> AsyncIterator[Backend]:
     analyses = InMemoryAnalysisRepository()
     audio = InMemoryAudioAnalysisRepository()
+    recordings = InMemoryRecordingRepository(analyses, audio)
     yield Backend(
-        owners=InMemoryOwnerRepository(),
-        recordings=InMemoryRecordingRepository(analyses, audio),
+        # The owner double needs the recordings back-reference to answer the
+        # data summary and to cascade a deletion — without it, it reports zeroes
+        # where SQL reports counts. The contract suite caught exactly that.
+        owners=InMemoryOwnerRepository(recordings),
+        recordings=recordings,
         analyses=analyses,
         audio=audio,
     )
@@ -791,5 +795,128 @@ def test_progress_rows_are_empty_for_an_owner_with_nothing(backend: Any) -> None
         owner = await prepared.owner()
 
         assert await prepared.recordings.progress_rows(owner.owner_id, 10) == []
+
+    backend(work)
+
+
+# --- Owner data and deletion -----------------------------------------------
+
+
+def test_an_owner_summary_counts_only_their_own_data(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+
+        first = await prepared.recordings.create(make_recording(), mine.owner_id)
+        await prepared.recordings.create(make_recording(), mine.owner_id)
+        await prepared.recordings.create(make_recording(), theirs.owner_id)
+        await prepared.audio.create(completed_audio(first.recording_id))
+
+        summary = await prepared.owners.data_summary(mine.owner_id)
+
+        assert summary.recordings == 2
+        assert summary.analysed_recordings == 1
+        assert summary.ai_feedback == 0
+
+    backend(work)
+
+
+def test_an_empty_owner_summarises_to_zeroes(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+
+        summary = await prepared.owners.data_summary(owner.owner_id)
+
+        assert (summary.recordings, summary.analysed_recordings, summary.ai_feedback) == (0, 0, 0)
+
+    backend(work)
+
+
+def test_an_unfinished_analysis_does_not_count_as_analysed(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(make_audio(stored.recording_id))
+
+        summary = await prepared.owners.data_summary(owner.owner_id)
+
+        assert summary.recordings == 1
+        assert summary.analysed_recordings == 0
+
+    backend(work)
+
+
+def test_recording_ids_are_only_the_owners_and_are_ordered(backend: Any) -> None:
+    """The deletion service names files from this list, so it must be complete."""
+
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        ours = [
+            (await prepared.recordings.create(make_recording(), mine.owner_id)).recording_id
+            for _ in range(3)
+        ]
+        stolen = await prepared.recordings.create(make_recording(), theirs.owner_id)
+
+        ids = await prepared.owners.recording_ids(mine.owner_id)
+
+        assert ids == sorted(ours)
+        assert stolen.recording_id not in ids
+
+    backend(work)
+
+
+def test_deleting_an_owner_removes_their_recordings_and_analyses(backend: Any) -> None:
+    """The cascade, asserted against real foreign keys rather than assumed."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id))
+        await prepared.analyses.create(make_analysis(stored.recording_id))
+
+        assert await prepared.owners.delete_owner(owner.owner_id) is True
+
+        assert await prepared.recordings.get(stored.recording_id, owner.owner_id) is None
+        assert await prepared.audio.latest_for_recording(stored.recording_id) is None
+        assert await prepared.analyses.latest_for_recording(stored.recording_id) is None
+        assert await prepared.owners.get(owner.owner_id) is None
+
+    backend(work)
+
+
+def test_deleting_an_owner_leaves_every_other_owner_alone(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        await prepared.recordings.create(make_recording(), mine.owner_id)
+        survivor = await prepared.recordings.create(make_recording(), theirs.owner_id)
+
+        await prepared.owners.delete_owner(mine.owner_id)
+
+        assert await prepared.recordings.get(survivor.recording_id, theirs.owner_id) is not None
+        assert await prepared.owners.get(theirs.owner_id) is not None
+
+    backend(work)
+
+
+def test_deleting_an_owner_twice_is_harmless(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+
+        assert await prepared.owners.delete_owner(owner.owner_id) is True
+        assert await prepared.owners.delete_owner(owner.owner_id) is False
+
+    backend(work)
+
+
+def test_a_deleted_owners_key_no_longer_resolves(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner, token = new_owner()
+        await prepared.owners.create(owner, token)
+
+        await prepared.owners.delete_owner(owner.owner_id)
+
+        assert await prepared.owners.get_by_token(token) is None
 
     backend(work)

@@ -537,3 +537,32 @@ export interface ProgressHistory {
   depth: HistoryDepth;
   limit: number;
 }
+
+/* --- Identity -------------------------------------------------------------- */
+
+/**
+ * Who the caller is, and what a lost key would cost.
+ *
+ * `anonymous` is `true` while the identity is a bearer key and nothing else —
+ * no password, no revocation, no server-side recovery. It exists as a field now
+ * so a client is not rewritten to learn about credentials later.
+ *
+ * No owner id and no key: the server stores only a hash of the key, so it could
+ * not return one, and the browser is the only place it exists in the clear.
+ */
+export interface Identity {
+  created_at: string;
+  anonymous: boolean;
+  recordings: number;
+  analysed_recordings: number;
+  /** Counted separately: generating it costs a provider call. */
+  ai_feedback: number;
+}
+
+/** What deleting an identity actually removed. */
+export interface DeletionReport {
+  recordings: number;
+  audio_files_deleted: number;
+  /** Removed from the database but still present on disk. Reported, not hidden. */
+  audio_files_failed: number;
+}

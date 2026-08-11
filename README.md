@@ -84,9 +84,10 @@ HTTPS anywhere else; browsers do not grant microphone access otherwise.
 │   ├── app/
 │   │   ├── api/       HTTP routes (versioned under /api/v1)
 │   │   ├── core/      Configuration and logging
-│   │   ├── models/    Database models (Phase 7)
+│   │   ├── db/        Connection pool, migrations, filesystem import
 │   │   ├── schemas/   Pydantic request/response schemas
-│   │   └── services/  audio/ · analysis/ · ai/
+│   │   └── services/  audio/ · analysis/ · audio_analysis/ · ai/
+│   │                  owners/ · recordings/ · comparison/ · progress/
 │   └── tests/
 ├── docs/              Architecture, API, audio analysis, limitations
 ├── scripts/           Developer helper scripts
@@ -137,7 +138,9 @@ docker compose up --build
 ```
 
 Starts PostgreSQL, the backend on `:8000` and the frontend on `:3000`.
-PostgreSQL is provisioned ahead of Phase 7 and is not used yet.
+PostgreSQL is the source of truth for recordings, analyses and owners; the
+backend applies its migrations at startup and will not serve the recording
+endpoints without it.
 
 ## Checks
 
@@ -179,7 +182,7 @@ Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL`) are never hardcoded or committed.
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Phase 0 |
 | `MAX_AUDIO_SIZE_MB` | `50` | Phase 1 |
 | `MAX_AUDIO_DURATION_SECONDS` | `300` | Phase 1 |
-| `DATABASE_URL` | — | Phase 7 |
+| `DATABASE_URL` | — | **required** since Step 7M |
 | `ANTHROPIC_API_KEY` | — | Phase 6 |
 
 ## Documentation

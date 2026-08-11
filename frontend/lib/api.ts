@@ -3,6 +3,8 @@ import { captureOwnerToken, ownerHeaders } from "@/lib/owner";
 import type {
   AnalysisResponse,
   ApiErrorBody,
+  DeletionReport,
+  Identity,
   AudioAnalysisResponse,
   AudioFeedbackState,
   HealthResponse,
@@ -398,4 +400,20 @@ export function getProgressHistory(
     signal,
     cache: "no-store",
   });
+}
+
+/** The caller's own identity and what it owns. Takes no identifier. */
+export function getIdentity(signal?: AbortSignal): Promise<Identity> {
+  return apiFetch<Identity>("/identity", { signal, cache: "no-store" });
+}
+
+/**
+ * Delete the caller's identity and everything belonging to it.
+ *
+ * Irreversible, and the caller is issued a fresh empty identity on its next
+ * request. There is no identifier to pass — the endpoint acts on whoever the
+ * key resolves to and nobody else.
+ */
+export function deleteIdentity(signal?: AbortSignal): Promise<DeletionReport> {
+  return apiFetch<DeletionReport>("/identity", { method: "DELETE", signal });
 }

@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Planned |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P) |
 
 ## Phase 0 — delivered
 
@@ -75,4 +75,26 @@ do are defined against equal temperament rather than against singing. See
 [api.md](api.md) and [limitations.md](limitations.md).
 
 **Phase 8 has not started.** Nothing about song analysis, key, BPM, melody
-extraction or transposition exists.
+extraction or transposition exists — verified by search, not assumed.
+
+## Phase 10 — where it stands
+
+Step 7P audited the whole repository before choosing what to build next, and
+chose Phase 10 over Phase 8 on the evidence: 14 of 16 endpoints were gated on a
+bearer key with **no** way to see it, move it, or delete what it owned, and
+Phase 8 would have increased the value sitting behind that key.
+
+Delivered in 7P:
+
+- `GET /api/v1/identity` — what this key holds, in counts
+- `DELETE /api/v1/identity` — remove every recording, analysis and stored audio
+  file, irreversibly
+- The recovery key shown in the browser, so it can be saved and pasted on
+  another device — the server stores only a hash and cannot replace it
+- `IdentityResolver`, the documented seam where a real authentication provider
+  will resolve to the **existing** `owner_id`
+
+**Not yet built** in Phase 10: real credentials (email, password, sessions),
+rate limiting, error pages, and deployment hardening. Credentials need a way to
+prove you are an existing anonymous owner — which is exactly the portable key
+7P delivers — so this was the first step rather than a substitute for it.

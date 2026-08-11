@@ -44,6 +44,8 @@ from app.services.audio_analysis.postgres_repository import (
 from app.services.comparison.service import ComparisonService
 from app.services.orchestration.analysis import AnalysisService
 from app.services.orchestration.audio_analysis import AudioAnalysisService
+from app.services.owners.deletion import OwnerDeletionService
+from app.services.owners.identity import OwnerDataRepository
 from app.services.owners.models import Owner
 from app.services.owners.repository import OwnerRepository, PostgresOwnerRepository
 from app.services.progress.service import ProgressService
@@ -265,3 +267,30 @@ def get_progress_service(recordings: RecordingRepositoryDep) -> ProgressService:
 
 
 ProgressServiceDep = Annotated[ProgressService, Depends(get_progress_service)]
+
+
+def get_owner_data_repository(database: DatabaseDep) -> OwnerDataRepository:
+    """The owner repository seen through the identity protocol.
+
+    The same object ``get_owner_repository`` returns — one table, one
+    implementation — annotated differently so the identity routes depend on the
+    two operations they need rather than on everything an owner store can do.
+    """
+    return PostgresOwnerRepository(database)
+
+
+OwnerDataRepositoryDep = Annotated[OwnerDataRepository, Depends(get_owner_data_repository)]
+
+
+def get_owner_deletion_service(
+    owners: OwnerDataRepositoryDep, storage: RecordingStorageDep
+) -> OwnerDeletionService:
+    """Assemble the deletion workflow.
+
+    Takes storage as well as the repository, because deleting an owner's data
+    means deleting the audio on disk and not only the rows that name it.
+    """
+    return OwnerDeletionService(owners=owners, storage=storage)
+
+
+OwnerDeletionServiceDep = Annotated[OwnerDeletionService, Depends(get_owner_deletion_service)]
