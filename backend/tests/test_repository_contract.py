@@ -519,3 +519,130 @@ def test_a_missing_audio_analysis_is_none_not_an_error(backend: Any) -> None:
         assert await prepared.audio.latest_for_recording(uuid.uuid4().hex) is None
 
     backend(work)
+
+
+# --- Comparison sources ----------------------------------------------------
+
+
+def test_comparison_sources_return_both_recordings_and_their_analyses(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        left = await prepared.recordings.create(make_recording(), owner.owner_id)
+        right = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(make_audio(left.recording_id))
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [left.recording_id, right.recording_id]
+        )
+
+        assert set(sources) == {left.recording_id, right.recording_id}
+        assert sources[left.recording_id].audio_analysis is not None
+        # A recording nobody has measured comes back with no analysis, not with
+        # a fabricated one.
+        assert sources[right.recording_id].audio_analysis is None
+
+    backend(work)
+
+
+def test_comparison_sources_omit_another_owners_recording(backend: Any) -> None:
+    """The security property of the comparison query, asserted against real SQL."""
+
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        ours = await prepared.recordings.create(make_recording(), mine.owner_id)
+        stolen = await prepared.recordings.create(make_recording(), theirs.owner_id)
+
+        sources = await prepared.recordings.comparison_sources(
+            mine.owner_id, [ours.recording_id, stolen.recording_id]
+        )
+
+        assert set(sources) == {ours.recording_id}
+        assert stolen.recording_id not in sources
+
+    backend(work)
+
+
+def test_comparison_sources_omit_an_unknown_recording(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        known = await prepared.recordings.create(make_recording(), owner.owner_id)
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [known.recording_id, uuid.uuid4().hex]
+        )
+
+        assert set(sources) == {known.recording_id}
+
+    backend(work)
+
+
+def test_comparison_sources_take_the_most_recent_analysis(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+
+        first = await prepared.audio.create(
+            make_audio(
+                stored.recording_id,
+                status=AudioAnalysisStatus.FAILED,
+                error_code="INSUFFICIENT_PITCH_SIGNAL",
+            )
+        )
+        second = await prepared.audio.create(make_audio(stored.recording_id))
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [stored.recording_id]
+        )
+        loaded = sources[stored.recording_id].audio_analysis
+
+        assert loaded is not None
+        assert loaded.audio_analysis_id in {first.audio_analysis_id, second.audio_analysis_id}
+        latest = await prepared.audio.latest_for_recording(stored.recording_id)
+        assert latest is not None
+        assert loaded.audio_analysis_id == latest.audio_analysis_id
+
+    backend(work)
+
+
+def test_comparison_sources_of_nothing_is_empty(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+
+        assert await prepared.recordings.comparison_sources(owner.owner_id, []) == {}
+
+    backend(work)
+
+
+def test_comparison_sources_preserve_the_stored_pitch_timeline(backend: Any) -> None:
+    """The note breakdown is derived from these points, so they have to survive."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            completed_audio(
+                stored.recording_id,
+                pitch_points=[
+                    {
+                        "timestamp_seconds": 0.1,
+                        "frequency_hz": 440.0,
+                        "midi_note": 69,
+                        "note_name": "A4",
+                        "cents": 3.0,
+                        "confidence": 0.95,
+                    }
+                ],
+            )
+        )
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [stored.recording_id]
+        )
+        analysis = sources[stored.recording_id].audio_analysis
+
+        assert analysis is not None
+        assert len(analysis.pitch_points) == 1
+        assert analysis.pitch_points[0].note_name == "A4"
+
+    backend(work)

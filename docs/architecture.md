@@ -68,6 +68,7 @@ See [audio-analysis.md](audio-analysis.md).
 | `app/db/migrations/` | The schema, in order |
 | `app/db/import_filesystem.py` | One-off import of pre-7M JSON documents |
 | `app/services/owners/` | Owner identity: model and repository |
+| `app/services/comparison/` | Comparing two recordings: pure arithmetic, eligibility, the owner-scoped query |
 | `app/services/audio/` | Upload validation, metadata, filesystem storage of the bytes |
 | `app/services/analysis/` | Speech domain: transcript, metrics, records |
 | `app/services/audio_analysis/` | Audio domain: pitch maths, detector, features, analyzer |
@@ -308,6 +309,7 @@ category errors, and this table exists to make them visible.
 | Microphone recording | `frontend/lib/live-pitch-engine.ts`, `lib/wav.ts` | Browser-local | Uploaded only on an explicit action |
 | One-analysis-at-a-time | Partial unique indexes | PostgreSQL | Not an `asyncio.Lock` — that was removed in 7M |
 | One feedback run | `claim_feedback`, a single conditional `UPDATE` | PostgreSQL | Not a read-then-write |
+| Recording comparison | `services/comparison/` | Deterministic | Measurement comparison, never a score; four of seven metrics have no better direction |
 
 Two allocations are worth restating because they are the ones most likely to
 erode:
@@ -320,10 +322,37 @@ erode:
   different windows. Neither validates the other and the UI never implies they
   agree.
 
+### Comparison (7N)
+
+Three layers, and the split is the point:
+
+| Layer | Module | May do |
+| --- | --- | --- |
+| Query | `comparison/sources.py` + the recording repository | Load exactly two recordings, owner in the `WHERE` clause |
+| Eligibility | `comparison/service.py` | Decide whether each side can take part, and say why not |
+| Arithmetic | `comparison/compare.py` | Subtract. Nothing else — no IO, no provider, no re-measurement |
+
+`compare.py` is a pure function over two already-stored `AudioMetrics` and two
+note breakdowns, so a change to the analyzer cannot silently change what a
+comparison *means*, and the whole of it tests in microseconds with no fixtures.
+
+The note breakdown comes from `audio_analysis/notes.py` — the same function the
+single-recording endpoint uses, over the same stored timeline. There is one note
+aggregation in this system.
+
+**No AI.** A comparison is subtraction, and a model that produced one of these
+numbers would be producing a measurement. `ComparisonService` has no provider
+dependency at all, which is what makes that structurally impossible rather than
+merely discouraged.
+
+The query is targeted by primary key, not by owner history: see the comment on
+`COMPARISON_SOURCES_SQL` for the type cast that makes the difference, and the
+measurements behind it.
+
 ### Not built in Phase 7
 
-Comparison between two recordings, and a progress chart over time. Both were in
-the phase's original scope and neither exists. They now have the persistent,
-owned, queryable history they need — and the caveat in
-[limitations.md](limitations.md) that two recordings are only comparable when
-captured under similar conditions is the first thing either has to confront.
+The progress chart over time. It is the last item in the phase and does not
+exist. Comparison says how two recordings differ; it says nothing about a
+direction of travel, and the caveat in [limitations.md](limitations.md) — that
+two recordings are only comparable under reasonably similar conditions — is the
+first thing a trend feature has to confront, over many more than two.

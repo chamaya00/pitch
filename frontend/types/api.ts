@@ -349,3 +349,101 @@ export interface RecordingHistory {
   count: number;
   limit: number;
 }
+
+/* --- Recording comparison -------------------------------------------------- */
+
+/** What a delta is expressed in. `percentage_points` is never `percent`. */
+export type MetricUnit =
+  | "percentage_points"
+  | "cents"
+  | "semitones"
+  | "seconds";
+
+/**
+ * Whether a direction of change means anything, and exactly what.
+ *
+ * `neutral` covers recording length, pitched time, voiced share and the
+ * detected range: those differences have no better end, and the UI must not
+ * imply one. The two directed values are defined relative to equal-tempered
+ * pitch, never to singing quality.
+ */
+export type MetricDirection =
+  | "higher_is_nearer_the_note"
+  | "lower_is_nearer_the_note"
+  | "lower_is_steadier"
+  | "neutral";
+
+/** Which recordings supported a measurement. Anything but `both` means no delta. */
+export type MetricAvailability = "both" | "left_only" | "right_only" | "neither";
+
+export interface ComparedMetric {
+  key: string;
+  label: string;
+  unit: MetricUnit;
+  direction: MetricDirection;
+  /** `null` means the recording did not support the measurement. Never zero. */
+  left: number | null;
+  right: number | null;
+  /** `right - left`, in `unit`. `null` whenever either side is missing. */
+  delta: number | null;
+  availability: MetricAvailability;
+}
+
+export type NotePresence = "both" | "left_only" | "right_only";
+
+export interface ComparedNoteEntry {
+  duration_seconds: number;
+  percentage_of_voiced_time: number;
+  frame_count: number;
+  mean_abs_cents: number;
+  in_tune_ratio: number;
+}
+
+export interface ComparedNote {
+  midi_note: number;
+  note_name: string;
+  presence: NotePresence;
+  /** `null` means the note was never sung — not sung for zero seconds. */
+  left: ComparedNoteEntry | null;
+  right: ComparedNoteEntry | null;
+  share_delta_points: number | null;
+  duration_delta_seconds: number | null;
+  mean_abs_cents_delta: number | null;
+}
+
+/** Why one recording cannot take part. `not_found` also covers "not yours". */
+export type ComparisonSideStatus =
+  | "ready"
+  | "not_found"
+  | "analysis_missing"
+  | "analysis_in_progress"
+  | "analysis_failed"
+  | "insufficient_pitch_signal";
+
+export interface ComparisonSide {
+  recording_id: string;
+  status: ComparisonSideStatus;
+  original_filename: string | null;
+  created_at: string | null;
+  duration_seconds: number | null;
+  audio_format: string | null;
+  error_code: string | null;
+  /** Detected in this recording only. `null` when no range was established. */
+  lowest_note: string | null;
+  highest_note: string | null;
+}
+
+/**
+ * Two recordings' measurements, side by side.
+ *
+ * Note what has no field here: an overall figure. There is no score in this
+ * product, and a comparison does not introduce the first one.
+ */
+export interface RecordingComparison {
+  left: ComparisonSide;
+  right: ComparisonSide;
+  comparable: boolean;
+  metrics: ComparedMetric[];
+  notes: ComparedNote[];
+  caveats: string[];
+}

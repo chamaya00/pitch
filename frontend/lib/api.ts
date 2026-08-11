@@ -10,6 +10,7 @@ import type {
   PitchTimeline,
   PublicConfig,
   Recording,
+  RecordingComparison,
   RecordingHistory,
 } from "@/types/api";
 
@@ -355,6 +356,26 @@ export function getRecordingHistory(
 ): Promise<RecordingHistory> {
   const query = limit === undefined ? "" : `?limit=${limit}`;
   return apiFetch<RecordingHistory>(`/recordings${query}`, {
+    signal,
+    cache: "no-store",
+  });
+}
+
+/**
+ * Compare two of the caller's own recordings.
+ *
+ * Ownership is decided on the server from the owner header; a recording
+ * belonging to somebody else comes back as `not_found`, identically to an id
+ * that was never real. A refusal is a successful response with
+ * `comparable: false`, so only a genuine request failure rejects.
+ */
+export function compareRecordings(
+  leftId: string,
+  rightId: string,
+  signal?: AbortSignal,
+): Promise<RecordingComparison> {
+  const query = new URLSearchParams({ left_id: leftId, right_id: rightId });
+  return apiFetch<RecordingComparison>(`/recordings/compare?${query}`, {
     signal,
     cache: "no-store",
   });

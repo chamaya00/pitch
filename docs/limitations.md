@@ -166,6 +166,40 @@ one of them into a label such as "bright", "dark" or "breathy" — those mapping
 are not validated, and the numbers are strongly influenced by the microphone and
 the room.
 
+## Comparing two recordings
+
+Comparison places two sets of measurements side by side and subtracts. It is
+**not** a score, a ranking, or a statement about which recording is better —
+there is no field in the response that could hold one.
+
+- **Two recordings are only meaningfully comparable when captured under
+  reasonably similar conditions.** VocalLens flags the differences it can
+  actually measure — length, pitched time, sample rate, audio format, analysis
+  settings, clipping — and that list is not exhaustive.
+- **It cannot normalise for anything it does not measure.** Microphone quality,
+  room acoustics, distance, how hard you were trying, warm-up state and physical
+  condition all move these numbers, and none of them is measured or corrected
+  for. A difference between two takes may be entirely about the room.
+- **Most of the differences have no better direction.** Recording length,
+  pitched time, voiced share and detected range are reported as differences and
+  nothing more. A wider detected range is bounded by what was performed and by
+  the microphone; it is not an achievement.
+- **Only two comparisons have a defined desirable direction**, and both are
+  about equal temperament rather than singing: a higher share of pitched time
+  within 25 cents of a note, and a smaller typical distance from that note.
+  Slides, vibrato, bends and non-Western intonation lower both without anything
+  being wrong.
+- **A measurement one recording supports and the other does not produces no
+  difference at all** — not a difference against zero. A note present in one
+  recording reads "Not sung" in the other, because it was not sung there.
+- **Loudness and spectral measurements are not compared.** RMS and peak depend
+  on input gain, so a difference says as much about the microphone setup as
+  about the singer, and the spectral features have no validated interpretation
+  here.
+- **Two recordings, not a trend.** Comparison says how these two differ. It says
+  nothing about a direction of travel, and there is no progress tracking in this
+  product yet.
+
 ## Recording history and identity
 
 Recordings are linked to an **anonymous identifier stored in the browser**, not

@@ -55,9 +55,13 @@ Built through Step 7M:
 - Note breakdown from the stored pitch timeline (7K)
 - AI interpretation of the audio measurements (7L)
 - PostgreSQL as the source of truth, anonymous owners, recording history (7M)
+- Recording comparison: two owned recordings side by side, with deterministic
+  deltas, explicit units and measurable condition caveats (7N)
 
-**Not yet built** in Phase 7: comparison between two recordings, and the
-progress chart over time. Both need what 7M just added — persistent, owned,
-queryable history — and neither is claimed to exist. `docs/limitations.md` notes
-that two recordings are only comparable when captured under similar conditions,
-which is the first thing a comparison feature has to confront honestly.
+**Not yet built** in Phase 7: the progress chart over time. It is the last
+item in the phase and is not claimed to exist.
+
+Comparison deliberately does **not** produce an overall figure, a ranking or
+a judgement about which recording is better; four of its seven metrics have no
+desirable direction at all. See [api.md](api.md) and
+[limitations.md](limitations.md).

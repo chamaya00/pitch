@@ -41,6 +41,7 @@ from app.services.audio_analysis.postgres_repository import (
     AsyncAudioAnalysisRepository,
     PostgresAudioAnalysisRepository,
 )
+from app.services.comparison.service import ComparisonService
 from app.services.orchestration.analysis import AnalysisService
 from app.services.orchestration.audio_analysis import AudioAnalysisService
 from app.services.owners.models import Owner
@@ -236,3 +237,17 @@ def get_audio_analysis_service(
 
 
 AudioAnalysisServiceDep = Annotated[AudioAnalysisService, Depends(get_audio_analysis_service)]
+
+
+def get_comparison_service(recordings: RecordingRepositoryDep) -> ComparisonService:
+    """Assemble the comparison workflow.
+
+    Takes only the recording repository: a comparison reads two stored analyses
+    and subtracts. It needs no storage, no analyzer and no provider — and the
+    absence of a provider dependency is what makes it impossible for a model to
+    reach a comparison number.
+    """
+    return ComparisonService(recordings=recordings)
+
+
+ComparisonServiceDep = Annotated[ComparisonService, Depends(get_comparison_service)]

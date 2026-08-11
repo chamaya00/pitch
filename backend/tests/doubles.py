@@ -41,6 +41,7 @@ from app.services.audio_analysis.postgres_repository import (
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
 )
+from app.services.comparison.sources import ComparisonSource
 from app.services.owners.models import Owner, hash_token, new_owner
 from app.services.recordings.history import RecordingHistoryEntry
 from app.services.recordings.models import Recording
@@ -141,6 +142,24 @@ class InMemoryRecordingRepository:
                 )
             )
         return entries
+
+    async def comparison_sources(
+        self, owner_id: uuid.UUID, recording_ids: list[str]
+    ) -> dict[str, ComparisonSource]:
+        sources: dict[str, ComparisonSource] = {}
+        for recording_id in recording_ids:
+            recording = await self.get(recording_id, owner_id)
+            # A recording that is not this owner's is absent from the result,
+            # exactly as the SQL leaves it unselected — not present-but-flagged.
+            if recording is None:
+                continue
+            analysis = (
+                await self._audio_analyses.latest_for_recording(recording_id)
+                if self._audio_analyses is not None
+                else None
+            )
+            sources[recording_id] = ComparisonSource(recording=recording, audio_analysis=analysis)
+        return sources
 
     async def owner_of(self, recording_id: str) -> uuid.UUID | None:
         entry = self._records.get(recording_id)

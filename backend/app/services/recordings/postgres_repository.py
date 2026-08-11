@@ -22,6 +22,11 @@ from typing import Any, Protocol, runtime_checkable
 from psycopg import errors
 
 from app.db.pool import Database, execute, fetch_all, fetch_one
+from app.services.comparison.sources import (
+    COMPARISON_SOURCES_SQL,
+    ComparisonSource,
+    source_from_row,
+)
 from app.services.recordings.history import (
     HISTORY_SQL,
     RecordingHistoryEntry,
@@ -55,6 +60,15 @@ class OwnedRecordingRepository(Protocol):
 
     async def list_history(self, owner_id: uuid.UUID, limit: int) -> list[RecordingHistoryEntry]:
         """An owner's recordings with each one's analysis state, newest first."""
+
+    async def comparison_sources(
+        self, owner_id: uuid.UUID, recording_ids: list[str]
+    ) -> dict[str, ComparisonSource]:
+        """The named recordings and their latest audio analyses, if they are this owner's.
+
+        An id that is unknown or belongs to somebody else is absent from the
+        result rather than reported — see ``services/comparison/sources.py``.
+        """
 
     async def owner_of(self, recording_id: str) -> uuid.UUID | None:
         """Who owns a recording, without reading it. ``None`` if unknown."""
@@ -126,6 +140,17 @@ class PostgresRecordingRepository:
         async with self._db.connection() as connection:
             rows = await fetch_all(connection, HISTORY_SQL, (owner_id, limit))
         return [entry_from_row(row) for row in rows]
+
+    async def comparison_sources(
+        self, owner_id: uuid.UUID, recording_ids: list[str]
+    ) -> dict[str, ComparisonSource]:
+        if not recording_ids:
+            return {}
+        async with self._db.connection() as connection:
+            rows = await fetch_all(
+                connection, COMPARISON_SOURCES_SQL, (owner_id, list(recording_ids))
+            )
+        return {str(row["recording_id"]).strip(): source_from_row(row) for row in rows}
 
     async def owner_of(self, recording_id: str) -> uuid.UUID | None:
         async with self._db.connection() as connection:

@@ -1,8 +1,13 @@
 "use client";
 
+import { useCallback, useState } from "react";
+import { ComparisonPanel } from "@/components/comparison/comparison-panel";
 import { HistoryRow } from "@/components/history/history-row";
 import { Button } from "@/components/ui/button";
 import { useRecordingHistory } from "@/hooks/use-recording-history";
+
+/** Two recordings, no more: a comparison of three is a table nobody can read. */
+const COMPARE_LIMIT = 2;
 
 /**
  * The recordings this browser has uploaded.
@@ -20,6 +25,23 @@ import { useRecordingHistory } from "@/hooks/use-recording-history";
  */
 export function RecordingHistory() {
   const { state, reload } = useRecordingHistory();
+  /** The recordings ticked for comparison, in the order they were ticked. */
+  const [selected, setSelected] = useState<string[]>([]);
+  /** The pair actually being compared. Separate from `selected` so changing a
+   *  tick does not silently re-run the comparison under the reader. */
+  const [comparing, setComparing] = useState<[string, string] | null>(null);
+
+  const toggle = useCallback((recordingId: string) => {
+    setSelected((current) =>
+      current.includes(recordingId)
+        ? current.filter((id) => id !== recordingId)
+        : current.length < COMPARE_LIMIT
+          ? [...current, recordingId]
+          : current,
+    );
+  }, []);
+
+  const canCompare = selected.length === COMPARE_LIMIT;
 
   return (
     <section
@@ -75,10 +97,60 @@ export function RecordingHistory() {
         </p>
       )}
 
+      {state.status === "ready" && state.history.items.length > 1 && (
+        <div className="mt-6 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface px-5 py-4">
+          <p className="text-sm text-muted">
+            {selected.length === 0
+              ? "Tick two recordings to compare their measurements."
+              : selected.length === 1
+                ? "Tick one more recording to compare."
+                : "Two recordings selected."}
+          </p>
+          <div className="ml-auto flex flex-wrap gap-2">
+            {selected.length > 0 && (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setSelected([]);
+                  setComparing(null);
+                }}
+              >
+                Clear selection
+              </Button>
+            )}
+            <Button
+              disabled={!canCompare}
+              onClick={() => canCompare && setComparing([selected[0], selected[1]])}
+            >
+              Compare recordings
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {comparing !== null && (
+        <div className="mt-4">
+          <ComparisonPanel
+            // A new pair gets a new panel, so no comparison state survives from
+            // the previous one.
+            key={comparing.join("-")}
+            leftId={comparing[0]}
+            rightId={comparing[1]}
+            onClose={() => setComparing(null)}
+          />
+        </div>
+      )}
+
       {state.status === "ready" && state.history.items.length > 0 && (
         <ul className="fade-in mt-6 space-y-3">
           {state.history.items.map((item) => (
-            <HistoryRow key={item.recording.recording_id} item={item} />
+            <HistoryRow
+              key={item.recording.recording_id}
+              item={item}
+              selected={selected.includes(item.recording.recording_id)}
+              selectable={selected.length < COMPARE_LIMIT}
+              onToggleSelected={toggle}
+            />
           ))}
         </ul>
       )}

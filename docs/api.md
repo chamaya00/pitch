@@ -98,6 +98,133 @@ how it went.
 The stored metadata of one recording, provided it belongs to the caller.
 Otherwise `404 RECORDING_NOT_FOUND` — see above.
 
+### `GET /api/v1/recordings/compare`
+
+Place two recordings' measurements side by side.
+
+**Query parameters**
+
+| Name | Required | Meaning |
+| --- | --- | --- |
+| `left_id` | yes | The first recording. Must be a 32-character hex id. |
+| `right_id` | yes | The second. Must differ from `left_id`. |
+
+**This is a comparison of measurements, not a verdict.** There is no overall
+score, no ranking and no statement about which recording is better — the
+response has no field that could hold one. Four of the seven metrics carry
+`direction: "neutral"` because their difference has no better end, including the
+detected range: a wider range is bounded by what was performed and by the
+microphone, not by ability.
+
+**Ownership is enforced in the database query.** A recording belonging to
+somebody else is never selected and reports `not_found`, identically to an id
+that was never real.
+
+**A refusal is a `200`.** A missing recording, a missing analysis, a failed
+analysis or one with no reliable pitch all return successfully with
+`comparable: false` and a per-side `status`. Only comparing a recording with
+itself is a request error (`VALIDATION_ERROR`).
+
+**200 OK**
+
+```json
+{
+  "left": {
+    "recording_id": "4b203e0d3d8042c19d94fa794c61a0ca",
+    "status": "ready",
+    "original_filename": "take-one.wav",
+    "created_at": "2026-08-11T09:07:12.400Z",
+    "duration_seconds": 2.0,
+    "audio_format": "wav",
+    "error_code": null,
+    "lowest_note": "A4",
+    "highest_note": "A4"
+  },
+  "right": { "...": "same shape" },
+  "comparable": true,
+  "metrics": [
+    {
+      "key": "in_tune_ratio",
+      "label": "Share of pitched time within 25 cents of a note",
+      "unit": "percentage_points",
+      "direction": "higher_is_nearer_the_note",
+      "left": 74.0,
+      "right": 80.0,
+      "delta": 6.0,
+      "availability": "both"
+    }
+  ],
+  "notes": [
+    {
+      "midi_note": 67,
+      "note_name": "G4",
+      "presence": "left_only",
+      "left": { "duration_seconds": 1.8, "percentage_of_voiced_time": 92.0,
+                "frame_count": 78, "mean_abs_cents": 4.1, "in_tune_ratio": 1.0 },
+      "right": null,
+      "share_delta_points": null,
+      "duration_delta_seconds": null,
+      "mean_abs_cents_delta": null
+    }
+  ],
+  "caveats": ["different_duration"]
+}
+```
+
+#### The seven metrics
+
+| `key` | `unit` | `direction` |
+| --- | --- | --- |
+| `duration_seconds` | seconds | neutral |
+| `voiced_seconds` | seconds | neutral |
+| `voiced_ratio` | percentage_points | neutral |
+| `semitone_span` | semitones | **neutral** — wider is not better |
+| `in_tune_ratio` | percentage_points | higher_is_nearer_the_note |
+| `mean_abs_cents_deviation` | cents | lower_is_nearer_the_note |
+| `cents_std` | cents | lower_is_steadier |
+
+`percentage_points` is its own unit because a ratio moving 0.50 → 0.56 is six
+percentage **points**, not six percent. Clients must not relabel it.
+
+**No loudness or spectral measurement is compared.** RMS and peak depend on
+input gain, so a difference says as much about the microphone setup as about the
+singer; the spectral features have no validated interpretation in this project
+and a side-by-side delta would invite exactly the timbre reading the rest of the
+system refuses to make. Clipping — the one loudness fact with a defensible
+reading — is reported as a caveat instead.
+
+#### `null` is never zero
+
+`delta` is `null` whenever either side was not measured, and `availability` says
+which side was missing (`both`, `left_only`, `right_only`, `neither`). A
+recording can complete its analysis and still have no detected range — voiced
+frames existed, but none was held long enough — and that reports as absent, not
+as a range of zero semitones. In `notes`, an absent side means the note was
+**never sung**, which is not the same as having been sung for no time.
+
+#### Side statuses
+
+| `status` | Meaning |
+| --- | --- |
+| `ready` | Measured; takes part in the comparison |
+| `not_found` | Unknown **or not the caller's** — deliberately the same answer |
+| `analysis_missing` | Nobody has measured this recording yet |
+| `analysis_in_progress` | Being measured now |
+| `analysis_failed` | Measurement failed; `error_code` says how |
+| `insufficient_pitch_signal` | Decoded, but carried no reliable pitch |
+
+#### Caveats
+
+`caveats` names differences this system can actually measure:
+`different_duration`, `different_voiced_time`, `little_pitched_signal`,
+`different_sample_rate`, `different_audio_format`,
+`different_analysis_settings`, `clipping`, `no_detected_range`.
+
+The list is **never exhaustive**. Two recordings are only meaningfully
+comparable when captured under reasonably similar conditions, and microphone
+quality, room acoustics, effort and physical condition are not measured by this
+system and are not claimed here.
+
 ### `GET /health`
 
 Unversioned liveness probe for infrastructure (Docker healthcheck, load
