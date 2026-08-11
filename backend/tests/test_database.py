@@ -19,7 +19,7 @@ import anyio
 import pytest
 
 from app.core.errors import ErrorCode
-from app.db.migrate import apply_migrations, migration_files
+from app.db.migrate import MIGRATIONS_DIR, apply_migrations, migration_files
 from app.db.pool import Database, fetch_all, fetch_one
 from app.services.analysis.models import Analysis, AnalysisStatus, new_analysis_id
 from app.services.analysis.postgres_repository import (
@@ -37,6 +37,12 @@ from app.services.audio_analysis.postgres_repository import (
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
     PostgresAudioAnalysisRepository,
+)
+from app.services.owners.credential_repository import PostgresCredentialRepository
+from app.services.owners.credentials import (
+    CredentialExistsError,
+    LastCredentialError,
+    new_credential,
 )
 from app.services.owners.models import Owner, hash_token, new_owner, new_owner_token
 from app.services.owners.repository import PostgresOwnerRepository
@@ -165,6 +171,105 @@ def test_every_migration_is_numbered_so_the_order_is_total() -> None:
         assert path.name[:4].isdigit(), f"{path.name} has no ordering prefix"
 
 
+def test_an_owner_created_before_the_credentials_migration_survives_it(tmp_path: Any) -> None:
+    """The one property the credentials migration exists to preserve.
+
+    Seeded through the *old* schema — an owner whose key is a column on
+    ``owners`` — and then migrated. Afterwards the same key must resolve to the
+    same owner id, and that owner's recording must still be theirs. Anything
+    less would mean the migration reassigned somebody's history.
+
+    The staging is done in a schema of its own so the shared test database keeps
+    its already-migrated tables; ``search_path`` sends every unqualified name in
+    the migration files there instead.
+    """
+
+    async def work(database: Database) -> None:
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        files = migration_files()
+        initial, rest = files[0], files[1:]
+        assert rest, "this test is meaningless with only one migration"
+        # Copied byte for byte, so the checksum matches and the second pass
+        # applies only what came after it.
+        (staged / initial.name).write_text(initial.read_text(encoding="utf-8"), encoding="utf-8")
+
+        owner_id = uuid.uuid4()
+        token = new_owner_token()
+        recording_id = uuid.uuid4().hex
+
+        try:
+            # --- The world as it was before this step ---
+            async with database.transaction() as connection:
+                await connection.execute("CREATE SCHEMA migration_probe")
+                await connection.execute("SET LOCAL search_path TO migration_probe")
+                await apply_migrations(connection, staged)
+
+            async with database.transaction() as connection:
+                await connection.execute("SET LOCAL search_path TO migration_probe")
+                await connection.execute(
+                    "INSERT INTO owners (id, token_hash, created_at) VALUES (%s, %s, now())",
+                    (owner_id, hash_token(token)),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO recordings (id, owner_id, original_filename, audio_format,
+                                            duration_seconds, sample_rate, channels, size_bytes,
+                                            created_at, document)
+                    VALUES (%s, %s, 'take.wav', 'wav', 2.0, 22050, 1, 1024, now(), '{}'::jsonb)
+                    """,
+                    (recording_id, owner_id),
+                )
+
+            # --- Migrate ---
+            async with database.transaction() as connection:
+                await connection.execute("SET LOCAL search_path TO migration_probe")
+                applied = await apply_migrations(connection, MIGRATIONS_DIR)
+                assert applied == [path.name for path in rest]
+
+            # --- The same key, the same owner, the same recording ---
+            async with database.connection() as connection:
+                await connection.execute("SET search_path TO migration_probe")
+                resolved = await fetch_one(
+                    connection,
+                    """
+                    SELECT o.id, c.label
+                      FROM credentials c JOIN owners o ON o.id = c.owner_id
+                     WHERE c.credential_hash = %s
+                    """,
+                    (hash_token(token),),
+                )
+                assert resolved is not None
+                assert resolved["id"] == owner_id
+                assert resolved["label"] == "Original key"
+
+                still_theirs = await fetch_one(
+                    connection,
+                    "SELECT owner_id FROM recordings WHERE id = %s",
+                    (recording_id,),
+                )
+                assert still_theirs is not None
+                assert still_theirs["owner_id"] == owner_id
+
+                # And the column that used to be the identity is gone, not left
+                # behind carrying a stale UNIQUE index.
+                columns = await fetch_all(
+                    connection,
+                    """
+                    SELECT column_name FROM information_schema.columns
+                     WHERE table_schema = 'migration_probe' AND table_name = 'owners'
+                    """,
+                )
+                assert "token_hash" not in {row["column_name"] for row in columns}
+        finally:
+            # The ledger this wrote lives in the probe schema and goes with it;
+            # the real one in ``public`` was never touched.
+            async with database.transaction() as connection:
+                await connection.execute("DROP SCHEMA IF EXISTS migration_probe CASCADE")
+
+    with_db(work)
+
+
 # --- Owners ----------------------------------------------------------------
 
 
@@ -189,10 +294,14 @@ def test_only_a_hash_of_the_token_is_stored() -> None:
         await PostgresOwnerRepository(database).create(owner, token)
 
         async with database.connection() as connection:
-            row = await fetch_one(connection, "SELECT token_hash FROM owners LIMIT 1")
+            row = await fetch_one(
+                connection,
+                "SELECT credential_hash FROM credentials WHERE owner_id = %s",
+                (owner.owner_id,),
+            )
         assert row is not None
-        assert row["token_hash"] != token
-        assert row["token_hash"] == hash_token(token)
+        assert row["credential_hash"] != token
+        assert row["credential_hash"] == hash_token(token)
 
     with_db(work)
 
@@ -200,6 +309,114 @@ def test_only_a_hash_of_the_token_is_stored() -> None:
 def test_an_unknown_token_resolves_to_nobody() -> None:
     async def work(database: Database) -> None:
         assert await PostgresOwnerRepository(database).get_by_token(new_owner_token()) is None
+
+    with_db(work)
+
+
+# --- Credentials -----------------------------------------------------------
+#
+# The interface-level rules live in ``test_repository_contract``. What is here
+# is what only a database can be asked: a unique index that holds across
+# connections, a cascade the schema performs, and a row lock that two concurrent
+# transactions actually contend for.
+
+
+def test_a_credential_hash_is_unique_across_connections() -> None:
+    """Not a Python check — the constraint, exercised through two transactions."""
+
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        other, _ = await _make_owner(database)
+        credentials = PostgresCredentialRepository(database)
+        first, key = new_credential(owner.owner_id, "Phone")
+        await credentials.create(first, key)
+
+        second, _ = new_credential(other.owner_id, "Stolen")
+        with pytest.raises(CredentialExistsError):
+            await credentials.create(second, key)
+
+        assert await credentials.owner_for_key(key) == owner.owner_id
+
+    with_db(work)
+
+
+def test_deleting_an_owner_cascades_to_its_credentials() -> None:
+    """The foreign key does this, not application code."""
+
+    async def work(database: Database) -> None:
+        owner, token = await _make_owner(database)
+        credentials = PostgresCredentialRepository(database)
+        extra, key = new_credential(owner.owner_id, "Phone")
+        await credentials.create(extra, key)
+
+        await PostgresOwnerRepository(database).delete_owner(owner.owner_id)
+
+        async with database.connection() as connection:
+            rows = await fetch_all(connection, "SELECT id FROM credentials")
+        assert rows == []
+        assert await credentials.owner_for_key(token) is None
+
+    with_db(work)
+
+
+def test_concurrent_revocations_cannot_strand_an_identity() -> None:
+    """Two racing revocations of an owner's two keys. One must lose.
+
+    Without the row lock both transactions count two credentials, both delete
+    one, and the owner is left with none — recordings still theirs, and no way
+    in. The rule "never the last" is only true if it is enforced against a
+    concurrent revocation, which is what this asserts.
+    """
+
+    async def work(database: Database) -> None:
+        owner, first_key = await _make_owner(database)
+        credentials = PostgresCredentialRepository(database)
+        first = (await credentials.list_for_owner(owner.owner_id))[0]
+        second, second_key = new_credential(owner.owner_id, "Phone")
+        await credentials.create(second, second_key)
+
+        removed: list[uuid.UUID] = []
+        refused: list[str] = []
+
+        async def attempt(credential_id: uuid.UUID) -> None:
+            try:
+                if await credentials.revoke(credential_id, owner.owner_id):
+                    removed.append(credential_id)
+            except LastCredentialError:
+                refused.append("refused")
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(attempt, first.credential_id)
+            group.start_soon(attempt, second.credential_id)
+
+        assert len(removed) == 1, f"{len(removed)} credentials were removed"
+        assert len(refused) == 1
+        remaining = await credentials.list_for_owner(owner.owner_id)
+        assert len(remaining) == 1
+        # And the surviving key still reaches the owner it always did.
+        survivor = first_key if removed == [second.credential_id] else second_key
+        assert await credentials.owner_for_key(survivor) == owner.owner_id
+
+    with_db(work)
+
+
+def test_a_revoked_credential_leaves_the_recordings_alone() -> None:
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        stored = recording()
+        await PostgresRecordingRepository(database).create(stored, owner.owner_id)
+        credentials = PostgresCredentialRepository(database)
+        extra, key = new_credential(owner.owner_id, "Phone")
+        await credentials.create(extra, key)
+
+        await credentials.revoke(extra.credential_id, owner.owner_id)
+
+        async with database.connection() as connection:
+            row = await fetch_one(
+                connection, "SELECT owner_id FROM recordings WHERE id = %s", (stored.recording_id,)
+            )
+        assert row is not None
+        assert row["owner_id"] == owner.owner_id
 
     with_db(work)
 

@@ -7,23 +7,27 @@ not touch recording ownership at all.** This module states that boundary as a
 protocol rather than leaving it as a property of the current code that a future
 change could quietly lose.
 
-Today there is one implementation: an anonymous bearer token
-(``api/owner.py``). It is honest about what it is — no password, no revocation,
-no recovery — and Step 7P adds the two things that make it survivable: the
-holder can move it to another device, and can delete everything it owns.
+Today there is one implementation: :class:`~app.services.owners.resolver.BearerKeyResolver`,
+which resolves a bearer key. It is honest about what it is — no password, no
+second factor, no server-side recovery — and Step 7P added the two things that
+make it survivable: the holder can move it to another device, and can delete
+everything it owns.
 
-A real credential-based resolver would be a **second implementation of this one
+Step 10.2 made the seam real. Until then this protocol was declared here and
+consumed nowhere: the API called the bearer-key function directly, so the
+boundary existed in prose. The API now depends on this protocol, which is what
+makes the next sentence a fact rather than a hope.
+
+A password or OAuth resolver is a **second implementation of this one
 protocol**, resolving to the *same* ``owner_id`` that already owns the
 recordings. Nothing in ``services/recordings``, ``services/analysis``,
 ``services/audio_analysis``, ``services/comparison`` or ``services/progress``
-would change, and no migration would reassign a recording to a new owner.
+changes, and no migration reassigns a recording to a new owner.
 
-The one schema constraint that would need relaxing first is recorded here so it
-is not rediscovered the hard way: ``owners.token_hash`` is ``NOT NULL UNIQUE``,
-so every owner currently *must* carry a bearer token. An owner who signs in with
-credentials and never held a token needs that column made nullable — additive,
-one migration, and deliberately not done here because no credential system
-exists yet to justify it.
+The schema constraint that used to stand in the way is gone. ``owners`` no
+longer carries a key at all: credentials live in their own table and reference
+an owner, so an owner who signs in some other way needs no column relaxed and no
+placeholder key invented.
 """
 
 import uuid

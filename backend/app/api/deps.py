@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request, Response
 
-from app.api.owner import OwnerTokenHeader, resolve_owner
+from app.api.owner import OwnerTokenHeader, clean_key, resolve_owner
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError, ErrorCode
 from app.db.pool import Database
@@ -44,6 +44,8 @@ from app.services.audio_analysis.postgres_repository import (
 from app.services.comparison.service import ComparisonService
 from app.services.orchestration.analysis import AnalysisService
 from app.services.orchestration.audio_analysis import AudioAnalysisService
+from app.services.owners.credential_repository import PostgresCredentialRepository
+from app.services.owners.credentials import CredentialRepository
 from app.services.owners.deletion import OwnerDeletionService
 from app.services.owners.identity import OwnerDataRepository
 from app.services.owners.models import Owner
@@ -94,17 +96,50 @@ def get_owner_repository(database: DatabaseDep) -> OwnerRepository:
 OwnerRepositoryDep = Annotated[OwnerRepository, Depends(get_owner_repository)]
 
 
+def get_credential_repository(database: DatabaseDep) -> CredentialRepository:
+    """The credential store, annotated as its own protocol.
+
+    Separate from ``OwnerRepository`` so the resolver depends on the three
+    credential operations it needs and cannot reach an owner's recordings
+    through the same object.
+    """
+    return PostgresCredentialRepository(database)
+
+
+CredentialRepositoryDep = Annotated[CredentialRepository, Depends(get_credential_repository)]
+
+
 async def get_owner(
     request: Request,
     response: Response,
     owners: OwnerRepositoryDep,
+    credentials: CredentialRepositoryDep,
     token: OwnerTokenHeader = None,
 ) -> Owner:
-    """Resolve — or mint — the caller's identity. See ``app/api/owner.py``."""
-    return await resolve_owner(request, response, owners, token)
+    """Resolve — or mint — the caller's identity.
+
+    The single identity boundary in the application. Every owner-scoped route
+    reaches it through ``OwnerIdDep``; none of them performs an identity check
+    of its own, and none knows which resolver answered.
+    """
+    return await resolve_owner(request, response, owners, credentials, token)
 
 
 OwnerDep = Annotated[Owner, Depends(get_owner)]
+
+
+def get_presented_key(token: OwnerTokenHeader = None) -> str | None:
+    """The key the caller presented, normalised, or ``None``.
+
+    Used for exactly one thing: marking which entry in a list of credentials is
+    the one in the reader's hand. It is *not* an identity check — the owner has
+    already been resolved by the time this is read — and it never leaves the
+    process: it is turned into a credential id and discarded.
+    """
+    return clean_key(token)
+
+
+PresentedKeyDep = Annotated[str | None, Depends(get_presented_key)]
 
 
 async def get_owner_id(owner: OwnerDep) -> uuid.UUID:

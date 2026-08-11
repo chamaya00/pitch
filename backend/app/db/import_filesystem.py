@@ -43,6 +43,7 @@ from app.services.analysis.models import Analysis
 from app.services.analysis.repository import JsonFileAnalysisRepository
 from app.services.audio_analysis.models import AudioAnalysis
 from app.services.audio_analysis.repository import JsonFileAudioAnalysisRepository
+from app.services.owners.credentials import new_credential
 from app.services.owners.models import Owner, hash_token, new_owner
 from app.services.recordings.models import Recording
 from app.services.recordings.repository import JsonFileRecordingRepository
@@ -90,14 +91,32 @@ async def import_filesystem(
     """
     report = ImportReport(owner_id=owner.owner_id)
 
+    # The owner and the way in to it, together. An owner with no credential
+    # would be an identity holding every imported recording that nobody could
+    # ever reach. Both inserts are ``DO NOTHING`` so a re-run imports neither
+    # twice — the credential conflicts on its hash, which is the same value on
+    # every run because the token is.
+    credential, _ = new_credential(owner.owner_id, "Import key")
     async with database.transaction() as connection:
         await execute(
             connection,
+            "INSERT INTO owners (id, created_at) VALUES (%s, %s) ON CONFLICT (id) DO NOTHING",
+            (owner.owner_id, owner.created_at),
+        )
+        await execute(
+            connection,
             """
-            INSERT INTO owners (id, token_hash, created_at) VALUES (%s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
+            INSERT INTO credentials (id, owner_id, credential_hash, label, created_at)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (credential_hash) DO NOTHING
             """,
-            (owner.owner_id, hash_token(token), owner.created_at),
+            (
+                credential.credential_id,
+                owner.owner_id,
+                hash_token(token),
+                credential.label,
+                owner.created_at,
+            ),
         )
 
     recordings = JsonFileRecordingRepository(storage_root)

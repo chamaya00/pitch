@@ -55,6 +55,12 @@ from app.services.audio_analysis.postgres_repository import (
     AudioAnalysisConflictError,
     PostgresAudioAnalysisRepository,
 )
+from app.services.owners.credential_repository import PostgresCredentialRepository
+from app.services.owners.credentials import (
+    CredentialExistsError,
+    LastCredentialError,
+    new_credential,
+)
 from app.services.owners.models import Owner, new_owner
 from app.services.owners.repository import PostgresOwnerRepository
 from app.services.recordings.models import Recording
@@ -62,6 +68,7 @@ from app.services.recordings.postgres_repository import PostgresRecordingReposit
 from tests.doubles import (
     InMemoryAnalysisRepository,
     InMemoryAudioAnalysisRepository,
+    InMemoryCredentialRepository,
     InMemoryOwnerRepository,
     InMemoryRecordingRepository,
 )
@@ -72,8 +79,11 @@ DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 class Backend:
     """A wired set of repositories, however they happen to be stored."""
 
-    def __init__(self, owners: Any, recordings: Any, analyses: Any, audio: Any) -> None:
+    def __init__(
+        self, owners: Any, credentials: Any, recordings: Any, analyses: Any, audio: Any
+    ) -> None:
         self.owners = owners
+        self.credentials = credentials
         self.recordings = recordings
         self.analyses = analyses
         self.audio = audio
@@ -89,11 +99,15 @@ async def _memory_backend() -> AsyncIterator[Backend]:
     analyses = InMemoryAnalysisRepository()
     audio = InMemoryAudioAnalysisRepository()
     recordings = InMemoryRecordingRepository(analyses, audio)
+    # The owner double needs the recordings back-reference to answer the data
+    # summary and to cascade a deletion — without it, it reports zeroes where
+    # SQL reports counts. The contract suite caught exactly that.
+    owners = InMemoryOwnerRepository(recordings)
     yield Backend(
-        # The owner double needs the recordings back-reference to answer the
-        # data summary and to cascade a deletion — without it, it reports zeroes
-        # where SQL reports counts. The contract suite caught exactly that.
-        owners=InMemoryOwnerRepository(recordings),
+        owners=owners,
+        # Built over the owner double's own store, because in PostgreSQL there
+        # is one table: a key created through one must resolve through the other.
+        credentials=InMemoryCredentialRepository(owners),
         recordings=recordings,
         analyses=analyses,
         audio=audio,
@@ -113,6 +127,7 @@ async def _postgres_backend() -> AsyncIterator[Backend]:
             await connection.execute("TRUNCATE owners CASCADE")
         yield Backend(
             owners=PostgresOwnerRepository(database),
+            credentials=PostgresCredentialRepository(database),
             recordings=PostgresRecordingRepository(database),
             analyses=PostgresAnalysisRepository(database),
             audio=PostgresAudioAnalysisRepository(database),
@@ -918,5 +933,217 @@ def test_a_deleted_owners_key_no_longer_resolves(backend: Any) -> None:
         await prepared.owners.delete_owner(owner.owner_id)
 
         assert await prepared.owners.get_by_token(token) is None
+
+    backend(work)
+
+
+# --- Credentials -----------------------------------------------------------
+
+
+async def _attach(prepared: Backend, owner: Owner, label: str = "Second key") -> tuple[Any, str]:
+    credential, key = new_credential(owner.owner_id, label)
+    return await prepared.credentials.create(credential, key), key
+
+
+def test_creating_an_owner_creates_its_first_credential(backend: Any) -> None:
+    """An owner with no way in would be an identity nobody could reach."""
+
+    async def work(prepared: Backend) -> None:
+        owner, token = new_owner()
+        await prepared.owners.create(owner, token)
+
+        listed = await prepared.credentials.list_for_owner(owner.owner_id)
+
+        assert len(listed) == 1
+        assert await prepared.credentials.owner_for_key(token) == owner.owner_id
+
+    backend(work)
+
+
+def test_a_second_credential_resolves_to_the_same_owner(backend: Any) -> None:
+    """The whole point of Step 10.2: another key, not another identity."""
+
+    async def work(prepared: Backend) -> None:
+        owner, first = new_owner()
+        await prepared.owners.create(owner, first)
+
+        _, second = await _attach(prepared, owner)
+
+        assert await prepared.credentials.owner_for_key(second) == owner.owner_id
+        assert await prepared.credentials.owner_for_key(first) == owner.owner_id
+        assert await prepared.owners.get_by_token(second) == owner
+
+    backend(work)
+
+
+def test_credentials_are_listed_oldest_first_and_carry_no_hash(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _attach(prepared, owner, "Phone")
+        await _attach(prepared, owner, "Laptop")
+
+        listed = await prepared.credentials.list_for_owner(owner.owner_id)
+
+        assert [c.label for c in listed] == ["Original key", "Phone", "Laptop"]
+        assert all(not hasattr(c, "credential_hash") for c in listed)
+
+    backend(work)
+
+
+def test_a_credential_list_never_includes_another_owners(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        await _attach(prepared, theirs, "Theirs")
+
+        listed = await prepared.credentials.list_for_owner(mine.owner_id)
+
+        assert all(c.owner_id == mine.owner_id for c in listed)
+        assert "Theirs" not in [c.label for c in listed]
+
+    backend(work)
+
+
+def test_an_unknown_key_belongs_to_nobody(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        await prepared.owner()
+        _, stranger = new_owner()
+
+        assert await prepared.credentials.owner_for_key(stranger) is None
+        assert await prepared.credentials.credential_for_key(stranger) is None
+
+    backend(work)
+
+
+def test_the_same_key_cannot_be_registered_twice(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        credential, key = new_credential(owner.owner_id, "Phone")
+        await prepared.credentials.create(credential, key)
+
+        duplicate, _ = new_credential(owner.owner_id, "Phone again")
+        with pytest.raises(CredentialExistsError):
+            await prepared.credentials.create(duplicate, key)
+
+    backend(work)
+
+
+def test_revoking_a_credential_stops_it_resolving(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner, original = new_owner()
+        await prepared.owners.create(owner, original)
+        credential, key = await _attach(prepared, owner)
+
+        assert await prepared.credentials.revoke(credential.credential_id, owner.owner_id) is True
+
+        assert await prepared.credentials.owner_for_key(key) is None
+        # The other one is untouched, and so is the owner.
+        assert await prepared.credentials.owner_for_key(original) == owner.owner_id
+        assert await prepared.owners.get(owner.owner_id) == owner
+
+    backend(work)
+
+
+def test_the_last_credential_cannot_be_revoked(backend: Any) -> None:
+    """Removing it would strand the identity: owned recordings nobody can reach."""
+
+    async def work(prepared: Backend) -> None:
+        owner, token = new_owner()
+        await prepared.owners.create(owner, token)
+        only = (await prepared.credentials.list_for_owner(owner.owner_id))[0]
+
+        with pytest.raises(LastCredentialError):
+            await prepared.credentials.revoke(only.credential_id, owner.owner_id)
+
+        assert await prepared.credentials.owner_for_key(token) == owner.owner_id
+
+    backend(work)
+
+
+def test_revoking_another_owners_credential_finds_nothing(backend: Any) -> None:
+    """Scoped in SQL, and reported as absent rather than refused.
+
+    "Not found" and "not yours" have to be the same answer, or the endpoint
+    becomes a way to discover that an id is real.
+    """
+
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        credential, key = await _attach(prepared, theirs)
+
+        assert await prepared.credentials.revoke(credential.credential_id, mine.owner_id) is False
+
+        assert await prepared.credentials.owner_for_key(key) == theirs.owner_id
+
+    backend(work)
+
+
+def test_revoking_the_last_of_another_owner_is_not_refused(backend: Any) -> None:
+    """The refusal must not leak that somebody else is down to one key."""
+
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs, _ = new_owner()
+        await prepared.owners.create(theirs, new_owner()[1])
+        only = (await prepared.credentials.list_for_owner(theirs.owner_id))[0]
+
+        assert await prepared.credentials.revoke(only.credential_id, mine.owner_id) is False
+
+    backend(work)
+
+
+def test_revoking_an_unknown_credential_finds_nothing(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _attach(prepared, owner)
+
+        assert await prepared.credentials.revoke(uuid.uuid4(), owner.owner_id) is False
+
+    backend(work)
+
+
+def test_a_key_names_the_credential_it_is(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        credential, key = await _attach(prepared, owner)
+
+        assert await prepared.credentials.credential_for_key(key) == credential.credential_id
+
+    backend(work)
+
+
+def test_deleting_an_owner_takes_every_credential_with_it(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner, original = new_owner()
+        await prepared.owners.create(owner, original)
+        _, second = await _attach(prepared, owner)
+
+        await prepared.owners.delete_owner(owner.owner_id)
+
+        assert await prepared.credentials.owner_for_key(original) is None
+        assert await prepared.credentials.owner_for_key(second) is None
+        assert await prepared.credentials.list_for_owner(owner.owner_id) == []
+
+    backend(work)
+
+
+def test_attaching_a_credential_changes_no_ownership(backend: Any) -> None:
+    """The invariant the whole step turns on, asserted on the rows themselves."""
+
+    async def work(prepared: Backend) -> None:
+        owner, original = new_owner()
+        await prepared.owners.create(owner, original)
+        recording = make_recording()
+        await prepared.recordings.create(recording, owner.owner_id)
+        before = await prepared.owners.data_summary(owner.owner_id)
+
+        _, second = await _attach(prepared, owner)
+
+        resolved = await prepared.owners.get_by_token(second)
+        assert resolved is not None
+        assert resolved.owner_id == owner.owner_id
+        assert await prepared.owners.data_summary(owner.owner_id) == before
+        assert await prepared.recordings.get(recording.recording_id, owner.owner_id) is not None
 
     backend(work)

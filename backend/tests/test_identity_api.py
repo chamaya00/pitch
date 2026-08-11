@@ -191,7 +191,11 @@ def test_the_identity_response_carries_no_recording_content(
         "recordings",
         "analysed_recordings",
         "ai_feedback",
+        "credentials",
     }
+    # The added list is a whitelist too: labels and ids, never hash or key.
+    for credential in body["credentials"]:
+        assert set(credential) == {"credential_id", "label", "created_at", "current"}
 
 
 def test_a_caller_with_no_key_is_issued_one_and_sees_an_empty_identity(

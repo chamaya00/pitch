@@ -1,22 +1,43 @@
 """Routes for the caller's own identity.
 
-Two operations the product was missing until Step 7P: *what do I have?* and
-*remove all of it*. Both are scoped to the resolved owner and take no
-identifier — there is no parameter through which a caller could name somebody
-else, which is a stronger guarantee than checking one.
+*What do I have?*, *remove all of it*, and — since Step 10.2 — *what are the
+ways in, add one, take one away*. Every route here is scoped to the resolved
+owner. None of them takes an owner identifier: there is no parameter through
+which a caller could name somebody else, which is a stronger guarantee than
+checking one.
 
-There is deliberately **no route that returns a key**. The server stores only a
-hash, so it cannot; and a "give me my key" endpoint reachable with the key is
-not recovery, it is an echo. Recovery lives in the browser, which is the only
-place the key exists in the clear.
+There is deliberately **no route that returns an existing key**. The server
+stores only a hash, so it cannot; and a "give me my key" endpoint reachable with
+the key is not recovery, it is an echo. A *new* key is returned once, at the
+moment it is created, and never again.
+
+**Adding a credential does not create an owner.** It attaches another way in to
+the identity that already owns the caller's recordings — the whole point of the
+step. Nothing is copied, nothing is reassigned, and the `owner_id` on every
+existing row is untouched.
 """
+
+import uuid
 
 from fastapi import APIRouter, status
 
-from app.api.deps import OwnerDataRepositoryDep, OwnerDeletionServiceDep, OwnerDep
+from app.api.deps import (
+    CredentialRepositoryDep,
+    OwnerDataRepositoryDep,
+    OwnerDeletionServiceDep,
+    OwnerDep,
+    PresentedKeyDep,
+)
 from app.api.responses import error_responses
-from app.core.errors import ErrorCode
-from app.schemas.identity import DeletionResponse, IdentityResponse
+from app.core.errors import ApiError, ErrorCode
+from app.schemas.identity import (
+    CreateCredentialRequest,
+    CreatedCredentialResponse,
+    CredentialResponse,
+    DeletionResponse,
+    IdentityResponse,
+)
+from app.services.owners.credentials import LastCredentialError, new_credential
 
 router = APIRouter(prefix="/identity", tags=["identity"])
 
@@ -44,10 +65,16 @@ router = APIRouter(prefix="/identity", tags=["identity"])
 async def get_identity(
     owner: OwnerDep,
     owners: OwnerDataRepositoryDep,
+    credentials: CredentialRepositoryDep,
+    presented_key: PresentedKeyDep,
 ) -> IdentityResponse:
-    """Return the caller's identity and what it owns."""
+    """Return the caller's identity, what it owns, and the ways in to it."""
     summary = await owners.data_summary(owner.owner_id)
-    return IdentityResponse.from_domain(owner, summary)
+    keys = await credentials.list_for_owner(owner.owner_id)
+    # Which of them the reader is holding. Looked up by hash like any other
+    # resolution; the key itself is not stored, compared in Python, or returned.
+    current = None if presented_key is None else await credentials.credential_for_key(presented_key)
+    return IdentityResponse.from_domain(owner, summary, keys, current)
 
 
 @router.delete(
@@ -85,3 +112,98 @@ async def delete_identity(
         audio_files_deleted=report.audio_files_deleted,
         audio_files_failed=report.audio_files_failed,
     )
+
+
+@router.post(
+    "/credentials",
+    response_model=CreatedCredentialResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add another way in to this identity",
+    description=(
+        "Create a second key for the identity the caller already has — for "
+        "another device, or to keep one somewhere safe.\n\n"
+        "**This does not create a new identity.** The new key resolves to the "
+        "same owner, so it sees the same recordings, the same analyses and the "
+        "same history. Nothing is copied and nothing changes hands.\n\n"
+        "**The key is returned once, in this response, and never again.** Only "
+        "a hash of it is stored, so no later request can show it. Anyone holding "
+        "it is this identity: it is a bearer key, not a password.\n\n"
+        "The optional `label` is for the holder's benefit — 'Phone', 'Laptop' — "
+        "and carries no security weight."
+    ),
+    responses=error_responses(ErrorCode.VALIDATION_ERROR, ErrorCode.INTERNAL_ERROR),
+)
+async def create_credential(
+    owner: OwnerDep,
+    credentials: CredentialRepositoryDep,
+    body: CreateCredentialRequest | None = None,
+) -> CreatedCredentialResponse:
+    """Mint a credential for the **already resolved** owner.
+
+    The owner id comes from the resolver, never from the request: there is no
+    field a caller could use to attach a key to somebody else's identity.
+    """
+    credential, key = new_credential(owner.owner_id, None if body is None else body.label)
+    stored = await credentials.create(credential, key)
+    return CreatedCredentialResponse(
+        credential_id=stored.credential_id,
+        label=stored.label,
+        created_at=stored.created_at,
+        key=key,
+    )
+
+
+@router.delete(
+    "/credentials/{credential_id}",
+    response_model=list[CredentialResponse],
+    status_code=status.HTTP_200_OK,
+    summary="Revoke one way in",
+    description=(
+        "Remove a single key from this identity. Everything else is untouched: "
+        "the recordings, the analyses and the other keys all remain, and the "
+        "owner is unchanged.\n\n"
+        "**The last key cannot be revoked.** Removing it would strand the "
+        "identity — the recordings would still exist, still owned, and nobody "
+        "could ever reach them again. Deleting the identity is the honest way to "
+        "get rid of everything, and it is a different endpoint.\n\n"
+        "**Revoking the key you are holding is allowed** when others remain; the "
+        "current request finishes and that key stops working afterwards.\n\n"
+        "A credential belonging to somebody else is reported as not found rather "
+        "than refused, so this cannot be used to discover that an id is real.\n\n"
+        "Returns the credentials that remain."
+    ),
+    responses=error_responses(
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.CREDENTIAL_NOT_FOUND,
+        ErrorCode.LAST_CREDENTIAL,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def revoke_credential(
+    credential_id: uuid.UUID,
+    owner: OwnerDep,
+    credentials: CredentialRepositoryDep,
+    presented_key: PresentedKeyDep,
+) -> list[CredentialResponse]:
+    """Revoke one of the caller's own credentials.
+
+    Scoped by owner in SQL rather than fetched and filtered, so a credential
+    belonging to somebody else is never read in the first place.
+    """
+    try:
+        removed = await credentials.revoke(credential_id, owner.owner_id)
+    except LastCredentialError as exc:
+        raise ApiError(
+            ErrorCode.LAST_CREDENTIAL,
+            "This is the only way in to your recordings, so it cannot be removed. "
+            "Add another key first, or delete the identity if you want everything gone.",
+        ) from exc
+    if not removed:
+        raise ApiError(ErrorCode.CREDENTIAL_NOT_FOUND, "No such key.")
+
+    remaining = await credentials.list_for_owner(owner.owner_id)
+    current = None if presented_key is None else await credentials.credential_for_key(presented_key)
+    return [
+        CredentialResponse.from_domain(credential, current=credential.credential_id == current)
+        for credential in remaining
+    ]

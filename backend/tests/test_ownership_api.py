@@ -122,7 +122,9 @@ def test_the_token_is_never_stored_in_the_clear(doubles: Doubles) -> None:
     owner, token = new_owner()
     anyio.run(lambda: doubles.owners.create(owner, token))
 
-    stored = doubles.owners._by_hash  # noqa: SLF001 - asserting the storage form is the point
+    # Since Step 10.2 the hash lives on the credential rather than the owner,
+    # but the property is unchanged and still asserted against the storage form.
+    stored = doubles.owners.credentials._by_hash  # noqa: SLF001 - the storage form is the point
     assert token not in stored
     assert hash_token(token) in stored
 

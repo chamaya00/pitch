@@ -3,27 +3,22 @@
 One header in, one header out:
 
 * ``X-VocalLens-Owner`` on the request names an existing owner.
-* ``X-VocalLens-Owner`` on the response carries a **newly minted** token, and
-  only then. A client stores it and sends it back; a client that does not simply
-  gets a new identity next time and sees no history.
+* ``X-VocalLens-Owner`` on the response carries a **newly minted** key, and only
+  then. A client stores it and sends it back; a client that does not simply gets
+  a new identity next time and sees no history.
 
-**This is not authentication and is not presented as one.** The token is a
-bearer credential with no password, no second factor and no revocation — see
-``services/owners/models.py`` for the limits, stated plainly. What it buys is
-the ability to answer "whose recordings are these?" without building an account
-system, and to answer it *on the server*: every repository read below is scoped
-by the resolved owner id in SQL.
+**This is not authentication and is not presented as one.** The key is a bearer
+credential with no password and no second factor — see
+``services/owners/credentials.py`` for the limits, stated plainly. What it buys
+is the ability to answer "whose recordings are these?" without building an
+account system, and to answer it *on the server*: every repository read below is
+scoped by the resolved owner id in SQL.
 
-Two decisions worth spelling out.
-
-**An unknown token mints a new owner rather than failing.** A 401 would be the
-right answer if this were authentication; it is not, and a client holding a
-token from a wiped database would be permanently stuck with an error it cannot
-clear. Minting is the same outcome as arriving with no token at all.
-
-**A malformed token is rejected, not minted from.** It cannot be a token this
-server issued, so treating it as "absent" would hide a client bug behind a
-silently changing identity.
+Since Step 10.2 this module is a **thin HTTP adapter and nothing more**. It
+normalises a header and hands the value to an
+:class:`~app.services.owners.identity.IdentityResolver`; every decision about
+*who* the caller is lives in the resolver, which is what lets a second one be
+added without touching a single route.
 """
 
 import re
@@ -31,10 +26,12 @@ from typing import Annotated, Final
 
 from fastapi import Header, Request, Response
 
-from app.core.errors import ApiError, ErrorCode
 from app.core.logging import get_logger
-from app.services.owners.models import TOKEN_PATTERN, Owner, new_owner
+from app.services.owners.credentials import CredentialRepository
+from app.services.owners.identity import IdentityResolver
+from app.services.owners.models import TOKEN_PATTERN, Owner
 from app.services.owners.repository import OwnerRepository
+from app.services.owners.resolver import BearerKeyResolver, malformed_key_error
 
 logger = get_logger(__name__)
 
@@ -44,48 +41,47 @@ OWNER_HEADER: Final = "X-VocalLens-Owner"
 _TOKEN_RE: Final = re.compile(TOKEN_PATTERN)
 
 
+def clean_key(raw: str | None) -> str | None:
+    """Normalise the header value, or refuse one that cannot be a key.
+
+    Whitespace-only is the same as absent. A **malformed** value is refused
+    rather than treated as absent: it cannot be a key this server issued, so
+    ignoring it would hide a client bug behind a silently changing identity.
+    """
+    if raw is None:
+        return None
+    key = raw.strip()
+    if not key:
+        return None
+    if not _TOKEN_RE.match(key):
+        raise malformed_key_error(OWNER_HEADER)
+    return key
+
+
 async def resolve_owner(
     request: Request,
     response: Response,
     owners: OwnerRepository,
+    credentials: CredentialRepository,
     token: str | None,
 ) -> Owner:
-    """Return the caller's owner, minting one if they arrived without a valid token.
+    """Resolve the caller through the bearer-key resolver.
 
-    The minted token is written to the response header exactly once, at
-    creation. It is never logged and never returned in a body — a header keeps
-    it out of the places request bodies end up.
+    A thin HTTP adapter: it normalises the header, hands the key to an
+    :class:`IdentityResolver`, and writes a freshly minted key to the response
+    header exactly once. Every decision about *who* the caller is belongs to the
+    resolver, which is what lets a second one be added without touching this.
+
+    The minted key never reaches a body and is never logged — a header keeps it
+    out of the places request bodies end up.
     """
-    if token is not None:
-        token = token.strip()
-        if not token:
-            token = None
-        elif not _TOKEN_RE.match(token):
-            raise ApiError(
-                ErrorCode.VALIDATION_ERROR,
-                f"The {OWNER_HEADER} header is not a valid identifier.",
-            )
-
-    if token is not None:
-        existing = await owners.get_by_token(token)
-        if existing is not None:
-            return existing
-        # A well-formed token this server does not know: the database was reset,
-        # or the value was invented. Either way, mint rather than refuse.
-        logger.info("owner_token_unrecognised", extra={"path": request.url.path})
-
-    owner, minted = await _mint(owners)
-    response.headers[OWNER_HEADER] = minted
-    return owner
-
-
-async def _mint(owners: OwnerRepository) -> tuple[Owner, str]:
-    owner, token = new_owner()
-    await owners.create(owner, token)
-    # The id is safe to log; the token is not, and is not passed to the logger
-    # in any form.
-    logger.info("owner_created", extra={"owner_id": str(owner.owner_id)})
-    return owner, token
+    resolver: IdentityResolver = BearerKeyResolver(
+        owners=owners,
+        credentials=credentials,
+        key=clean_key(token),
+        on_mint=lambda minted: response.headers.__setitem__(OWNER_HEADER, minted),
+    )
+    return await resolver.resolve()
 
 
 OwnerTokenHeader = Annotated[
@@ -102,4 +98,4 @@ OwnerTokenHeader = Annotated[
 ]
 
 
-__all__ = ["OWNER_HEADER", "OwnerTokenHeader", "resolve_owner"]
+__all__ = ["OWNER_HEADER", "OwnerTokenHeader", "clean_key", "resolve_owner"]

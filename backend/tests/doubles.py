@@ -42,8 +42,15 @@ from app.services.audio_analysis.postgres_repository import (
     AudioAnalysisConflictError,
 )
 from app.services.comparison.sources import ComparisonSource
+from app.services.owners.credentials import (
+    Credential,
+    CredentialExistsError,
+    LastCredentialError,
+    credential_hash,
+    new_credential,
+)
 from app.services.owners.identity import OwnerDataSummary
-from app.services.owners.models import Owner, hash_token, new_owner
+from app.services.owners.models import Owner, new_owner
 from app.services.progress.sources import ProgressRow
 from app.services.recordings.history import RecordingHistoryEntry
 from app.services.recordings.models import Recording
@@ -59,29 +66,85 @@ ACTIVE_AUDIO_STATUSES: Final[frozenset[AudioAnalysisStatus]] = frozenset(
 )
 
 
+class CredentialStore:
+    """The ``credentials`` table, as a dictionary keyed by hash.
+
+    One store backs both :class:`InMemoryOwnerRepository` and
+    :class:`InMemoryCredentialRepository`, mirroring PostgreSQL, where one table
+    serves both protocols. Two separate stores would let a key resolve through
+    one object and not the other — a disagreement the real schema cannot have.
+
+    The hash is the key here as it is there: a double holding the clear value
+    would let a test pass while asserting nothing about the property that
+    matters.
+    """
+
+    def __init__(self) -> None:
+        self._by_hash: dict[str, Credential] = {}
+
+    def add(self, credential: Credential, key: str) -> Credential:
+        stored = credential_hash(key)
+        if stored in self._by_hash:  # the UNIQUE constraint on ``credential_hash``
+            raise CredentialExistsError("that credential is already registered")
+        self._by_hash[stored] = credential
+        return credential
+
+    def find(self, key: str) -> Credential | None:
+        return self._by_hash.get(credential_hash(key))
+
+    def for_owner(self, owner_id: uuid.UUID) -> list[Credential]:
+        owned = [c for c in self._by_hash.values() if c.owner_id == owner_id]
+        return sorted(owned, key=lambda c: (c.created_at, str(c.credential_id)))
+
+    def remove(self, credential_id: uuid.UUID, owner_id: uuid.UUID) -> bool:
+        """Scoped by owner, so somebody else's credential is simply not found."""
+        for stored, credential in list(self._by_hash.items()):
+            if credential.credential_id == credential_id and credential.owner_id == owner_id:
+                del self._by_hash[stored]
+                return True
+        return False
+
+    def drop_owner(self, owner_id: uuid.UUID) -> None:
+        """What ``ON DELETE CASCADE`` does when the owner row goes."""
+        for stored, credential in list(self._by_hash.items()):
+            if credential.owner_id == owner_id:
+                del self._by_hash[stored]
+
+
 class InMemoryOwnerRepository:
     """Owners in a dictionary.
 
-    Stores the hash rather than the token even here. A double that kept the
-    clear value would let a test pass while asserting nothing about the property
-    that matters — and the contract suite checks this one against both.
+    Since Step 10.2 an owner is no longer a key: ``create`` writes the owner and
+    its first credential together, and ``get_by_token`` resolves through the
+    credential store — exactly as the SQL joins ``credentials`` to ``owners``.
     """
 
-    def __init__(self, recordings: "InMemoryRecordingRepository | None" = None) -> None:
-        self._by_hash: dict[str, Owner] = {}
+    def __init__(
+        self,
+        recordings: "InMemoryRecordingRepository | None" = None,
+        credentials: CredentialStore | None = None,
+    ) -> None:
         self._by_id: dict[uuid.UUID, Owner] = {}
+        self._credentials = credentials if credentials is not None else CredentialStore()
         # Optional back-reference so the identity summary and the cascade can be
         # answered from the same data the other doubles hold, rather than from a
         # second copy that could disagree with them.
         self._recordings = recordings
 
+    @property
+    def credentials(self) -> CredentialStore:
+        """The shared store, so a credential double can be built over the same rows."""
+        return self._credentials
+
     async def create(self, owner: Owner, token: str) -> Owner:
-        self._by_hash[hash_token(token)] = owner
+        credential, _ = new_credential(owner.owner_id, "Original key")
+        self._credentials.add(credential.model_copy(update={"created_at": owner.created_at}), token)
         self._by_id[owner.owner_id] = owner
         return owner
 
     async def get_by_token(self, token: str) -> Owner | None:
-        return self._by_hash.get(hash_token(token))
+        credential = self._credentials.find(token)
+        return None if credential is None else self._by_id.get(credential.owner_id)
 
     async def get(self, owner_id: uuid.UUID) -> Owner | None:
         return self._by_id.get(owner_id)
@@ -116,12 +179,53 @@ class InMemoryOwnerRepository:
     async def delete_owner(self, owner_id: uuid.UUID) -> bool:
         """Cascades by hand, exactly as the foreign keys do in PostgreSQL."""
         owner = self._by_id.pop(owner_id, None)
-        for token_hash, stored in list(self._by_hash.items()):
-            if stored.owner_id == owner_id:
-                del self._by_hash[token_hash]
+        self._credentials.drop_owner(owner_id)
         if self._recordings is not None:
             self._recordings.delete_for_owner(owner_id)
         return owner is not None
+
+
+class InMemoryCredentialRepository:
+    """The credential protocol over the same store the owner double uses.
+
+    Built from an :class:`InMemoryOwnerRepository` rather than standing alone,
+    because in PostgreSQL there is one table: a key created through one object
+    must resolve through the other.
+    """
+
+    def __init__(self, owners: InMemoryOwnerRepository) -> None:
+        self._owners = owners
+        self._store = owners.credentials
+
+    async def create(self, credential: Credential, key: str) -> Credential:
+        return self._store.add(credential, key)
+
+    async def owner_for_key(self, key: str) -> uuid.UUID | None:
+        credential = self._store.find(key)
+        return None if credential is None else credential.owner_id
+
+    async def credential_for_key(self, key: str) -> uuid.UUID | None:
+        credential = self._store.find(key)
+        return None if credential is None else credential.credential_id
+
+    async def list_for_owner(self, owner_id: uuid.UUID) -> list[Credential]:
+        return self._store.for_owner(owner_id)
+
+    async def revoke(self, credential_id: uuid.UUID, owner_id: uuid.UUID) -> bool:
+        """Never the last one.
+
+        The count and the delete sit in one non-awaiting section, which is
+        atomic for coroutines on a single loop — the same guarantee the real
+        repository gets from ``SELECT … FOR UPDATE`` on the owner row.
+
+        Refusal is checked only when the credential named is genuinely this
+        owner's: a request naming somebody else's must fall through to "not
+        found" rather than reveal a count.
+        """
+        owned = self._store.for_owner(owner_id)
+        if len(owned) <= 1 and any(c.credential_id == credential_id for c in owned):
+            raise LastCredentialError("an owner must keep at least one credential")
+        return self._store.remove(credential_id, owner_id)
 
 
 class InMemoryRecordingRepository:
@@ -392,6 +496,7 @@ class Doubles:
     """
 
     owners: InMemoryOwnerRepository
+    credentials: InMemoryCredentialRepository
     recordings: InMemoryRecordingRepository
     analyses: InMemoryAnalysisRepository
     audio_analyses: InMemoryAudioAnalysisRepository
@@ -405,10 +510,14 @@ async def build_doubles() -> Doubles:
     audio_analyses = InMemoryAudioAnalysisRepository()
     recordings = InMemoryRecordingRepository(analyses, audio_analyses)
     owners = InMemoryOwnerRepository(recordings)
+    # Over the same store, not a second one: a key minted through the owner
+    # repository has to resolve through the credential repository.
+    credentials = InMemoryCredentialRepository(owners)
     owner, token = new_owner()
     await owners.create(owner, token)
     return Doubles(
         owners=owners,
+        credentials=credentials,
         recordings=recordings,
         analyses=analyses,
         audio_analyses=audio_analyses,
@@ -427,6 +536,7 @@ def override_repositories(app: FastAPI, doubles: Doubles) -> None:
     """
     app.dependency_overrides[deps.get_owner_repository] = lambda: doubles.owners
     app.dependency_overrides[deps.get_owner_data_repository] = lambda: doubles.owners
+    app.dependency_overrides[deps.get_credential_repository] = lambda: doubles.credentials
     app.dependency_overrides[deps.get_recording_repository] = lambda: doubles.recordings
     app.dependency_overrides[deps.get_analysis_repository] = lambda: doubles.analyses
     app.dependency_overrides[deps.get_audio_analysis_repository] = lambda: doubles.audio_analyses

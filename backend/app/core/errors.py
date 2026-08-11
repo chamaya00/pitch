@@ -80,6 +80,16 @@ class ErrorCode(StrEnum):
     #: The recording exists but has never been analysed.
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
 
+    # Credentials (Step 10.2)
+    #: No credential with that id belongs to the caller. Deliberately the same
+    #: answer for "no such credential" and "somebody else's credential", so the
+    #: endpoint cannot be used to discover that an id is real.
+    CREDENTIAL_NOT_FOUND = "CREDENTIAL_NOT_FOUND"
+    #: Refusing to revoke an owner's only remaining credential, which would
+    #: strand the identity: the recordings would still exist, still owned, and
+    #: nobody could ever reach them again.
+    LAST_CREDENTIAL = "LAST_CREDENTIAL"
+
 
 #: Default HTTP status for each code. Every member of ``ErrorCode`` must appear
 #: here; ``test_errors.py`` enforces that so a new code cannot be added without
@@ -110,6 +120,8 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.ANALYSIS_PROVIDER_ERROR: 502,
     ErrorCode.TRANSCRIPT_EMPTY: 422,
     ErrorCode.ANALYSIS_NOT_FOUND: 404,
+    ErrorCode.CREDENTIAL_NOT_FOUND: 404,
+    ErrorCode.LAST_CREDENTIAL: 409,
 }
 
 _STATUS_FALLBACK: Final[dict[int, ErrorCode]] = {
