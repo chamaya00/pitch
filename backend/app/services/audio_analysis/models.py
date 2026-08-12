@@ -43,6 +43,11 @@ _ID_PATTERN: Final = r"\A[0-9a-f]{32}\z"
 #: a note name can never carry arbitrary text into a stored document.
 _NOTE_PATTERN: Final = r"\A[A-G]#?-?[0-9]\z"
 
+#: A pitch class: the same letter without the octave. ``A4``, ``A3`` and ``A5``
+#: are three pitches and one pitch class, and the distinction is load-bearing —
+#: see ``docs/phase-8-specification.md``.
+_PITCH_CLASS_PATTERN: Final = r"\A[A-G]#?\z"
+
 #: A voiced frame within this many cents of its semitone counts as in tune.
 #:
 #: Lives here, in the domain, rather than beside the detector: the recording-level
@@ -129,6 +134,124 @@ class NoteSummary(BaseModel):
     mean_abs_cents: float = Field(ge=0, le=50)
     #: Share of this note's frames within :data:`IN_TUNE_CENTS` of it.
     in_tune_ratio: float = Field(ge=0, le=1)
+
+
+class KeyMode(StrEnum):
+    """The two modes this project estimates. There are deliberately no others.
+
+    Dorian, Mixolydian and the rest exist; a profile set containing only major
+    and minor cannot recognise them, and would report the nearest of the two
+    rather than admitting it does not know. That is a documented limitation
+    rather than a gap to fill by adding profiles nobody here can validate.
+    """
+
+    MAJOR = "major"
+    MINOR = "minor"
+
+
+class KeyUnmeasuredReason(StrEnum):
+    """Why no key was reported. **Not an error code.**
+
+    A key that could not be established is a normal outcome, in exactly the way
+    ``INSUFFICIENT_PITCH_SIGNAL`` is: the recording did not carry the evidence.
+    These values never appear in the error envelope and never become an HTTP
+    status. They exist so a reader is told *why* the answer is "not measured"
+    instead of being asked to trust it.
+    """
+
+    #: Too few pitch classes were used to distinguish one key from another. One
+    #: held note fits twenty-four keys about equally well.
+    TOO_FEW_PITCH_CLASSES = "TOO_FEW_PITCH_CLASSES"
+    #: Not enough pitched audio to aggregate.
+    TOO_LITTLE_VOICED_TIME = "TOO_LITTLE_VOICED_TIME"
+    #: Pitch classes enough, but no candidate stood clear of the next one.
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class PitchClassShare(BaseModel):
+    """How much of the pitched time went to one pitch class.
+
+    A **pitch class**, not a note: ``A2``, ``A4`` and ``A5`` all contribute here,
+    because a key is a statement about pitch classes and octaves are irrelevant
+    to it. ``NoteSummary`` is the octave-aware view of the same timeline, and the
+    two answer different questions.
+
+    The share is of **voiced** time, the same denominator ``NoteSummary`` uses,
+    so the twelve values sum to 100 rather than to the recording's length.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    pitch_class: int = Field(ge=0, le=11)
+    name: str = Field(pattern=_PITCH_CLASS_PATTERN)
+    percentage_of_voiced_time: float = Field(ge=0, le=100)
+
+
+class KeyCandidate(BaseModel):
+    """One key, and how far it stood clear of the next one."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tonic: str = Field(pattern=_PITCH_CLASS_PATTERN)
+    mode: KeyMode
+    #: The margin between this candidate's correlation and the next candidate's.
+    #: **Not a raw correlation and not a probability.** A random pitch-class
+    #: profile correlates +0.428 with a real key profile and a single held note
+    #: correlates +0.684, so a raw correlation reports a confident key for a hum.
+    #: The margin is what separates evidence from arithmetic. See
+    #: ``docs/audio-analysis.md``.
+    confidence: float = Field(ge=0, le=2)
+
+
+class KeyEstimate(BaseModel):
+    """The key a recording's pitch classes best fit, with its runner-up.
+
+    **An estimate of what was sung, not a statement that it was right.** There is
+    no reference melody in this product, so this cannot say whether the key was
+    the intended one — only which key the notes that were sung best fit.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    tonic: str = Field(pattern=_PITCH_CLASS_PATTERN)
+    mode: KeyMode
+    confidence: float = Field(ge=0, le=2)
+    #: The candidate that came second, so a close call is visible rather than
+    #: hidden behind a single confident-looking label.
+    alternative: KeyCandidate | None = None
+
+
+class KeyAnalysis(BaseModel):
+    """A key estimate, or a stated reason there is none, plus its evidence.
+
+    The measurements travel with the verdict in **both** cases. A reader who is
+    told "not measured" can see the pitch classes that led to it, which is the
+    difference between a refusal and a shrug.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    key: KeyEstimate | None = None
+    unmeasured_reason: KeyUnmeasuredReason | None = None
+    #: Always twelve entries, in pitch-class order, including the unused ones at
+    #: zero. A key is decided as much by which classes are *absent* as by which
+    #: are present, so omitting them would hide half the evidence.
+    pitch_classes: tuple[PitchClassShare, ...] = ()
+    #: Pitch classes carrying more than a negligible share. The count that the
+    #: evidence gate is applied to.
+    distinct_pitch_classes: int = Field(default=0, ge=0, le=12)
+    voiced_seconds: float = Field(default=0.0, ge=0)
+    #: Which published profile set produced this. The numbers are only
+    #: interpretable against it, exactly as the analyzer publishes its settings.
+    method: str = ""
+
+    @model_validator(mode="after")
+    def _check_verdict(self) -> Self:
+        if (self.key is None) == (self.unmeasured_reason is None):
+            raise ValueError("exactly one of key and unmeasured_reason must be set")
+        if self.pitch_classes and len(self.pitch_classes) != 12:
+            raise ValueError("a pitch-class profile has twelve entries or none")
+        return self
 
 
 class VocalRange(BaseModel):

@@ -2,12 +2,12 @@
 
 > **Status: specification only. None of this is implemented.**
 >
-> Nothing described below exists in the repository. No table, column, endpoint,
-> service, schema, component or test named here has been written.
+> Nothing described below exists in the repository, except where a slice is
+> marked delivered in [Implementation slices](#implementation-slices).
 >
-> **Phase 8 is blocked by a product decision.** See
-> [The decision gate](#the-decision-gate). Implementation must not begin until it
-> is answered.
+> **The decision gate was answered on 2026-08-12: Candidate A — musical key.**
+> See [The decision gate](#4-the-decision-gate). Candidate B (§13) and every
+> non-scope item in §5 remain unbuilt and out of scope.
 
 ## Revision history
 
@@ -15,6 +15,37 @@
 | --- | --- |
 | 10.7 | First specification. Audited the repository, found no Phase 8 implementation, and scoped Phase 8 to a melodic key estimator derived from the stored pitch timeline. |
 | 10.8 | Re-audited to resolve the blocking question 10.7 raised. **Two of 10.7's load-bearing claims did not survive re-inspection.** The key-estimation scope is no longer recommended on evidence; it is now a product decision. A second candidate scope was recovered from a deferral 10.7 got wrong. |
+| 10.8 (decision) | Product answered: **Candidate A**, musical key only. Phase 9 confirmed as a blocked product dependency, not something to work around. |
+| 10.8 (Slice 1) | Pure domain built and measured. Thresholds set from a sweep, the profile set chosen on evidence, and **one specification claim corrected by the measurements** — see below. |
+
+### What the Slice 1 sweep settled
+
+Every threshold in §6 was left deliberately unset until the fixtures existed.
+Running them produced these, all now recorded beside the constants in
+`app/services/audio_analysis/key.py`:
+
+| Constant | Value | What set it |
+| --- | --- | --- |
+| Profile set | **Temperley** | Both sets identify all 24 synthetic keys, so accuracy did not decide it. Temperley separates a sung melody from random weights by ~12× (0.262 vs 0.013); Krumhansl–Kessler by ~3× (0.246 vs 0.088). The wider band is what leaves room for a gate |
+| `MIN_DISTINCT_PITCH_CLASSES` | **5** | The smallest value admitting a pentatonic melody while refusing a four-class arpeggio. It carries more weight than expected: a *three*-class arpeggio scores a margin of **0.309**, higher than real music, so confidence alone can never catch it |
+| `MIN_VOICED_SECONDS` | **1.0** | Derived: five held notes at the analyzer's own 116 ms rule is ~0.58 s, rounded up. Earns its place independently — a 0.53 s five-class fixture scores 0.281 and passes every other gate |
+| `MIN_KEY_CONFIDENCE` | **0.05** | Set from the noise floor: uniform 0.000, chromatic 0.010, random 0.013, worst refusable fixture 0.022. Real melodies jittered ±50% (200 draws each, tonic and mode correct in 599 of 600) have 5th-percentile margins of 0.097 / 0.081 / 0.046 |
+| `MIN_PITCH_CLASS_SHARE` | **2.0** | A stray frame in a two-second recording is worth ~1.2% of voiced time; the least-used class of a real seven-note melody is several times that |
+
+**Correction 3 — a bare unweighted scale is answered, not refused.** 10.7 stated
+that seven equally-weighted diatonic degrees must return `null`, on the
+Krumhansl–Kessler measurement where it leads by 0.044, level with noise. Under
+the profile set that actually shipped it leads by **0.146** — above the gate, and
+well below the 0.19–0.23 a weighted melody reaches. It is therefore answered,
+and answered *weakly*: the confidence and the runner-up both say how thin the
+evidence is, and the twelve equal shares are returned so a reader can see it.
+Reporting a bare C-major scale as C major is also what a listener would do.
+`test_a_bare_unweighted_scale_is_answered_but_only_just` pins this.
+
+The tails do overlap, and the specification says so rather than hiding it: one
+jittered minor melody in 200 scored 0.004, below the chromatic fixture. No
+threshold separates those two, and a feature whose honest answer is sometimes
+"not measured" is the specified behaviour rather than a shortfall.
 
 ### What 10.8 changed, and why
 
@@ -220,20 +251,35 @@ Under this project's own rules, key estimation fails two tests and passes one:
 That balance is close, and *close is what makes it a product decision rather than
 an engineering one.* An engineer choosing here would be inventing a requirement.
 
-> ### Product decision required
+> ### Product decision — answered 2026-08-12
 >
-> **Should VocalLens report an estimated musical key for a recording, as a
-> measurement in its own right, knowing that nothing consumes it, that it will
-> often answer "not measured", and that it cannot be validated against real
-> singing in this repository?**
+> The question put was: **should VocalLens report an estimated musical key for a
+> recording, as a measurement in its own right, knowing that nothing consumes it,
+> that it will often answer "not measured", and that it cannot be validated
+> against real singing in this repository?**
 >
-> - **If yes** — §§5–12 below are complete and implementation may begin at
->   Slice 1 with no further design work.
-> - **If no** — Candidate B (§13) is the better-evidenced Phase 8 and needs one
->   short specification pass before it is buildable.
-> - **If neither** — Phase 8 is closed as "not supported by the current product",
->   and the roadmap row is rewritten to say so. This is a legitimate outcome:
->   three of its five nouns are already Phase 9 or already built.
+> **Answer: yes — Candidate A, and only Candidate A.** Phase 8 implements the
+> pitch-class profile, a tonic and major/minor estimate, a confidence, `null`
+> when the evidence is insufficient, and the frontend presentation. Nothing else.
+>
+> The three costs above are accepted knowingly rather than argued away, and each
+> one has an obligation attached that this specification already carries:
+>
+> - *No consumer* → the feature must stand on its own as a measurement, so §9
+>   requires the pitch-class evidence to be shown beside the label in every state.
+> - *Often "not measured"* → that is the specified behaviour, not a shortfall.
+>   The adversarial fixtures in §10 make it a test failure to guess instead.
+> - *Unvalidatable here* → §10 states it outright, and no test may claim
+>   otherwise.
+>
+> **Phase 9 was answered at the same time and separately:** the absence of a
+> reference song is a *blocked product dependency*, not something to invent or
+> work around. No catalogue, external metadata provider, vocal separation or
+> reference-audio input may be introduced by Phase 8, and how a reference song is
+> supplied is its own product decision when Phase 9 starts.
+>
+> Candidate B (§13) is **not** being built. It stays recorded because the
+> reasoning that recovered it is worth keeping, not because it is queued.
 
 ---
 
@@ -742,7 +788,7 @@ updated; this file marked superseded, not deleted.
 
 | # | Purpose | Files | Tests | Browser | Acceptance | Depends on |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Pure domain: profile + estimator | `audio_analysis/key.py`, `models.py`, `tests/test_audio_key.py` | Every deterministic and adversarial fixture; both profile sets raced; the threshold sweep run and recorded | — | 24/24 tonics, invariance to 1e-9, every adversarial fixture `null` with the right reason, thresholds justified by recorded measurements | — |
+| 1 ✅ | **Delivered.** Pure domain: profile + estimator | `audio_analysis/key.py`, `models.py`, `tests/test_audio_key.py` | 94 tests. Every deterministic and adversarial fixture; both profile sets raced; the threshold sweep run and recorded above | — | Met: 24/24 tonics both modes, transposition invariance to 1e-9, every adversarial fixture `null` with the right reason, thresholds justified by recorded measurements. 14 mutations run — 13 caught, 1 confirmed equivalent and documented as such in the code | — |
 | 2 | `AudioAnalysisService.key()` | `orchestration/audio_analysis.py`, `test_audio_analysis_orchestration.py` | `None` for pending/failed/absent; `RECORDING_NOT_FOUND` for another owner; estimate for a completed one, driven by the existing stub analyzer | — | No new repository method, no new SQL, ownership passes through a substituted resolver | 1 |
 | 3 | The endpoint | `routes/audio_analysis.py`, `schemas/audio_analysis.py`, `test_audio_analysis_api.py`, `test_ownership_api.py`, `docs/api.md` | Both `200` shapes; both `404`s; another owner gets the same `404`; response asserted free of `owner_id`; asserted not to consume costly-request quota | `curl` through the running stack | `docs/api.md` documents the `null` shape and `unmeasured_reason`; no `ErrorCode` member added | 2 |
 | 4 | The UI | `types/api.ts`, `lib/api.ts`, `components/audio-analysis/`, `frontend/tests/` | Presentation logic under `node --test`, including that a `null` key never renders a tonic | All three scenarios, both widths, both schemes, console checked | Every state reached deliberately; no handled failure reaches `app/error.tsx` | 3 |
