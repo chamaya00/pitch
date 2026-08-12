@@ -40,10 +40,13 @@ from app.services.audio.storage import RecordingStorage, StorageError
 from app.services.audio_analysis.analyzer import AudioAnalyzer
 from app.services.audio_analysis.errors import AudioAnalysisError
 from app.services.audio_analysis.feedback_payload import build_request
+from app.services.audio_analysis.key import analyse_key
 from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
     AudioFeedbackStatus,
+    AudioMetrics,
+    KeyAnalysis,
     NoteSummary,
     new_audio_analysis_id,
 )
@@ -156,6 +159,56 @@ class AudioAnalysisService:
             return None
         return self._notes_of(analysis)
 
+    async def key(self, recording_id: str, owner_id: uuid.UUID) -> KeyAnalysis | None:
+        """The musical key a recording's completed audio analysis best fits.
+
+        Derived on read from the stored pitch timeline, exactly as :meth:`notes`
+        is, and for the same reasons: it is a pure function of points that are
+        already on disk, storing it too would be a second copy to keep
+        consistent, and deriving it means **every** analysis ever completed is
+        answerable rather than only the ones measured after this shipped.
+
+        Two different absences, and collapsing them would lose information:
+
+        * ``None`` — there is no completed analysis to look at. The recording
+          may be unanalysed, in flight, or failed.
+        * a :class:`KeyAnalysis` whose ``key`` is ``None`` — the analysis is
+          there, the timeline is there, and the notes in it do not establish a
+          key. That is a **measurement outcome**, carries the reason and the
+          twelve pitch-class shares that led to it, and is reported as "not
+          measured" rather than as a failure.
+
+        No key mathematics happens here. The service resolves an owner-scoped
+        record and hands its timeline to the estimator; which key that is, how
+        confident it is and whether there is one at all are decided in
+        ``audio_analysis/key.py`` and nowhere else.
+
+        Raises:
+            ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown or is
+                not this owner's.
+        """
+        analysis = await self.current(recording_id, owner_id)
+        if analysis is None or analysis.status is not AudioAnalysisStatus.COMPLETED:
+            return None
+        if analysis.metrics is None:
+            return None
+        return analyse_key(
+            analysis.pitch_points, frame_seconds=self._frame_seconds(analysis.metrics)
+        )
+
+    @staticmethod
+    def _frame_seconds(metrics: AudioMetrics) -> float:
+        """New audio each successive frame contributed, from the stored settings.
+
+        One derivation for both aggregations. The hop rather than the frame
+        length is ``notes.py``'s rule and the reason is there; what belongs here
+        is only that two callers must not read it out of the settings block in
+        two different ways.
+        """
+        return frame_duration_seconds(
+            metrics.settings.hop_length_samples, metrics.settings.sample_rate_hz
+        )
+
     @staticmethod
     def _notes_of(analysis: AudioAnalysis) -> tuple[NoteSummary, ...]:
         """The breakdown of one analysis record, with no repository access.
@@ -165,15 +218,17 @@ class AudioAnalysisService:
         a second ownership check for a recording whose ownership was settled
         when the analysis was started, and a background task has no request to
         take an owner from.
+
+        :meth:`key` deliberately has no such counterpart: nothing else in this
+        service needs a key, and a seam with one caller is a seam to maintain
+        for nothing. Audio feedback is not given the key — see
+        ``docs/phase-8-specification.md``.
         """
         if analysis.metrics is None:
             return ()
-        settings = analysis.metrics.settings
         return summarise_notes(
             analysis.pitch_points,
-            frame_seconds=frame_duration_seconds(
-                settings.hop_length_samples, settings.sample_rate_hz
-            ),
+            frame_seconds=AudioAnalysisService._frame_seconds(analysis.metrics),
         )
 
     async def start_feedback(self, recording_id: str, owner_id: uuid.UUID) -> AudioAnalysis:

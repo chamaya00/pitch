@@ -503,6 +503,45 @@ the distance to the nearest semitone, and rounding first throws away the
 measurement — and both return nothing for a value that cannot be a pitch: zero,
 a negative, a NaN, an infinity, or a frequency outside 20–5000 Hz.
 
+## Musical key — built, not exposed (Phase 8, Slices 1–2)
+
+`backend/app/services/audio_analysis/key.py`, reachable through
+`AudioAnalysisService.key()`. A third aggregation of the same stored pitch
+timeline, beside the note breakdown: it folds the timeline into twelve
+pitch-class shares and reports which key those shares best fit, or a stated
+reason there is none.
+
+**No route serves it, no schema describes it and no component renders it.** The
+measurement exists and no client can ask for it — the API and the UI are Slices 3
+and 4. It is not in the AI payload, the comparison or the progress series.
+
+It differs from the note breakdown in exactly one way, and that difference is the
+whole feature: **the octave is discarded.** `A2`, `A4` and `A5` are three pitches
+and one pitch class. Everything else is shared — the same timeline, the same
+hop-weighted durations, the same "derived on read, never persisted" discipline,
+and the same single pitch detector upstream of both. Deriving rather than storing
+means every analysis ever completed is answerable, and no migration exists.
+
+Three properties, and the third is why the feature is safe to show at all:
+
+- **Confidence is a margin, never a correlation.** Random pitch-class weights
+  correlate +0.492 with a real key profile and a single held note +0.484 — under
+  Krumhansl–Kessler the hum reaches **+0.684**, which reads as certainty. What
+  separates music from arithmetic is how far the best candidate stands clear of
+  the next: 0.262 for a sung melody against 0.013 for noise.
+- **The margin is over the next candidate of any kind**, not the next candidate
+  with a different tonic. Two hummed pitch classes lead the next *tonic* by 0.173
+  — indistinguishable from music — and the next *candidate* by 0.021.
+- **Two evidence gates sit in front of the correlation**, because a margin alone
+  is not enough: a three-class arpeggio scores **0.309**, *higher than real
+  music*, and only a distinct-pitch-class count catches it.
+
+The algorithm, the profile-set comparison and every threshold with the
+measurement that set it are in
+[phase-8-specification.md](phase-8-specification.md) and in the module's own
+constants. **Nothing here has been validated against human singing**: every
+fixture is synthetic, and this repository holds no annotated corpus to do it with.
+
 ## Pitch accuracy
 
 "Pitch accuracy" here means **consistency relative to the nearest equal-tempered

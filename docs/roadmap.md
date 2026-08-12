@@ -13,7 +13,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
-| 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Specified, not started — [phase-8-specification.md](phase-8-specification.md) |
+| 8 | Melodic key estimation (scope resolved in 10.8) | Started — domain (Slice 1) and service seam (Slice 2). Not exposed. [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
@@ -129,12 +129,18 @@ load-bearing claims did not survive re-inspection**:
   sang?" Note events built on it introduce no new threshold, and are now recorded
   as the alternative candidate scope.
 
-So Phase 8 has **two candidate scopes and no evidence to choose between them**:
+So Phase 8 had **two candidate scopes and no evidence to choose between them**:
 musical key (fully specified, no consumer, a *label* rather than a measurement,
 and unvalidatable against real singing here) or melody note events (closes the
 one gap in "can it show A4 → B4 → C5?", reuses an existing rule, needs one short
-design pass). Choosing is a product decision, and an engineer choosing would be
-inventing a requirement.
+design pass). Choosing was a product decision, and an engineer choosing would
+have been inventing a requirement.
+
+**The decision was taken: musical key only.** Note events, BPM, beat tracking,
+melody transcription, reference-song input, vocal separation, transposition and
+compatibility are all out of scope, and key is not fed to AI feedback, comparison
+or progress. Phase 9 stands as a *blocked product dependency*: how a reference
+song is supplied is its own decision, and nothing here invents one.
 
 What the 10.8 audit established about the product as it stands: instantaneous
 pitch, the pitch timeline, lowest/highest pitch and vocal range are all **already
@@ -143,9 +149,20 @@ is **no musical key, no ordered note sequence, no tempo, and categorically no
 reference song**: `song` appears in the codebase only as a test upload filename,
 and `reference` never once means a reference recording.
 
-**Phase 8 is not started, and must not be started until the gate in
-[phase-8-specification.md](phase-8-specification.md#4-the-decision-gate) is
-answered.**
+### Phase 8 — what is built
+
+- **Slice 1** — `audio_analysis/key.py`: a pitch-class profile folded from the
+  stored timeline, and the key those twelve numbers best fit. Every threshold set
+  by a recorded sweep rather than picked; Temperley chosen over Krumhansl–Kessler
+  because it separates a sung melody from random weights by ~12× rather than ~3×.
+- **Slice 2** — `AudioAnalysisService.key()`: the same owner-scoped `current()`
+  read `notes()` uses, handing the stored timeline to the estimator. Derived on
+  read, so nothing is persisted, no migration exists, and every analysis ever
+  completed is answerable.
+
+**Nothing exposes it.** There is no route, no schema, no frontend type and no UI,
+so the measurement exists and no client can ask for it. Slices 3–6 remain, and
+the phase is **not** complete until its definition of done is met.
 
 ## Phase 10 — where it stands
 
