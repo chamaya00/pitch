@@ -820,6 +820,41 @@ Starts analysis in the background.
 Generates the LLM interpretation of an existing analysis. Returns the structured
 object documented in [ai.md](ai.md). Requires `ANTHROPIC_API_KEY`.
 
+### `GET /api/v1/recordings/{recording_id}/audio-analysis/key` — Phase 8
+
+The musical key implied by what was sung, **derived on read** from the stored
+pitch timeline in the same way `/notes` is. Nothing new is persisted, so no
+migration precedes it and every existing completed analysis is answerable.
+
+Specified in full — request, both `200` shapes, statuses, ownership, idempotency
+and rate-limit behaviour — in
+[phase-8-specification.md](phase-8-specification.md#e-api-contract). Not
+implemented.
+
+**200 OK**
+
+```json
+{
+  "key": { "tonic": "G", "mode": "major", "confidence": 0.246,
+           "alternative": { "tonic": "D", "mode": "major", "confidence": 0.198 } },
+  "pitch_classes": [ { "pitch_class": 0, "name": "C", "percentage_of_voiced_time": 4.1 } ],
+  "distinct_pitch_classes": 7,
+  "voiced_seconds": 5.84,
+  "method": "temperley"
+}
+```
+
+`key` is `null` when the evidence does not support one, with the same shape and
+an `unmeasured_reason` of `TOO_FEW_PITCH_CLASSES`, `TOO_LITTLE_VOICED_TIME` or
+`AMBIGUOUS`. That is a **normal outcome**, rendered as "not measured" — it is not
+an error code, never an HTTP status, and is not added to the vocabulary below.
+The measurements are returned alongside it either way, so a reader can see why.
+
+`404` `RECORDING_NOT_FOUND` for an unknown or another owner's recording, and
+`404` `AUDIO_ANALYSIS_NOT_FOUND` when there is no completed analysis. **No new
+error code.** It is a read, so it is not charged against the costly-request
+limit.
+
 ---
 
 ## Errors

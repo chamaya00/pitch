@@ -13,7 +13,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
-| 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
+| 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Specified, not started — [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
@@ -75,7 +75,42 @@ do are defined against equal temperament rather than against singing. See
 [api.md](api.md) and [limitations.md](limitations.md).
 
 **Phase 8 has not started.** Nothing about song analysis, key, BPM, melody
-extraction or transposition exists — verified by search, not assumed.
+extraction or transposition exists — verified by search, not assumed, and
+re-verified by the Step 10.7 audit.
+
+## Phase 8 — specified in 10.7, not built
+
+The roadmap row above was one table cell, and Step 10.7 turned it into
+[phase-8-specification.md](phase-8-specification.md) without building any of it.
+The audit that produced it found that four of the row's five nouns do not
+survive contact with the repository:
+
+- **"Song analyser" has no song.** The only input this product accepts is one
+  uploaded recording of one voice. There is no reference track, no catalogue, no
+  vocal separation and no second audio input anywhere.
+- **"range estimation" already shipped** in Step 7I. A second range definition
+  would be a category error, not a feature.
+- **"transposition" and "compatibility" are Phase 9**, by row 9 of the table
+  above.
+- **BPM and beat tracking are deferred** on three grounds: unaccompanied voice
+  has no percussion, nothing in Phase 9 consumes a tempo, and no fixture in this
+  repository has a ground-truth tempo to validate one against.
+
+What is left, and what the specification covers: **the musical key implied by
+what was sung**, derived on read from the pitch timeline Step 7I already stores
+— no new table, no migration, no dependency, no provider and no background work.
+
+The specification's most load-bearing finding is a measurement: correlating a
+*random* pitch-class profile against the standard key profiles scores **+0.428**,
+and a single held note scores **+0.684 for C major**. A key estimator built the
+obvious way reports a confident key for a hum. The specification therefore
+defines confidence as a margin over the next-best candidate of any kind, adds two
+independent evidence gates, and makes the adversarial fixtures — hum, two notes,
+noise, chromatic wander — a required part of the test suite.
+
+Six unknowns are recorded there that need a product decision rather than an
+implementation choice. The first is whether a melodic key estimate is what Phase
+8 was ever for.
 
 ## Phase 10 — where it stands
 

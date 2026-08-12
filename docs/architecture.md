@@ -623,4 +623,12 @@ trend, which is a stronger guarantee than a rule saying it must not.
 ### Not built in Phase 7
 
 Nothing. The phase is complete. **Phase 8 has not started** — no song analysis,
-key detection, BPM, melody extraction or transposition exists.
+key detection, BPM, melody extraction or transposition exists. It is now
+specified, though: Step 10.7 wrote
+[phase-8-specification.md](phase-8-specification.md) without implementing any of
+it. The shape that specification proposes is worth knowing before anything is
+built, because it deliberately adds no architecture at all — the key is derived
+on read from the pitch timeline `audio_analyses` already stores, in the same way
+`notes.py` is, so there is no new table, no migration, no dependency, no
+provider and no background work. What it does *not* cover, and why, is recorded
+there: there is no song in this product to analyse.

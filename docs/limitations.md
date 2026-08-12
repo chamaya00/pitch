@@ -368,6 +368,14 @@ vocal. Instruments, harmonies and percussion all contribute energy that a
 monophonic pitch detector may track instead of the voice. Any song-level result
 is an estimate and is labelled as such.
 
+The more basic limit, found by the Step 10.7 audit: **this product has no way to
+receive a song.** The only accepted input is one uploaded recording of one voice
+— there is no reference track, no catalogue and no vocal separation. What Phase 8
+is specified to measure is therefore the key implied by *what was sung*, with its
+own limits written down in
+[phase-8-specification.md](phase-8-specification.md#l-what-phase-8-will-not-solve).
+None of it is implemented.
+
 ## Song compatibility (Phase 9+)
 
 A compatibility score compares a detected range against an estimated song range.
