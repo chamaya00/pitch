@@ -626,9 +626,16 @@ Nothing. The phase is complete. **Phase 8 has not started** — no song analysis
 key detection, BPM, melody extraction or transposition exists. It is now
 specified, though: Step 10.7 wrote
 [phase-8-specification.md](phase-8-specification.md) without implementing any of
-it. The shape that specification proposes is worth knowing before anything is
-built, because it deliberately adds no architecture at all — the key is derived
-on read from the pitch timeline `audio_analyses` already stores, in the same way
-`notes.py` is, so there is no new table, no migration, no dependency, no
-provider and no background work. What it does *not* cover, and why, is recorded
-there: there is no song in this product to analyse.
+it, and Step 10.8 re-audited and corrected it. The shape it proposes is worth
+knowing before anything is built, because it deliberately adds no architecture at
+all — the result is derived on read from the pitch timeline `audio_analyses`
+already stores, in the same way `notes.py` is, so there is no new table, no
+migration, no dependency, no provider and no background work.
+
+**Phase 8 is blocked on a product decision, not on engineering.** 10.8 found that
+nothing in the product consumes a musical key — `limitations.md` defines Phase 9
+compatibility as comparing *ranges*, not keys — which leaves two candidate scopes
+(musical key, or melody note events) and no repository evidence to choose between
+them. What the phase does *not* cover, and why, is recorded there; the shortest
+version is that there is no song in this product to analyse, and `song` appears
+in the codebase only as a test upload filename.

@@ -96,21 +96,56 @@ survive contact with the repository:
   has no percussion, nothing in Phase 9 consumes a tempo, and no fixture in this
   repository has a ground-truth tempo to validate one against.
 
-What is left, and what the specification covers: **the musical key implied by
-what was sung**, derived on read from the pitch timeline Step 7I already stores
-— no new table, no migration, no dependency, no provider and no background work.
+10.7 scoped what was left to **the musical key implied by what was sung**,
+derived on read from the pitch timeline Step 7I already stores — no new table,
+no migration, no dependency, no provider and no background work. That
+specification is complete and is still in the file.
 
-The specification's most load-bearing finding is a measurement: correlating a
-*random* pitch-class profile against the standard key profiles scores **+0.428**,
-and a single held note scores **+0.684 for C major**. A key estimator built the
-obvious way reports a confident key for a hum. The specification therefore
-defines confidence as a margin over the next-best candidate of any kind, adds two
-independent evidence gates, and makes the adversarial fixtures — hum, two notes,
-noise, chromatic wander — a required part of the test suite.
+Its most load-bearing finding is a measurement: correlating a *random*
+pitch-class profile against the standard key profiles scores **+0.428**, and a
+single held note scores **+0.684 for C major**. A key estimator built the obvious
+way reports a confident key for a hum. Confidence is therefore defined as a
+margin over the next-best candidate of any kind, with two independent evidence
+gates and the adversarial fixtures — hum, two notes, noise, chromatic wander — a
+required part of the suite.
 
-Six unknowns are recorded there that need a product decision rather than an
-implementation choice. The first is whether a melodic key estimate is what Phase
-8 was ever for.
+## Phase 8 — blocked by a product decision (10.8)
+
+Step 10.8 re-audited to resolve the question 10.7 left open, and **two of 10.7's
+load-bearing claims did not survive re-inspection**:
+
+- **Phase 9 does not consume a musical key.** `limitations.md:373` already said
+  so: *"A compatibility score compares a detected range against an estimated song
+  range."* Phase 9 is a range operation. Transposing a song to fit a singer uses
+  the song's range and the singer's range; the singer's own key is not an input
+  at any point. That claim was the *only* thing separating key from BPM, which
+  10.7 deferred partly because nothing consumes it — so the same ground now
+  applies to key.
+- **Note events were deferred for a contradiction that does not exist.** 10.7
+  said they need a minimum-duration threshold that `notes.py` refuses. `notes.py`
+  refuses a *new, arbitrary* threshold on a share-of-time table; the analyzer
+  already has a tested held-pitch rule (`MIN_RANGE_FRAMES`,
+  `RANGE_CONTINUITY_SEMITONES`) that exists to answer "is this a note somebody
+  sang?" Note events built on it introduce no new threshold, and are now recorded
+  as the alternative candidate scope.
+
+So Phase 8 has **two candidate scopes and no evidence to choose between them**:
+musical key (fully specified, no consumer, a *label* rather than a measurement,
+and unvalidatable against real singing here) or melody note events (closes the
+one gap in "can it show A4 → B4 → C5?", reuses an existing rule, needs one short
+design pass). Choosing is a product decision, and an engineer choosing would be
+inventing a requirement.
+
+What the 10.8 audit established about the product as it stands: instantaneous
+pitch, the pitch timeline, lowest/highest pitch and vocal range are all **already
+built and tested** — A4 is detected as A4 within 5 cents, at three layers. There
+is **no musical key, no ordered note sequence, no tempo, and categorically no
+reference song**: `song` appears in the codebase only as a test upload filename,
+and `reference` never once means a reference recording.
+
+**Phase 8 is not started, and must not be started until the gate in
+[phase-8-specification.md](phase-8-specification.md#4-the-decision-gate) is
+answered.**
 
 ## Phase 10 — where it stands
 

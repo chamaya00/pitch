@@ -828,8 +828,10 @@ migration precedes it and every existing completed analysis is answerable.
 
 Specified in full — request, both `200` shapes, statuses, ownership, idempotency
 and rate-limit behaviour — in
-[phase-8-specification.md](phase-8-specification.md#e-api-contract). Not
-implemented.
+[phase-8-specification.md](phase-8-specification.md#8-candidate-a--api). **Not
+implemented, and gated:** Step 10.8 found that nothing in the product consumes a
+musical key, so whether to build this at all is an open product decision. Treat
+the shape below as designed, not as agreed.
 
 **200 OK**
 

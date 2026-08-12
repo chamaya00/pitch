@@ -3,432 +3,438 @@
 > **Status: specification only. None of this is implemented.**
 >
 > Nothing described below exists in the repository. No table, column, endpoint,
-> service, schema, component or test named here has been written. This document
-> is the contract to build against; it is not a description of behaviour. Every
-> statement about what the repository *currently* does was verified by reading
-> the code, and is marked as evidence where it matters.
+> service, schema, component or test named here has been written.
 >
-> Written after the Step 10.7 audit. Phase 10 remains incomplete, and this
-> document does not change that.
+> **Phase 8 is blocked by a product decision.** See
+> [The decision gate](#the-decision-gate). Implementation must not begin until it
+> is answered.
 
-## Why this document exists
+## Revision history
 
-The roadmap's entire specification of Phase 8 is one table cell:
-
-> | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
-
-That is not enough to build from, and taken literally it is not buildable at
-all. Four of its five nouns turn out, on inspection, to describe an input this
-product does not have, work that is already delivered, or work the roadmap
-itself assigns to Phase 9. This document says which is which, on evidence, and
-specifies the part that remains.
-
-## The audit, first
-
-Searched across the whole repository (excluding `node_modules`, `.next`,
-`.venv`, `.git`, `__pycache__`, `package-lock.json`, `tsconfig.tsbuildinfo`)
-for: `bpm`, `tempo`, `beat_track`, `beat detection`, `key_detection`, `chroma`,
-`transpose`, `melody`, `song analysis`, `reference audio`, `compatibility`,
-`onset`, `librosa`.
-
-**No Phase 8 implementation exists, hidden, partial or otherwise.** Every hit
-is prose, and every hit says the same thing:
-
-| Location | What it is |
+| Step | What happened |
 | --- | --- |
-| `docs/roadmap.md:16` | The one-line scope above |
-| `docs/roadmap.md:77` | "Phase 8 has not started … verified by search, not assumed" |
-| `docs/architecture.md:625` | "**Phase 8 has not started** — no song analysis, key detection, BPM, melody extraction or transposition exists" |
-| `docs/limitations.md:364` | "Songs and mixed audio (Phase 8+)" — pitch detection on a full mix is less reliable |
-| `docs/limitations.md:371` | "Song compatibility (Phase 9+)" — range overlap is not an objective statement |
-| `README.md:53` | "Not implemented yet: vocal/instrument separation, song melody extraction, song key estimation, song compatibility, transpose recommendation" |
-| `requirements.txt:24`, `analyzer.py:16`, `detector.py:29` | librosa is *deliberately absent*, with reasons |
-| `audio-analysis-result.tsx:113`, `limitations.md:64,93,107,140` | "there is no reference melody to compare against" |
+| 10.7 | First specification. Audited the repository, found no Phase 8 implementation, and scoped Phase 8 to a melodic key estimator derived from the stored pitch timeline. |
+| 10.8 | Re-audited to resolve the blocking question 10.7 raised. **Two of 10.7's load-bearing claims did not survive re-inspection.** The key-estimation scope is no longer recommended on evidence; it is now a product decision. A second candidate scope was recovered from a deferral 10.7 got wrong. |
 
-There is no `chroma`, no `beat`, no `key_detection` and no `bpm` symbol anywhere
-in `backend/`, `frontend/` or `scripts/`. `tempo` matches only the word
-"temporary".
+### What 10.8 changed, and why
 
-### Three findings that shape everything below
+**Correction 1 — Phase 9 does not consume a musical key.**
 
-**1. There is no song.** The only input this system accepts is an uploaded
-recording: `.wav` or `.mp3` (`services/audio/validation.py:31`), decided by
-content and not by extension, ≤ `MAX_AUDIO_SIZE_MB` (50) and ≤
-`MAX_AUDIO_DURATION_SECONDS` (300). There is no reference-track upload, no song
-catalogue, no external music metadata provider, no vocal/instrument separation
-and no second audio input of any kind. A "song analyser" has nothing to analyse.
-What the repository actually holds is **one person's voice, usually
-unaccompanied**, which is a different signal with different properties.
+10.7 classified key estimation as *required* and BPM as *deferred*, and the whole
+asymmetry rested on one sentence: *"Phase 9's 'transpose suggestions' needs a key
+to transpose from."*
 
-**2. "range estimation" is already delivered.** `VocalRange` — lowest and
-highest *held* pitch, as frequency, note and semitone span — shipped in Step 7I
-and is documented in `docs/audio-analysis.md`. Phase 8 must not re-implement or
-"improve" it; a second range definition in the same product is the category
-error the architecture table exists to prevent.
+That is wrong, and the repository already said so. `docs/limitations.md:373`:
 
-**3. "transposition" and "compatibility" are Phase 9, by the roadmap's own
-table.** Row 9 reads "Song compatibility: range overlap, difficulty, transpose
-suggestions". They are named here only to be excluded.
+> A compatibility score compares **a detected range against an estimated song
+> range**.
 
-What is left of row 8 that is real, unbuilt, and buildable against the input
-this repository actually has: **the musical key implied by what was sung**, and
-the limitations messaging that must travel with it.
+Phase 9 is a **range** operation, not a key operation. Transposing a song to fit
+a singer shifts the song until its range sits inside the singer's range; the
+singer's own key on some unrelated recording is not an input to that at any
+point. `docs/roadmap.md:17` lists "range overlap" first for the same reason.
+
+The consequence is direct. 10.7 deferred BPM on three grounds, of which the
+second was *"nothing consumes it … Key does have a consumer; tempo has none."*
+With that distinction gone, **the same three grounds now apply to key**, and
+applying a rule to one feature and not to an identical one is the failure this
+document exists to prevent.
+
+**Correction 2 — the deferral of note events was based on a contradiction that
+does not exist.**
+
+10.7 deferred melody note events (D4) because building them "requires a minimum-
+duration threshold, and `notes.py` documents refusing exactly that threshold as
+*the one place the feature could have quietly lied*."
+
+Re-reading both modules, that is a misreading. `notes.py` refuses a *new,
+arbitrary* threshold on a **share-of-time table**, where deleting short notes
+would silently misreport percentages. It does not refuse the idea of a held
+pitch. The analyzer already has a held-pitch rule — `_sustained()`, with
+`MIN_RANGE_FRAMES = 5` and `RANGE_CONTINUITY_SEMITONES = 1.0`
+(`analyzer.py:104-106`) — which is documented, tested, and exists for precisely
+the question "is this a note somebody actually sang?" A note-event sequence built
+on **that** rule introduces no new threshold at all.
+
+So note events are cheaper and better-grounded than 10.7 judged, and they are
+now recorded as the alternative candidate scope.
 
 ---
 
-## A. Input source
+## 1. What the product can already do
 
-**Phase 8 analyses no audio.**
+Reconstructed by reading the code, not the roadmap. Every "yes" below is backed
+by a named test.
 
-This is the central design decision and everything downstream follows from it.
-The input is the **stored pitch timeline of a completed audio analysis** — the
-`pitch_points` already persisted in the `audio_analyses` JSONB document by Step
-7I.
+| # | Question | Answer | Where | Evidence |
+| --- | --- | --- | --- | --- |
+| **A** | Instantaneous pitch — is A4 ≈ 440 Hz? | **Yes**, three times over | `audio_analysis/detector.py` (backend, NSDF), `audio_analysis/pitch.py` (conversions), `frontend/lib/pitch-detector.ts` (live) | `test_440_hz_is_a4`, `test_440_hz_is_detected_as_a4` (within 5 cents), `test_a_held_a4_is_measured_as_a4` end to end through a real WAV |
+| **B** | A pitch timeline — C4 → E4 → G4 → E4 | **Yes**, at frame resolution | `AudioMetrics.pitch_points`, `GET …/audio-analysis/pitch` | `test_the_timeline_is_ordered_and_covers_the_recording`. Each point carries timestamp, Hz, MIDI, note name, cents and a measured confidence |
+| **C** | Lowest / highest detected pitch | **Yes** | `_vocal_range()` | `test_a_two_note_recording_reports_the_span_between_them` |
+| **D** | Vocal range | **Yes**, as *range in this recording* | `VocalRange` — Hz, note names, semitone span, over *held* pitches only | `test_a_momentary_glitch_does_not_widen_the_reported_range`. Never a physiological limit, everywhere |
+| **E** | Musical key | **No.** Nothing anywhere | — | Zero occurrences of `chroma`, `key_detection`, `pitch_class` in any source file |
+| **F** | Melody note events | **Partially, and not as events** | `notes.py` aggregates the timeline per note — but **sorted by duration, not by time**, so it is a histogram, not a sequence. `PitchGraph` draws the contour visually | `test_audio_notes.py`. No endpoint returns an ordered note sequence |
+| **G** | Any concept of an original / reference song | **No.** Categorically | — | `song` appears in code **only as a test upload filename** (`song.mp3`). `reference` never means a reference recording — it is A4 = 440 Hz, a loudness reference level, a foreign key, or a test's expected value |
+| **H** | Any way to compare singing against a reference melody | **No** | — | Four places in the shipped docs and one in the shipped UI say so outright: *"there is no reference melody to compare against"* (`limitations.md:64,93,107,140`, `audio-analysis-result.tsx:113`). The nearest thing is Live Practice's optional **target note** — a single user-chosen note, guaranteed by its own tests not to imply correctness |
+
+The honest summary: **this product measures pitch extremely well and has no
+musical context whatsoever.** It knows what you sang. It has no idea what you
+were trying to sing.
+
+---
+
+## 2. The concepts, kept apart
+
+"Key detection" and "pitch detection" are not the same thing, are not the same
+kind of thing, and must never be allowed to blur into each other in this
+codebase. Each row is one concept, one example, one status.
+
+| Concept | What it is | Example | Status here |
+| --- | --- | --- | --- |
+| **Frequency** | A physical measurement, in hertz. Continuous | `441.3 Hz` | Measured per frame |
+| **Pitch** | A frequency interpreted against a tuning reference — a note plus a deviation | `441.3 Hz → A4, +5 cents` | Measured. A4 = 440 Hz, 12-TET |
+| **Pitch class** | A note name with the octave discarded | `A4, A3, A5 → A` | **Does not exist** |
+| **Note event** | One held pitch with a start and an end. A *sequence* of these has order | `A4 from 0.42 s to 0.91 s` | **Does not exist as an event.** The frames exist; nothing groups them into ordered events |
+| **Melody** | The ordered sequence of note events | `A4 → B4 → C5` | Drawable from the timeline; **not returned as a sequence** |
+| **Vocal range** | The lowest and highest pitch *held* in one recording | `C4–A4, 9 semitones` | **Built** (Step 7I). Not a physiological limit |
+| **Musical key** | A *classification*: which tonic and mode a set of pitch classes best fits | `C major` | **Does not exist** |
+| **BPM / tempo** | Beats per minute — a rate, from onsets in time | `120 BPM` | **Does not exist** |
+| **Beat tracking** | *Where* the beats fall, in seconds | `0.5 s, 1.0 s, 1.5 s` | **Does not exist** |
+| **Reference song** | A second audio input, or a stored melody, to compare against | the original recording of a song | **Does not exist, and cannot be invented** |
+| **Transposition** | Shifting a *song* by *n* semitones so it fits a voice | `down 3 semitones` | Phase 9. Needs a reference |
+| **Compatibility** | Whether a singer's range overlaps a song's range | `your range covers 82% of it` | Phase 9. Needs a reference |
+
+Three distinctions carry the rest of this document:
+
+**Pitch is a measurement; key is a classification.** A pitch is arithmetic on a
+frequency — `midi = 69 + 12·log₂(f/440)` — and it is either right or wrong in a
+checkable way. A key is a *label* chosen by correlating a distribution against
+hand-authored profiles. `CLAUDE.md`'s non-negotiable list contains *"Do not label
+timbre ('bright', 'breathy') from unvalidated spectral numbers"*, and a key label
+is structurally the same move on different numbers. That does not make it
+forbidden — it makes it a decision somebody must take deliberately.
+
+**A pitch class is not a note, and a note is not a note event.** `A4` is a pitch;
+`A` is a pitch class (an octave's worth of information deliberately thrown away);
+`A4 from 0.42 s to 0.91 s` is an event. The existing note breakdown is at the
+*second* level and sorted by duration — it is a histogram, and calling it a
+melody would be a category error.
+
+**Range is not key.** The range is a pair of extremes. The key is a claim about
+tonal centre. A singer with a C4–A4 range could be singing in any key. Phase 9
+consumes the first and not the second.
+
+---
+
+## 3. Feature classification
+
+Classified against repository evidence only.
+
+| Feature | Classification | Evidence |
+| --- | --- | --- |
+| Instantaneous pitch | **Already built** (7H, 7I) | Detector, conversions, three test layers |
+| Pitch timeline | **Already built** (7I) | `pitch_points`, `GET …/pitch` |
+| Vocal range | **Already built** (7I) | `VocalRange`, held-pitch rule |
+| Pitch-class profile | **Product decision required** | Buildable and cheap, but exists only to feed a key estimate |
+| Musical key | **Product decision required** | See §4. No consumer, no validation path, and it is a label rather than a measurement |
+| Note events / melody sequence | **Candidate for Phase 8** | Named in the roadmap row; reuses an existing tested rule; no new threshold; the one gap in "can it show A4 → B4 → C5?" |
+| BPM / tempo | **Not supported by the current product** | Unaccompanied voice, no percussion, no consumer, no ground-truth fixture |
+| Beat tracking | **Not supported by the current product** | Strictly harder than BPM, with no consumer even hypothetically |
+| Chroma (spectral) | **Not supported by the current product** | Exists to recover harmony from polyphony. There is no polyphony here |
+| Melody extraction *from a song* | **Not supported by the current product** | There is no song |
+| Reference-song input | **Not supported by the current product** | No catalogue, no second input, no provider. **Must not be invented** |
+| Vocal separation | **Not supported by the current product** | Nothing to separate — the input is already one voice |
+| Transposition | **Phase 9** | `roadmap.md:17` |
+| Compatibility | **Phase 9** | `roadmap.md:17`, `limitations.md:371` |
+
+---
+
+## 4. The decision gate
+
+### Does "pitch timeline → pitch-class profile → musical key" make sense here?
+
+Answered against the eight questions this step asked, and the answers are not
+uniform.
+
+**What user problem does it solve?** None that the repository states. The
+repeated, documented complaint in this product — five separate places, four in
+the docs and one in the shipped UI — is *"there is no reference melody, so it
+cannot say whether the note was the right one."* A key estimate does not answer
+that. Knowing you sang in G major does not tell you whether G major was right.
+
+**What existing feature consumes the result?** **Nothing.** This is Correction 1.
+Phase 9 compares ranges, not keys.
+
+**Is there a UI use?** A card stating a fact. That is not disqualifying by itself
+— the product already reports spectral centroid and flatness with no action
+attached — but those are direct measurements of the signal, and this would be the
+first *classification with a label* in the system.
+
+**Does Phase 9 depend on it?** No. And Phase 9 is blocked anyway, on the
+reference input that does not exist.
+
+**Can it work meaningfully on an isolated vocal?** Only sometimes, and the
+measurements say when. Taken during Step 10.7, correlating pitch-class profiles
+against the standard key profiles:
+
+| Input | Best candidate | *r* | Margin over 2nd |
+| --- | --- | --- | --- |
+| Random weights | G minor | **+0.428** | 0.040 |
+| One held note — a hum | C major | **+0.684** | **0.000** |
+| Two pitch classes | C major | **+0.831** | 0.079 |
+| Chromatic wander | G♯ minor | +0.393 | 0.072 |
+| Bare C major scale, unweighted | C major | +0.756 | 0.044 |
+| C major melody, tonic/dominant heavy | C major | +0.966 | **0.246** |
+| A minor melody, same seven classes | A minor | +0.919 | **0.276** |
+
+- **A single hummed note** scores +0.684 for C major. Only a margin computed
+  against the next-best candidate *of any kind* catches it — its margin over a
+  different tonic is 0.248, indistinguishable from real music.
+- **Two pitch classes** score +0.831 with a margin above chromatic noise. No
+  correlation rule catches this; only a separate distinct-pitch-class gate does.
+- **Noise** scores +0.428. An estimator built the obvious way reports a confident
+  key for meaningless input.
+- **A bare, unweighted scale** has a margin of 0.044 against noise's 0.040 —
+  genuinely ambiguous between C major and A minor, and correctly unanswerable.
+
+So it works on a sung melody that uses most of a scale and leans on its tonic,
+and honestly refuses on everything else. That is a defensible feature. It is not
+an obviously valuable one for a product whose homepage says *"Hear how you
+speak."*
+
+**Computability is not usefulness.** All of the above is cheap, deterministic and
+provably correct against synthetic input. None of that establishes that anyone
+wants it.
+
+### The verdict
+
+Under this project's own rules, key estimation fails two tests and passes one:
+
+- ✗ **No consumer**, which is the exact ground on which BPM was deferred.
+- ✗ **A label, not a measurement**, never validated against human singing —
+  and §7 records that no corpus exists here to validate it with.
+- ✓ **Honest under-answering.** With the gates specified in §6 it refuses far
+  more often than it answers, which is the correct behaviour and is unusual
+  enough to be worth something.
+
+That balance is close, and *close is what makes it a product decision rather than
+an engineering one.* An engineer choosing here would be inventing a requirement.
+
+> ### Product decision required
+>
+> **Should VocalLens report an estimated musical key for a recording, as a
+> measurement in its own right, knowing that nothing consumes it, that it will
+> often answer "not measured", and that it cannot be validated against real
+> singing in this repository?**
+>
+> - **If yes** — §§5–12 below are complete and implementation may begin at
+>   Slice 1 with no further design work.
+> - **If no** — Candidate B (§13) is the better-evidenced Phase 8 and needs one
+>   short specification pass before it is buildable.
+> - **If neither** — Phase 8 is closed as "not supported by the current product",
+>   and the roadmap row is rewritten to say so. This is a legitimate outcome:
+>   three of its five nouns are already Phase 9 or already built.
+
+---
+
+## 5. Candidate A — musical key: scope and non-scope
+
+Everything from §5 to §12 specifies Candidate A. **It is fully specified and must
+not be built until the gate above is answered.**
+
+### Scope
+
+1. **Pitch-class profile** — twelve values, the share of voiced time spent on
+   each pitch class, folded from `PitchPoint.midi_note` modulo 12, hop-weighted,
+   normalised to sum to 1.
+2. **Key estimate** — tonic, mode, a measured confidence, and the runner-up.
+   `tonic: null` whenever the evidence gates are not cleared.
+3. **Limitations messaging** — named in the roadmap row, and not decoration:
+   §11 must ship with the feature or the feature must not ship.
+
+### Non-scope
+
+BPM · beat tracking · downbeats · spectral chroma · note events · melody
+extraction from a song · reference-song input · vocal separation · transposition
+· compatibility · key in the AI feedback payload · key as a progress series · key
+in comparison · enharmonic spelling (`pitch.py` documents that a lone frequency
+cannot supply it) · modal keys beyond major and minor.
+
+Two of those deserve their reasons restated, because they are the ones most
+likely to be re-proposed:
+
+**Key in the AI payload.** `services/ai/` is given measurements and returns
+prose; the audio prompt forbids timbre labels and scores. Handing it a key
+invites musical advice ("try singing in A instead") that nothing in this system
+can support. Deferred until the prompt rules for it are written first.
+
+**Key as a progress series.** `services/progress/sources.py` extracts scalars by
+JSON path from the stored document and cannot call a Python function. A
+key-over-time chart would force persistence, a migration and a version field that
+the storage design in §8 exists to avoid. That is the one trigger to revisit §8.
+
+---
+
+## 6. Candidate A — input, algorithm, outputs, confidence
+
+### Input
+
+**No audio is analysed.** The input is the **stored pitch timeline of a completed
+audio analysis** — the `pitch_points` already persisted in the `audio_analyses`
+JSONB document by Step 7I.
 
 | Question | Answer |
 | --- | --- |
-| What is analysed | `tuple[PitchPoint, ...]` from a completed `AudioAnalysis` |
-| Which component provides it | `services/audio_analysis/analyzer.py` → `postgres_repository.py` |
-| Which artefact holds it | `audio_analyses.document -> 'pitch_points'` |
-| Uploaded recording? | Only indirectly — it was decoded once, in Step 7I |
-| Extracted vocal track? | No. No separation exists and none is proposed |
-| Reference song? | No. No such input exists in this repository |
-| Formats | Not applicable; nothing is decoded |
-| Duration constraints | Inherited from upload: ≤ 300 s, so ≤ ~12 931 points at the default hop |
+| What is read | `tuple[PitchPoint, ...]` from a completed `AudioAnalysis` |
+| Which component provides it | `audio_analysis/analyzer.py` → `postgres_repository.py` |
+| Uploaded recording? | Only indirectly — decoded once, in Step 7I |
+| Reference song? | No. None exists |
+| Formats, duration | Nothing is decoded. Inherited: ≤ 300 s, so ≤ ~12 931 points |
 
-### Why not the audio
+Two alternatives were considered and rejected:
 
-Two alternatives were considered and both are rejected on repository evidence.
+**A second decode pass** would decode every recording twice and add a fourth copy
+of the JSON-document write discipline `architecture.md` already calls "deliberate
+and temporary" — its own orchestrator, staleness sweep, partial unique index and
+idempotency rules — to measure something derivable from data already on disk.
 
-**Rejected: a second decode pass.** A new analyzer that re-reads the file would
-decode every recording twice, add a fourth copy of the JSON-document write
-discipline that `docs/architecture.md` already calls "deliberate and temporary",
-and need its own orchestrator, staleness sweep, partial unique index and
-idempotency rules. All of that to measure something derivable from data already
-on disk.
+**Spectral chroma inside the existing pass** would be nearly free in CPU terms
+and is the textbook approach. It is rejected because it exists to recover
+*harmony* from polyphony and there is none here: on one unaccompanied voice its
+extra information is the singer's own harmonics, and the third harmonic lands a
+fifth above the fundamental, polluting a pitch class nobody sang. Revisit **only**
+if a polyphonic input ever exists in this product.
 
-**Rejected (for now): spectral chroma inside the existing pass.** Folding the
-magnitude spectrum `features.py:96` already computes into 12 pitch classes is
-nearly free in CPU terms and is the textbook approach. It is deferred anyway,
-for a reason specific to this input: spectral chroma exists to recover *harmony*
-from a polyphonic mix, and there is no polyphonic mix here. On one unaccompanied
-voice its extra information is the singer's own harmonics — the third harmonic
-lands a fifth above the fundamental and pollutes a pitch class nobody sang.
-Meanwhile it would need its own DSP path, its own thresholds and its own
-validation, in a codebase whose rule is that there is **one pitch detector and
-everything downstream aggregates it**. See D3 in section B for the condition
-that reopens this.
+Reading the timeline instead inherits, free, every guard that has tests behind
+it: the clarity gate, octave-outlier rejection, note conversion, and the
+`INSUFFICIENT_PITCH_SIGNAL` refusal. `notes.py` is the precedent, down to the
+docstring: *"It decodes nothing, detects nothing and re-measures nothing."*
 
-Deriving from the timeline instead means Phase 8 inherits, for free, every guard
-that has tests behind it: the clarity gate, the octave-outlier rejection, the
-note conversion, and the `INSUFFICIENT_PITCH_SIGNAL` refusal. `notes.py` is the
-existing precedent for exactly this, down to the docstring: *"It decodes
-nothing, detects nothing and re-measures nothing."*
-
-### When the input is unavailable
-
-Three distinct states, and they must stay distinct:
+**When the input is unavailable** — three states that must stay distinct:
 
 | Situation | Behaviour |
 | --- | --- |
-| Recording unknown, or belongs to another owner | `404` `RECORDING_NOT_FOUND` — one answer for both |
-| Recording exists, never analysed, or analysis pending/failed | `404` `AUDIO_ANALYSIS_NOT_FOUND` |
-| Analysis completed, timeline present, evidence insufficient | `200` with `key: null` and a stated reason |
+| Recording unknown, or another owner's | `404` `RECORDING_NOT_FOUND` — one answer for both |
+| Exists, never analysed, or pending / failed | `404` `AUDIO_ANALYSIS_NOT_FOUND` |
+| Completed, timeline present, evidence insufficient | `200`, `key: null`, with a stated reason |
 
-The third is **not an error**. It is the same shape of outcome as
+The third is **not an error**. It is the same shape as
 `INSUFFICIENT_PITCH_SIGNAL`: a normal answer meaning "the signal did not support
-this", which the UI renders as *not measured* rather than as a failure.
+this", rendered as *not measured*.
 
----
-
-## B. Analysis features, classified
-
-Each capability the task named, classified with the evidence for the
-classification. Nothing is included because it is conventional, and nothing is
-excluded because it is hard.
-
-### Required
-
-**R1 — Pitch-class profile.** Twelve numbers: the share of voiced time spent on
-each pitch class (C, C♯, … B), folded from `PitchPoint.midi_note` modulo 12 and
-weighted by hop duration, normalised to sum to 1.
-
-*Evidence:* it is the only thing a key can honestly be computed from here, it is
-a pure aggregation of an already-validated timeline, and it is a measurement in
-its own right that a reader can check the key label against. `notes.py` computes
-the same aggregation at semitone resolution and is trusted; this is that
-aggregation folded to twelve.
-
-**R2 — Key estimate.** Tonic, mode (major/minor), a measured confidence, and the
-runner-up candidate. `tonic: null` whenever the evidence gates in section C are
-not cleared.
-
-*Evidence:* it is the one noun in the roadmap row that is neither already built
-nor assigned to Phase 9, and it is the only Phase 8 output with a downstream
-consumer — Phase 9's "transpose suggestions" needs a key to transpose from.
-
-**R3 — Limitations messaging.** Named explicitly in the roadmap row. Not
-decoration: the measurement is weak by construction (see section L) and a bare
-label "G major" with no qualification would be the exact failure
-`CLAUDE.md` forbids — a label derived from numbers with no validated method
-behind it.
-
-### Optional
-
-**O1 — Rendering the pitch-class profile as a chart rather than a table.** The
-profile must be *shown* either way, so a reader can see the evidence behind the
-label; whether it is a bar chart or a table is presentation. Build the table
-first; the chart only if it costs nothing.
-
-That is the whole optional list, and its thinness is deliberate. Everything else
-that looked optional turned out to be either required or deferrable on evidence.
-
-### Explicitly deferred
-
-**D1 — BPM / tempo.** Deferred, on three independent grounds:
-
-1. *The input is wrong for it.* Unaccompanied voice has no percussion; onsets
-   are soft and often absent between slurred notes. Tempo from onset strength on
-   this signal is an estimate of an estimate.
-2. *Nothing consumes it.* Phase 9 is range overlap, difficulty and transpose
-   suggestions. None of the three needs a tempo. Key does have a consumer;
-   tempo has none anywhere in the roadmap.
-3. *It cannot be validated here.* No fixture in this repository has a
-   ground-truth tempo, and a synthetic click track would validate the algorithm
-   against an input the product never receives — which is proving the code runs,
-   not proving the feature works.
-
-**D2 — Beat tracking and downbeats.** Strictly harder than D1 and with the same
-three objections plus a fourth: no consumer exists even hypothetically.
-
-**D3 — Spectral chroma.** Deferred with a stated condition for revisiting: **the
-day a polyphonic input exists in this product** — a reference track, an
-accompaniment, or an uploaded song. On monophonic voice it adds harmonic
-pollution and a second DSP path for no information the timeline lacks.
-
-**D4 — Melody as note events.** A sequence of note events (onset, duration,
-pitch) is a pure aggregation of the timeline and looks like an easy win. It is
-deferred because building it requires a **minimum-duration threshold** to decide
-what counts as an event, and `notes.py` documents refusing exactly that
-threshold as *"the one place the feature could have quietly lied"*. Introducing
-it in a neighbouring module would put two contradictory rules about short notes
-in one codebase. If note events are wanted, that contradiction is the first
-thing to resolve, and it is a product decision (Unknown 5).
-
-**D5 — Transposition.** Phase 9, per `docs/roadmap.md:17`.
-
-**D6 — Song compatibility.** Phase 9, per `docs/roadmap.md:17` and
-`docs/limitations.md:371`.
-
-**D7 — Vocal/instrument separation, reference-song upload, song catalogue.** No
-such input exists; adding one is a phase of its own, not a step inside this one.
-
-**D8 — Key in the AI feedback payload.** `services/ai/` is given measurements
-and returns prose, and the audio prompt currently forbids timbre labels and
-scores. Feeding it a key would invite musical advice ("try singing in A instead")
-that nothing in this system can support. Deferred until the prompt rules for it
-are written down first.
-
-**D9 — Key as a progress series, and key in comparison.** Progress extracts
-scalars by JSON path from the stored document (`services/progress/sources.py`);
-a derived-on-read value is not reachable that way, so a key-over-time series
-would force persistence — see section D. Comparison is defined as subtraction
-over seven metrics with a documented "no better direction" discipline, and a key
-change is not a subtraction and has no direction.
-
----
-
-## C. Algorithm
-
-One required analysis, so one algorithm.
-
-### Input and output
+### Algorithm
 
 ```
-tuple[PitchPoint, ...]  ─┐
-hop_length, sample_rate ─┴─▶ pitch-class profile (12 floats, sum 1)
-                                      │
-                                      ▼
-                        24 correlations (12 tonics × 2 modes)
-                                      │
-                                      ▼
-                        KeyEstimate | tonic=None
+tuple[PitchPoint, ...] ──▶ pitch-class profile (12 floats, sum 1)
+                                    │
+                                    ▼
+                      24 correlations (12 tonics × 2 modes)
+                                    │
+                                    ▼
+                        KeyEstimate | tonic = None
 ```
 
-No IO. No numpy required (12 values). No provider. No new dependency —
-**the required dependency list for Phase 8 is empty.**
+No IO, no numpy, no provider, **no new dependency**.
 
-### Step 1 — the profile
+**Step 1 — the profile.** For each point, add one hop of duration to
+`midi_note % 12`, then divide by the total. Hop-weighted for the reason
+`notes.py` gives: frames overlap, so charging each its full length multiplies
+every duration. Deliberately **not** weighted by amplitude or confidence — either
+would create a second definition of "how much of this note was sung" alongside
+`notes.py`'s.
 
-For every point in the stored timeline, add one hop of duration to
-`midi_note % 12`, then divide by the total. Hop-weighted rather than
-frame-counted for the reason `notes.py` already gives: frames overlap, so
-charging each frame its full length multiplies every duration. Since every point
-carries exactly one hop, this is a count divided by a count — the hop cancels —
-but it must be *written* as time so it stays correct if the hop ever varies.
-
-Deliberately **not** weighted by amplitude or confidence. Both would introduce a
-second definition of "how much of this note was sung" alongside `notes.py`'s,
-for a quantity that is about which pitch classes were used rather than how
-loudly.
-
-### Step 2 — the key
-
-Correlate the profile against 24 rotated key profiles — 12 major, 12 minor —
-using the Pearson correlation, and take the highest.
-
-**Profile set: Temperley's revised Kostka–Payne weights, as the primary
-candidate.** They are derived from a music corpus rather than from probe-tone
-listening experiments, which is the closer match to "which pitch classes did
-this melody actually use". Krumhansl–Schmuckler's original weights are the
-documented alternative, and the implementation **must run both across the
-fixture set in section G and record which won and by how much**, in the manner
+**Step 2 — the key.** Pearson-correlate the profile against 24 rotated key
+profiles and take the highest. **Temperley's revised Kostka–Payne weights are the
+primary candidate**, being corpus-derived rather than probe-tone-derived, which
+is the closer match to "which pitch classes did this melody use". Krumhansl–
+Schmuckler is the documented alternative, and the implementation **must run both
+across the §9 fixtures and record which won and by how much**, as
 `docs/audio-analysis.md` records the clarity-threshold measurement. Neither is
 adopted on reputation.
 
-### Step 3 — confidence, and this is the part that matters
+**Step 3 — confidence.** The table in §4 is the specification here, and three
+rules follow from it directly:
 
-A raw correlation **does not separate a real key from noise**. Measured during
-this specification (`/tmp` scratch, not committed), correlating against the
-Krumhansl–Schmuckler profiles:
+1. **Confidence is a margin, never a raw correlation.** Noise scores +0.428 and a
+   hum scores +0.684; any threshold on raw *r* reports a key for a hum.
+2. **The margin is over the next-best candidate of any kind**, not the next-best
+   *different tonic*. The hum is the proof: 0.248 over a different tonic,
+   0.000 over the next candidate, because C major and C minor fit one note
+   equally well.
+3. **A margin alone is not enough.** Two pitch classes clear it. Two independent
+   **evidence gates** are required before any key is reported: a minimum number
+   of **distinct pitch classes** present above a small share of voiced time, and
+   a minimum total **voiced duration**. Both thresholds must be chosen by
+   sweeping the §9 fixtures and **recorded with their measurements**, exactly as
+   the 0.80 clarity threshold was. **Do not hard-code a guessed number.**
 
-| Profile fed in | Best candidate | Best *r* | Margin over 2nd | Margin over next *tonic* |
-| --- | --- | --- | --- | --- |
-| Uniform — every class equal | G♯ minor | +0.000 | 0.000 | 0.000 |
-| Random weights | G minor | **+0.428** | 0.040 | 0.040 |
-| Chromatic wander, all 12 present | G♯ minor | +0.393 | 0.072 | 0.072 |
-| One pitch class — a monotone hum | C major | **+0.684** | **0.000** | 0.248 |
-| Two pitch classes — C and G | C major | **+0.831** | 0.079 | 0.308 |
-| C major scale, unweighted | C major | +0.756 | 0.044 | 0.044 |
-| C major melody, tonic/dominant heavy | C major | +0.966 | **0.246** | 0.246 |
-| A minor melody, same seven classes | A minor | +0.919 | **0.276** | 0.276 |
+### Outputs
 
-Four things follow, and each one is a requirement:
+`KeyEstimate` — `tonic` (pitch-class name or `null`), `mode` (`major` | `minor`),
+`confidence` (the margin), `alternative` (the runner-up as the same shape).
+Alongside it: the twelve `PitchClassShare` values, `distinct_pitch_classes`,
+`voiced_seconds`, and `method` naming the profile set used. When `tonic` is
+`null`, an `unmeasured_reason` of `TOO_FEW_PITCH_CLASSES`,
+`TOO_LITTLE_VOICED_TIME` or `AMBIGUOUS`.
 
-1. **Random input scores +0.428 and a single held note scores +0.684.** Any
-   threshold on raw correlation reports a confident key for a hum. The reported
-   confidence is therefore a **margin**, never a raw correlation.
-2. **The margin must be over the next-best candidate of any kind**, not over the
-   next-best *different tonic*. The monotone hum is the proof: its margin over a
-   different tonic is 0.248 — indistinguishable from a real melody — while its
-   margin over the next candidate is exactly 0.000, because C major and C minor
-   fit one note equally well. The stricter definition catches it; the looser one
-   does not.
-3. **A margin alone is still not enough.** Two pitch classes score a margin of
-   0.079, above chromatic noise. Two independent **evidence gates** are
-   therefore required before any key is reported at all:
-   - a minimum number of **distinct pitch classes** present above a small share
-     of voiced time, and
-   - a minimum total **voiced duration**.
+### Known failure cases, to ship in the docs
 
-   Both thresholds must be chosen by sweeping the section G fixtures and
-   recorded with their measurements, exactly as the 0.80 clarity threshold was.
-   **Do not hard-code a guessed number.**
-4. **A bare, unweighted C major scale is genuinely ambiguous** — margin 0.044,
-   barely above random's 0.040 — because it shares all seven pitch classes with
-   A minor and emphasises neither tonic. Returning `null` there is *correct*, not
-   a miss. This is Unknown 3.
-
-### Quality criteria
-
-Measurable, and all achievable with fixtures that exist or can be synthesised:
-
-| Criterion | Target |
-| --- | --- |
-| Tonic and mode on tonic/dominant-weighted synthetic melodies in all 12 major and 12 minor keys | 24/24 exact |
-| Transposition invariance — the same melody shifted *n* semitones | tonic shifts by exactly *n*, mode and confidence unchanged within 1e-9 |
-| False positives on noise, hum, two-class and chromatic fixtures | 0 — every one returns `tonic: null` |
-| Determinism | byte-identical output for the same timeline across runs, including tie-breaks |
-| Wall clock, longest allowed recording | < 5 ms (see section H) |
-
-### Known failure cases, to be documented in the shipped docs
-
-- **No harmony is visible.** This is a melodic key estimate. A melody accompanied
-  by chords that imply a different key will be read as the melody's key.
-- **Modulation.** One estimate per recording. A recording that changes key
-  produces an average of both, which may be neither, and the margin will usually
-  fall below the gate — but not always.
-- **Relative major/minor.** They share seven pitch classes and are separated only
-  by which degrees are emphasised. Melodies that emphasise neither are ambiguous
-  by construction.
-- **Modal melodies.** Dorian, Mixolydian and the rest are forced into the nearest
-  major or minor, because the profile set contains only those two.
-- **Non-12-TET intonation.** Pitch classes come from `nearest_midi`, which
-  assumes equal temperament — the same caveat `docs/limitations.md` already
-  records for pitch accuracy.
-- **Very short or very sparse recordings.** Handled by the evidence gates, and
-  the reason they exist.
+- **No harmony is visible.** This is a *melodic* key estimate. A melody sung over
+  chords in another key is read as the melody's key.
+- **Modulation.** One estimate per recording; a modulating recording gets an
+  average that may be neither, and usually falls below the gate.
+- **Relative major / minor** share seven pitch classes and separate only by
+  emphasis. Melodies emphasising neither are ambiguous by construction.
+- **Modal melodies** are forced into the nearest major or minor.
+- **Non-12-TET intonation** is folded to the nearest equal-tempered pitch class —
+  the same caveat `limitations.md` already records for pitch accuracy.
+- **Short or sparse recordings** — handled by the gates, which is why they exist.
 - **Speech.** Most speech fails upstream with `INSUFFICIENT_PITCH_SIGNAL` and
-  never reaches this code. A monotone hum does reach it, and gate 3 is what stops
-  it producing "C major".
+  never arrives. A monotone hum does arrive, and gate 3 is what stops it becoming
+  "C major".
 
 ---
 
-## D. Storage
+## 7. Candidate A — storage
 
 **Nothing new is persisted. No migration. No table. No column. No index.**
 
-The key is **derived on read** from the stored pitch timeline, which is the
-existing precedent for `notes` — see `AudioAnalysisService.notes`: *"Derived
-from the stored pitch timeline on read rather than persisted alongside it: it is
-a pure function of points that are already on disk, and storing it too would be
-a second copy to keep consistent."*
-
-That precedent buys four things here:
+The key is **derived on read**, the precedent `AudioAnalysisService.notes` sets:
+*"Derived from the stored pitch timeline on read rather than persisted alongside
+it: it is a pure function of points that are already on disk, and storing it too
+would be a second copy to keep consistent."*
 
 | Property | Consequence |
 | --- | --- |
-| No migration | Nothing to review, checksum, or roll back |
+| No migration | Nothing to review, checksum or roll back |
 | No new ownership surface | Nothing new can leak, because nothing new is stored |
-| **Every existing completed analysis gains a key immediately** | No backfill, no re-analysis endpoint, no `?refresh`, no version field |
-| `null` is unambiguous | It always means "measured, insufficient evidence" — never "analysed before this existed" |
+| **Every existing completed analysis is answerable** | No backfill, no re-analysis endpoint, no `?refresh`, no version field |
+| `null` is unambiguous | Always "measured, insufficient evidence" — never "analysed before this existed" |
 
-The fourth is worth stating plainly, because the alternative was a real trap. Had
-the key been computed inside `SignalAudioAnalyzer` and stored in the document,
-`POST /audio-analysis` returns an already-completed analysis unchanged
-(`orchestration/audio_analysis.py:337`), so **no existing recording could ever
-have gained a key** — and `key: null` would have meant two different things with
-no way to tell them apart, in a codebase whose stated discipline is that `null`
-is a gap and never a zero.
+The last one avoided a real trap. Had the key been computed inside
+`SignalAudioAnalyzer` and stored, `POST …/audio-analysis` returns an
+already-completed analysis unchanged (`orchestration/audio_analysis.py:337`), so
+**no existing recording could ever have gained a key** — and `null` would have
+meant two different things with no way to tell them apart, in a codebase whose
+stated discipline is that `null` is a gap and never a zero.
 
-### Entities and ownership, unchanged
-
-```
-owners ──1:n──▶ recordings ──1:n──▶ audio_analyses
-   │                                      └─ document.pitch_points  ← read here
-   └── ON DELETE CASCADE, both levels
-```
-
-Ownership is enforced where it already is: in SQL, in the `WHERE` clause of the
-recording repository, reached through `AudioAnalysisService.current()` →
-`_require_owned()`. Phase 8 adds no query, so it cannot weaken one.
-
-Results are neither immutable nor replaceable: they are **not stored**.
-Recomputation is not "allowed", it is the only mode — every read recomputes from
-the same stored timeline and therefore returns the same answer.
-
-### The one condition that would force persistence
-
-If a key ever becomes a **progress series**, this decision must be revisited.
-`services/progress/sources.py` extracts scalars by JSON path from the document
-and cannot call a Python function; a key-over-time chart would require the value
-in the document, a migration for the projection, and the version field the
-current design avoids. That is deferred (D9) and this is the trigger to reopen it.
+Ownership is enforced where it already is: in the SQL `WHERE` clause of the
+existing recording read, via `AudioAnalysisService.current()` → `_require_owned()`.
+Phase 8 adds no query, so it can weaken no predicate. Results are neither
+immutable nor replaceable because they are not stored; every read recomputes from
+the same timeline and returns the same answer.
 
 ---
 
-## E. API contract
+## 8. Candidate A — API
 
 ### Existing endpoints, unchanged
 
-Every one of these keeps its current request, response, statuses and ownership
-behaviour. Phase 8 modifies none of them:
-
 `GET|DELETE /api/v1/identity` · `POST /api/v1/identity/credentials` ·
 `DELETE /api/v1/identity/credentials/{id}` · `POST /api/v1/recordings` ·
-`GET /api/v1/recordings` ·
-`GET /api/v1/recordings/{id}` · `GET /api/v1/recordings/progress` ·
-`GET /api/v1/recordings/compare` · `POST|GET /api/v1/recordings/{id}/analysis` ·
+`GET /api/v1/recordings` · `GET /api/v1/recordings/{id}` ·
+`GET /api/v1/recordings/progress` · `GET /api/v1/recordings/compare` ·
+`POST|GET /api/v1/recordings/{id}/analysis` ·
 `POST|GET /api/v1/recordings/{id}/audio-analysis` ·
 `GET /api/v1/recordings/{id}/audio-analysis/pitch` ·
 `GET /api/v1/recordings/{id}/audio-analysis/notes` ·
@@ -437,12 +443,11 @@ behaviour. Phase 8 modifies none of them:
 
 ### Proposed — one new endpoint
 
-#### `GET /api/v1/recordings/{recording_id}/audio-analysis/key` — Phase 8
+#### `GET /api/v1/recordings/{recording_id}/audio-analysis/key`
 
-**Method** `GET`. **Request** — no body, no query parameters. Identity is
-carried by `X-VocalLens-Owner` exactly as everywhere else.
+No body, no query parameters. Identity via `X-VocalLens-Owner`, as everywhere.
 
-**200 OK**, key measured:
+**200 OK**, measured:
 
 ```json
 {
@@ -462,7 +467,7 @@ carried by `X-VocalLens-Owner` exactly as everywhere else.
 }
 ```
 
-**200 OK**, evidence insufficient — the shape is identical and `key` is `null`:
+**200 OK**, evidence insufficient — identical shape, `key` is `null`:
 
 ```json
 {
@@ -475,507 +480,328 @@ carried by `X-VocalLens-Owner` exactly as everywhere else.
 }
 ```
 
-`unmeasured_reason` is one of `TOO_FEW_PITCH_CLASSES`, `TOO_LITTLE_VOICED_TIME`,
-`AMBIGUOUS`. It is a **reason, not an error code**: it never appears in the error
-envelope, is never an HTTP status, and is not added to `ErrorCode`. The
-measurements alongside it are always present, so a reader can see *why* the
-answer is "not measured" rather than being told to trust it.
-
-**Status codes and errors**
+`unmeasured_reason` is a **reason, not an error code**: never in the error
+envelope, never an HTTP status, not added to `ErrorCode`. The measurements are
+returned alongside it either way, so a reader can see *why* the answer is "not
+measured" rather than being asked to trust it.
 
 | Situation | Status | Code |
 | --- | --- | --- |
 | Measured, or measured and inconclusive | `200` | — |
 | Recording unknown, or another owner's | `404` | `RECORDING_NOT_FOUND` |
-| No completed audio analysis (never run, pending, or failed) | `404` | `AUDIO_ANALYSIS_NOT_FOUND` |
+| No completed audio analysis | `404` | `AUDIO_ANALYSIS_NOT_FOUND` |
 
-**No new error code is introduced.** Both 404s already exist and already mean
-exactly this.
+**No new error code.** Both already exist and already mean exactly this.
 
-**Ownership.** Identical to `/notes`: the owner is in the SQL `WHERE` clause, so
+**Ownership** — identical to `/notes`: the owner is in the SQL `WHERE` clause, so
 another owner's recording is never selected rather than selected and filtered.
 Somebody else's recording answers `404`, indistinguishable from one that does not
 exist. No `owner_id`, credential, hash or internal identifier appears in the
 response.
 
-**Idempotency and retry.** Safe, idempotent, side-effect free, cacheable in
-principle. Repeating it returns byte-identical output. It writes nothing, so a
-retry cannot double anything.
+**Idempotency** — safe, idempotent, side-effect free. Repeating it returns
+byte-identical output; it writes nothing, so a retry cannot double anything.
 
-**Synchronous.** No background task, no status field, no polling. Section H is
-the justification.
+**Synchronous** — no background task, status field or polling. §10 justifies it.
 
-**Rate limiting.** It is a read, so it is **not** charged against the costly-
-request limit — consistent with `/notes`, `/pitch`, comparison and progress. It
-does mint an identity if the key is absent, like every owner-scoped route, and
-so passes through the existing new-identity guard unchanged.
+**Rate limiting** — a read, so **not** charged against the costly-request limit,
+consistent with `/notes`, `/pitch`, comparison and progress.
 
-### Rejected alternative
-
-*Adding `key` to the `GET …/audio-analysis` summary.* It would save the frontend
-one request. It is rejected because `summary` mirrors the stored `AudioMetrics`
-document, and mixing a derived-on-read value into it blurs the stored/derived
-boundary that `/notes` was given its own path to keep clean. A reader of the
-summary should be able to assume everything in it was written by the analyzer.
+**Rejected alternative:** adding `key` to the `GET …/audio-analysis` summary. It
+saves one request, and is rejected because `summary` mirrors the stored
+`AudioMetrics` document; mixing a derived-on-read value into it blurs the
+stored/derived boundary `/notes` was given its own path to keep clean.
 
 ---
 
-## F. Frontend contract
+## 9. Candidate A — frontend
 
-No new page and no new route. One new card inside the existing audio-analysis
-result section (`components/audio-analysis/`), one new call in `lib/api.ts`, one
-new type in `types/api.ts` mirroring the schema by hand as the existing ones do.
-
-Six states, all required, all reachable in a browser:
+No new page, no new route. One card in the existing audio-analysis result
+section, one call in `lib/api.ts`, one hand-mirrored type in `types/api.ts`.
 
 | State | Trigger | What is shown |
 | --- | --- | --- |
-| **Loading** | request in flight | The section's existing loading treatment; no skeleton key label, ever |
-| **Measured** | `key` present | Tonic + mode, the confidence as a measurement with its definition attached, the runner-up, and the pitch-class evidence |
-| **Low confidence** | `key` present, confidence in the lowest reported band | The same card, with the weakness stated in words — **never a hidden or silently rounded-up number** |
-| **Not measured** | `key: null` | "Not measured", the `unmeasured_reason` in plain language, and the pitch-class table anyway |
-| **Unavailable** | `404 AUDIO_ANALYSIS_NOT_FOUND` | "This recording's audio has not been analysed yet" — the same treatment `/notes` already uses |
-| **Error** | any other failure | Handled inline by the panel via `lib/analysis-errors.ts`, exactly as today. It must **not** reach `app/error.tsx` — a handled API failure arriving at a boundary is a bug in the panel (Step 10.4) |
+| **Loading** | request in flight | The section's existing loading treatment. Never a skeleton key label |
+| **Measured** | `key` present | Tonic + mode, the confidence with its definition attached, the runner-up, and the pitch-class evidence |
+| **Low confidence** | confidence in the lowest reported band | The same card with the weakness stated in words — never hidden, never rounded up |
+| **Not measured** | `key: null` | "Not measured", the reason in plain language, and the pitch-class table anyway |
+| **Unavailable** | `404 AUDIO_ANALYSIS_NOT_FOUND` | "This recording's audio has not been analysed yet" — the treatment `/notes` already uses |
+| **Error** | any other failure | Handled inline via `lib/analysis-errors.ts`, as today. It must **not** reach `app/error.tsx` — a handled API failure arriving at a boundary is a bug in the panel (Step 10.4) |
 
-Empty state: a completed analysis with an empty timeline cannot occur — the
-analyzer raises `INSUFFICIENT_PITCH_SIGNAL` instead — so the endpoint answers
-`404` and the "unavailable" row covers it. No separate empty state is specified,
-and none must be invented.
+A completed analysis with an empty timeline cannot occur — the analyzer raises
+`INSUFFICIENT_PITCH_SIGNAL` instead — so no separate empty state exists, and none
+must be invented.
 
-Copy rules, non-negotiable and testable:
+Copy rules, testable:
 
 - The label is **"Estimated key of what was sung in this recording"**, never "the
-  key of the song" — there is no song.
-- The confidence is presented with its definition ("margin over the next-best
-  candidate"), never as a percentage of correctness and never as a grade.
-- Colour is never the only cue for confidence, matching the pitch meter's rule.
+  key of the song". There is no song.
+- Confidence carries its definition ("margin over the next-best candidate"),
+  never a percentage of correctness and never a grade.
+- Colour is never the only cue, matching the pitch meter's rule.
 - No transposition suggestion, no "you should sing in…", no difficulty claim.
-  Those are Phase 9 and they are not to be prototyped in copy.
 
 ---
 
-## G. Fixtures and validation
-
-This mirrors how Phase 2's detector was validated: **synthetic fixtures whose
-ground truth is true by construction**, plus adversarial fixtures whose correct
-answer is "no".
+## 10. Candidate A — fixtures, validation and performance
 
 ### There is no real-world reference dataset
 
-Stated explicitly, as required: **this repository contains no annotated
-real-world music, no key-labelled corpus, and no recording of a human being
-singing anything.** Every audio fixture in `backend/tests/` is synthesised —
-`harmonic_samples`, `noise_samples`, `silence_samples` in `tests/fixtures.py`.
-Nothing here validates the estimator against real singing, and no test may claim
-to. Acquiring a labelled corpus is out of scope for Phase 8 and would be its own
-piece of work with its own licensing questions.
+Stated plainly: **this repository contains no annotated real-world music, no
+key-labelled corpus, and no recording of a human being singing anything.** Every
+audio fixture is synthesised — `harmonic_samples`, `noise_samples`,
+`silence_samples` in `tests/fixtures.py`.
 
-What synthetic fixtures *can* prove: that the algorithm implements the algorithm,
-that it is transposition-invariant, that it is deterministic, and — most
-valuably — **that it refuses to answer when it should**.
+**Synthetic fixtures cannot validate human singing, and no test may claim they
+do.** What they can prove: that the algorithm implements the algorithm, that it
+is transposition-invariant, that it is deterministic, and — most valuably — that
+it refuses to answer when it should. Validating against real singing requires a
+labelled corpus with its own licensing questions, and acquiring one is not part
+of Phase 8.
 
-### Deterministic fixtures (built in Python, no audio)
+### The test plan
 
-These operate on constructed `PitchPoint` tuples, so they run in microseconds and
-test the aggregation and the correlation directly.
+**Already passing, and must not regress** (they are the foundation everything
+here stands on):
 
-| Fixture | Ground truth | Assertion |
+| # | Test | Where |
 | --- | --- | --- |
-| Tonic/dominant-weighted major melody, all 12 tonics | that tonic, major | exact tonic and mode, 12/12 |
-| Tonic/dominant-weighted minor melody, all 12 tonics | that tonic, minor | exact tonic and mode, 12/12 |
-| Any of the above shifted by *n* semitones, *n* = 1…11 | tonic + *n* mod 12 | tonic shifts exactly; confidence identical to 1e-9 |
-| Profile summing to 1 | — | the twelve shares sum to 100% within `PERCENTAGE_TOLERANCE` |
-| Same timeline, two runs | — | identical output including tie-break order |
+| 1 | `test_440_hz_is_a4` — the conversion | `test_audio_pitch_math.py:34` |
+| 1 | `test_440_hz_is_detected_as_a4` — within 5 cents of 440 | `test_audio_detector.py:53` |
+| 1 | `test_a_held_a4_is_measured_as_a4` — end to end through a real WAV | `test_audio_analyzer.py:63` |
+| 3 | Deterministic pitch extraction — same file, same numbers, and a full-signal round trip at four sample rates | `test_audio_detector.py`, `test_audio_analyzer.py` |
+| 3 | The same reference cases asserted independently in the browser implementation | `frontend/tests/pitch.test.ts` |
 
-### Adversarial fixtures — the ones that matter
+**New, deterministic** — constructed `PitchPoint` tuples, microseconds, no audio:
 
-Every one of these must return `tonic: null`. They are the false-positive suite,
-and they are drawn from the measurements in section C rather than imagined:
-
-| Fixture | Measured behaviour without gates | Required answer |
+| # | Fixture | Assertion |
 | --- | --- | --- |
-| One pitch class held throughout (a hum) | reports **C major at r = 0.684** | `null`, `TOO_FEW_PITCH_CLASSES` |
-| Two pitch classes only | reports **C major at r = 0.831** | `null`, `TOO_FEW_PITCH_CLASSES` |
-| Random weights across all 12 | reports **G minor at r = 0.428** | `null`, `AMBIGUOUS` |
-| Chromatic wander, all 12 near-equal | reports G♯ minor at r = 0.393 | `null`, `AMBIGUOUS` |
-| Uniform profile | ties at r = 0.000 | `null`, `AMBIGUOUS` |
-| Very short timeline (a handful of points) | — | `null`, `TOO_LITTLE_VOICED_TIME` |
-| Empty timeline | — | unreachable via the endpoint; the pure function returns `null` |
+| 4 | Pitch-class folding | `A3`, `A4`, `A5` all fold to `A`; shares sum to 100% within `PERCENTAGE_TOLERANCE` |
+| 5 | Tonic/dominant-weighted major melody, all 12 tonics | exact tonic and mode, 12/12 |
+| 5 | The same in minor, all 12 tonics | exact tonic and mode, 12/12 |
+| 2 | Transposition invariance, *n* = 1…11 | tonic shifts by exactly *n*; mode identical; confidence identical to 1e-9 |
+| 5 | Determinism | byte-identical output across runs, including tie-break order |
+
+**New, adversarial — the ones that matter.** Every one must return `tonic: null`,
+and each is drawn from a measurement in §4 rather than imagined:
+
+| # | Fixture | Measured behaviour without gates | Required answer |
+| --- | --- | --- | --- |
+| 7 | One pitch class held throughout (a hum) | **C major at r = 0.684** | `null`, `TOO_FEW_PITCH_CLASSES` |
+| 8 | Two pitch classes only | **C major at r = 0.831** | `null`, `TOO_FEW_PITCH_CLASSES` |
+| 9 | Random weights across all 12 | **G minor at r = 0.428** | `null`, `AMBIGUOUS` |
+| 10 | Chromatic wander, all 12 near-equal | G♯ minor at r = 0.393 | `null`, `AMBIGUOUS` |
+| 10 | Uniform profile | ties at r = 0.000 | `null`, `AMBIGUOUS` |
+| 6 | Very short timeline | — | `null`, `TOO_LITTLE_VOICED_TIME` |
+| 6 | Empty timeline | — | unreachable via the endpoint; the pure function returns `null` |
 
 **False negatives** are covered by the symmetric requirement: every fixture in
-the first table must *not* return `null`. A gate tuned until nothing passes is a
-gate that has broken the feature, and the two tables together are what catch that.
+the deterministic table must *not* return `null`. A gate tuned until nothing
+passes has broken the feature, and the two tables together are what catch that.
 
-### Audio fixtures (end to end, through the real analyzer)
-
-A small number, because they are slow and the deterministic set already covers
-the arithmetic. Written as real WAVs with `write_signal_wav`, decoded by the real
-decoder, analysed by the real analyzer, then keyed:
+**Audio, end to end** — few, because they are slow and the deterministic set
+covers the arithmetic. Real WAVs via `write_signal_wav`, real decoder, real
+analyzer:
 
 | Fixture | Assertion |
 | --- | --- |
-| A synthesised C-major arpeggio (C-E-G-C, tonic emphasised) | resolves to C major end to end |
+| Synthesised C-major arpeggio, tonic emphasised | resolves to C major end to end |
 | The same arpeggio transposed to F♯ | resolves to F♯ major |
-| White noise | analysis fails upstream with `INSUFFICIENT_PITCH_SIGNAL`; the endpoint answers `404` and never reaches the estimator |
+| White noise | fails upstream with `INSUFFICIENT_PITCH_SIGNAL`; the endpoint answers `404` and the estimator is never reached |
 
-### Proving it works rather than returning plausible values
+**Mutation**, in the manner of Steps 10.2–10.6. Each must make a named test fail,
+and the script must be run and its output recorded: reverse the major/minor
+profiles; drop the distinct-pitch-class gate; drop the voiced-time gate; change
+the margin from *next-best candidate* to *next-best different tonic* (the hum
+fixture catches this one); remove the hop weighting; remove the tie-break; return
+the second-best candidate.
 
-Three properties, none of which a plausible-but-wrong implementation can fake:
+### Performance
 
-1. **Transposition invariance.** A constant-output stub, a stub that always says
-   C major, and an implementation with a rotation bug all fail it.
-2. **The adversarial suite.** The measurements above show a naive implementation
-   scores 0.43–0.83 on meaningless input. A test suite without these fixtures
-   would pass against an estimator that is wrong on every real recording.
-3. **Mutation.** In the manner of Steps 10.2–10.6, each of the following must
-   make at least one named test fail, and the script must be run and its output
-   recorded: reverse the major/minor profiles; drop the distinct-pitch-class
-   gate; drop the voiced-time gate; change the margin from *next-best candidate*
-   to *next-best different tonic* (the hum fixture is what catches this one);
-   remove the hop weighting; remove the tie-break; return the second-best
-   candidate instead of the best.
-
----
-
-## H. Performance
-
-**Measured, on this machine, against the existing code** (scratch script, not
-committed):
+Measured on this machine against the **existing** code, with a throwaway
+prototype for the new part:
 
 | Operation | Points | Wall clock |
 | --- | --- | --- |
 | `summarise_notes` — the existing aggregation of the same timeline | 12 931 | **3.51 ms** |
 | Prototype pitch-class fold + all 24 correlations | 12 931 | **0.87 ms** |
 
-12 931 points is the **longest recording this product accepts** — 300 s at the
-default 0.0232 s hop. The proposed work is roughly a quarter of an aggregation
-the product already performs synchronously on every `/notes` request.
-
-Requirements that follow:
+12 931 points is the longest recording this product accepts — 300 s at the
+default hop. The proposed work is roughly a quarter of an aggregation the product
+already performs synchronously on every `/notes` request.
 
 | Question | Answer |
 | --- | --- |
-| Maximum acceptable processing time | **< 5 ms** at 12 931 points, asserted in a test with a generous ceiling so it fails on an algorithmic regression, not on machine noise |
-| Memory | 12 floats plus 24 correlations. The timeline is already in memory, loaded by the existing repository read |
-| Synchronous or background | **Synchronous.** A background task, a status field and a polling client for 0.87 ms of arithmetic would be infrastructure with no measurement behind it |
-| Duration limits | Inherited: ≤ 300 s. No new limit |
-| Caching | **None.** The result is a deterministic function of a row that is already read; a cache would be a second copy to invalidate for under a millisecond of work |
-| Redis, Celery, workers, queues | **None. Not now and not as a follow-up** — there is no measurement that would justify one |
+| Maximum acceptable time | **< 5 ms** at 12 931 points, asserted with a generous ceiling so it fails on an algorithmic regression, not machine noise |
+| Memory | 12 floats plus 24 correlations. The timeline is already in memory |
+| Synchronous or background | **Synchronous.** A background task, status field and polling client for 0.87 ms of arithmetic is infrastructure with no measurement behind it |
+| Caching | **None.** A deterministic function of a row already read |
+| Redis, Celery, workers, queues | **None**, now or as follow-up. No measurement would justify one |
 
-The honest caveat: the dominant cost of this endpoint is **loading the analysis
-document**, not the arithmetic — the same JSONB read `/notes` already performs,
-and `docs/architecture.md` records that a document grows with recording length
-(200 owners × 50 two-minute recordings: 676 ms and 18 MB reading documents versus
-125 ms and 14 KB extracting scalars). Phase 8 adds one such read per key request.
-If that becomes the problem, the fix is the same one progress already uses, and
-it is not a Phase 8 concern.
+The honest caveat: the dominant cost is **loading the analysis document**, not
+the arithmetic — the same JSONB read `/notes` already performs. If that becomes
+the problem the fix is the one progress already uses, and it is not a Phase 8
+concern.
 
 ---
 
-## I. Security and ownership
-
-Short, because nothing new is stored and nothing new is spent.
+## 11. Candidate A — security, ownership, providers
 
 | Question | Answer |
 | --- | --- |
 | New persisted objects | **None** |
 | Owner relationship | Unchanged: `owners → recordings → audio_analyses`, cascade at both levels |
-| How cross-owner access is prevented | The owner is in the SQL `WHERE` clause of the existing recording read, reached through `_require_owned`. Phase 8 adds no query and can therefore weaken no predicate |
+| Cross-owner access | Owner in the SQL `WHERE` clause of the existing read, via `_require_owned`. No new query, so no predicate can be weakened |
 | What another owner sees | `404`, identical to a recording that does not exist |
-| Deletion behaviour | Unchanged. `DELETE /identity` removes files then rows; a derived value has nothing to delete and cannot survive its source |
-| Retention behaviour | Unchanged. Step 10.6's predicate is "owns no recordings"; Phase 8 creates no recording and no row, so no identity's eligibility changes |
+| Deletion | Unchanged. A derived value has nothing to delete and cannot survive its source |
+| Retention | Unchanged. Step 10.6's predicate is "owns no recordings"; this creates no row |
 | Audio or reference files stored | **None.** Nothing is decoded, written or uploaded |
-| Identity seam | Untouched. The route takes `owner_id` from the resolver dependency and passes it to a domain service, like every other route |
-| SQL | No new SQL. The existing parameterised query is reused; nothing is interpolated |
-| Exposed identifiers | `owner_id`, credential ids, hashes and internal state appear nowhere in the response |
-| New privacy risk | **One, and it is small:** the pitch-class profile is a slightly more compact description of the singing than the note breakdown already returned at `/notes` on the same ownership terms. It reveals nothing `/notes` does not |
-| New cost risk | None. No provider, no model, no billable call, no disk write |
-| Logging | Event-name + `extra` as elsewhere. Log the recording id and the outcome; **never** the owner id, the client address, or a key |
+| Identity seam | Untouched. The route takes `owner_id` from the resolver dependency |
+| SQL | No new SQL. Nothing interpolated |
+| Exposed identifiers | `owner_id`, credential ids, hashes and internal state appear nowhere |
+| New privacy risk | **One, small:** the pitch-class profile is a more compact description of the singing than the note breakdown `/notes` already returns on the same terms. It reveals nothing `/notes` does not |
+| New cost risk | None. No provider, model, billable call or disk write |
+| Logging | Event name + `extra`. Log the recording id and the outcome; **never** the owner id, client address, or a key |
+
+**External and billable providers: none.** No new dependency, no API key, no
+environment variable, no configuration. The two gate thresholds and the profile
+choice are **constants with recorded measurements**, like
+`DEFAULT_CLARITY_THRESHOLD` — nothing needs to vary them per deployment, and a
+setting would be a knob nobody can calibrate. Deepgram and Anthropic are
+untouched; key is never sent to a model, so Phase 8 cannot increase model spend.
+There is no external call that can fail.
 
 ---
 
-## J. Billable and external providers
+## 12. Candidate A — limitations, done, and slices
 
-**Phase 8 requires none.**
-
-- No new dependency in `requirements.txt` — the required scope needs 12 floats
-  and a correlation.
-- No external service, no API key, no credential, no new environment variable.
-- No new configuration is proposed. The two gate thresholds and the profile-set
-  choice are **constants with recorded measurements**, in the manner of
-  `DEFAULT_CLARITY_THRESHOLD`, not settings — nothing in the product needs to
-  vary them per deployment, and a setting would be a knob nobody can calibrate.
-- Deepgram and Anthropic are untouched. Key is not sent to a model (D8), so
-  Phase 8 cannot increase anybody's model spend.
-- Failure behaviour: not applicable. There is no external call that can fail.
-
-If a later slice ever needs a provider — a song catalogue, an audio-fingerprint
-service — that is a new specification with its own credential handling, cost
-controls and failure behaviour, and it is not this one.
-
----
-
-## K. Definition of done
-
-Executable without interpreting the roadmap. Every box is checkable.
-
-**Backend**
-
-- [ ] `services/audio_analysis/key.py` — pure functions: profile from a timeline,
-      key from a profile. No IO, no numpy, no decoder, no provider import.
-- [ ] Frozen pydantic models for `KeyEstimate`, `PitchClassShare` and the
-      unmeasured reason, in `services/audio_analysis/models.py` beside
-      `NoteSummary`.
-- [ ] `AudioAnalysisService.key(recording_id, owner_id)` mirroring `.notes()`,
-      returning `None` when there is no completed analysis.
-- [ ] Both profile sets implemented and compared; the loser and its margin
-      recorded in the docs. Thresholds chosen from the fixture sweep, each with
-      its measurement written down beside it.
-- [ ] `ruff check`, `ruff format --check`, `mypy app` clean.
-
-**Database**
-
-- [ ] **No migration.** `git diff` touches no file in `app/db/migrations/`.
-- [ ] Confirmed: the endpoint issues no new SQL, and adds no query to any
-      repository.
-
-**API**
-
-- [ ] `GET /api/v1/recordings/{id}/audio-analysis/key` as specified in section E.
-- [ ] Response schema in `app/schemas/`, mirroring the domain models.
-- [ ] `404 RECORDING_NOT_FOUND` for another owner's recording; `404
-      AUDIO_ANALYSIS_NOT_FOUND` with no completed analysis. **No new error code.**
-- [ ] `docs/api.md` updated: the endpoint moved out of "Planned" into the
-      implemented section, with the null-shape documented.
-
-**Frontend**
-
-- [ ] Type in `types/api.ts`, call in `lib/api.ts`, card in
-      `components/audio-analysis/`.
-- [ ] All six states from section F implemented.
-- [ ] The pitch-class evidence is shown in every state where it exists,
-      including when `key` is `null`.
-- [ ] Copy passes the section F rules — no "the key of the song", no
-      transposition, no difficulty, no grade.
-- [ ] `npm run lint`, `npm run typecheck`, `npm run build` clean.
-
-**Tests**
-
-- [ ] Every deterministic fixture in section G, passing.
-- [ ] Every adversarial fixture returning `tonic: null` with the right reason.
-- [ ] The transposition-invariance property across all 12 tonics and both modes.
-- [ ] The audio end-to-end fixtures.
-- [ ] The ownership test: owner B gets `404` for owner A's recording — added to
-      `tests/test_ownership_api.py` beside the existing per-endpoint cases.
-- [ ] The performance assertion at 12 931 points.
-- [ ] The mutation script from section G run, its output recorded, and every
-      listed mutation shown to fail a named test.
-- [ ] **No existing test deleted, skipped, loosened or re-parametrised.**
-
-**Browser verification**
-
-- [ ] Measured state: upload a synthesised melody, analyse it, see the key card
-      with a tonic, a mode, a confidence and the pitch-class evidence.
-- [ ] Not-measured state: upload a monotone hum, see "Not measured" with a
-      reason — **and confirm no key label is rendered anywhere on the page**.
-- [ ] Unavailable state: open a recording with no audio analysis, see the
-      unavailable treatment, not an error.
-- [ ] Confirm the browser console shows no uncaught error in any of the three,
-      and that `app/error.tsx` was not reached.
-- [ ] Mobile width and both colour schemes.
-
-**Ownership and security**
-
-- [ ] Response contains no `owner_id`, credential id, hash or internal state.
-- [ ] No new SQL, and nothing interpolated into any query.
-- [ ] Identity resolver seam untouched; the route takes `owner_id` from the
-      dependency and nothing else.
-- [ ] Deletion and retention behaviour verified unchanged by their existing
-      suites.
-
-**Performance**
-
-- [ ] < 5 ms at 12 931 points, measured and recorded.
-- [ ] No Redis, no queue, no worker, no cache, no background task added.
-
-**Documentation**
-
-- [ ] `docs/audio-analysis.md` — a "Musical key" section: the algorithm, the
-      profile set and the one that lost, both thresholds with their measurements,
-      and what didn't work.
-- [ ] `docs/limitations.md` — section L below, in the shipped voice.
-- [ ] `docs/architecture.md` — a row in the feature-allocation table with its
-      "Not" column filled in, and the "Phase 8 has not started" line corrected.
-- [ ] `docs/roadmap.md` — Phase 8 status and its delivered/not-delivered list.
-- [ ] `README.md` — the "Not implemented yet" line updated to remove only what
-      actually shipped.
-- [ ] This file marked superseded, not deleted.
-
----
-
-## L. What Phase 8 will not solve
+### What it will not solve
 
 To be carried into `docs/limitations.md` when the phase lands:
 
-- **It does not analyse songs.** There is no song in this product. It reports the
-  key implied by what one person sang into one microphone.
-- **It cannot hear harmony.** The estimate comes from a monophonic pitch
-  timeline. A melody sung over chords in another key is read as the melody's key.
-- **It is not a claim that you sang in that key correctly**, or at all well. It
-  is a description of which pitch classes were used and how they were weighted.
-- **It cannot distinguish relative major from relative minor** when the melody
-  emphasises neither tonic. In that case it says so rather than guessing.
+- **It does not analyse songs.** There is no song. It reports the key implied by
+  what one person sang into one microphone.
+- **It cannot hear harmony.** A melody sung over chords in another key is read as
+  the melody's key.
+- **It is not a claim that you sang in that key correctly**, or well.
+- **It cannot separate relative major from relative minor** when the melody
+  emphasises neither. It says so rather than guessing.
 - **It assumes equal temperament**, like every other pitch measurement here.
-  Non-Western intonation is folded into the nearest 12-TET pitch class.
 - **It reports one key per recording.** Music that modulates gets an average, and
   usually gets "not measured".
-- **It is not validated against real singing.** Every fixture behind it is
-  synthetic. No annotated corpus exists in this repository.
-- **It gives no tempo, no beat, no melody transcription, no transposition and no
-  compatibility judgement.** Those are D1–D6, and three of them are Phase 9.
-- **It has no opinion.** No model sees it, no advice is generated from it, and
-  there is no field in the response that could hold a score.
+- **It is not validated against real singing.** Every fixture is synthetic.
+- **It gives no tempo, beat, melody transcription, transposition or
+  compatibility judgement.**
+- **It has no opinion.** No model sees it, no advice comes from it, and no field
+  in the response could hold a score.
+
+### Definition of done
+
+**Backend** — `services/audio_analysis/key.py` as pure functions (no IO, numpy,
+decoder or provider import); frozen models beside `NoteSummary`;
+`AudioAnalysisService.key()` mirroring `.notes()`; both profile sets raced and
+the loser recorded; both thresholds chosen from the fixture sweep with their
+measurements written down; ruff, ruff format and mypy strict clean.
+
+**Database** — **no migration.** `git diff` touches nothing in
+`app/db/migrations/`, and the endpoint issues no new SQL.
+
+**API** — the endpoint of §8; schema in `app/schemas/`; both `404`s; **no new
+error code**; `docs/api.md` moved out of "Planned".
+
+**Frontend** — type, client call, card; all six states of §9; the pitch-class
+evidence shown in every state where it exists, including `null`; copy passing the
+§9 rules; lint, typecheck and build clean.
+
+**Tests** — every fixture in §10; the transposition property across 12 tonics and
+both modes; the ownership test in `test_ownership_api.py`; the performance
+assertion; the mutation script run and its output recorded; **no existing test
+deleted, skipped, loosened or re-parametrised.**
+
+**Browser** — measured state (a synthesised melody shows tonic, mode, confidence
+and evidence); not-measured state (a hum shows a reason, **and no key label
+anywhere on the page**); unavailable state (a recording with no analysis shows
+the unavailable treatment, not an error); console clean in all three;
+`app/error.tsx` not reached; mobile width and both colour schemes.
+
+**Security** — no `owner_id`, credential id, hash or internal state in the
+response; no new SQL and nothing interpolated; identity seam untouched; deletion
+and retention verified unchanged by their existing suites.
+
+**Performance** — < 5 ms at 12 931 points, measured and recorded; no Redis,
+queue, worker, cache or background task added.
+
+**Documentation** — `audio-analysis.md` gains a "Musical key" section with the
+algorithm, the profile set and the one that lost, both thresholds with their
+measurements, and what didn't work; `limitations.md` gains the section above;
+`architecture.md` gains a feature-allocation row with its "Not" column filled and
+its "Phase 8 has not started" line corrected; `roadmap.md` and `README.md`
+updated; this file marked superseded, not deleted.
+
+### Implementation slices
+
+| # | Purpose | Files | Tests | Browser | Acceptance | Depends on |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Pure domain: profile + estimator | `audio_analysis/key.py`, `models.py`, `tests/test_audio_key.py` | Every deterministic and adversarial fixture; both profile sets raced; the threshold sweep run and recorded | — | 24/24 tonics, invariance to 1e-9, every adversarial fixture `null` with the right reason, thresholds justified by recorded measurements | — |
+| 2 | `AudioAnalysisService.key()` | `orchestration/audio_analysis.py`, `test_audio_analysis_orchestration.py` | `None` for pending/failed/absent; `RECORDING_NOT_FOUND` for another owner; estimate for a completed one, driven by the existing stub analyzer | — | No new repository method, no new SQL, ownership passes through a substituted resolver | 1 |
+| 3 | The endpoint | `routes/audio_analysis.py`, `schemas/audio_analysis.py`, `test_audio_analysis_api.py`, `test_ownership_api.py`, `docs/api.md` | Both `200` shapes; both `404`s; another owner gets the same `404`; response asserted free of `owner_id`; asserted not to consume costly-request quota | `curl` through the running stack | `docs/api.md` documents the `null` shape and `unmeasured_reason`; no `ErrorCode` member added | 2 |
+| 4 | The UI | `types/api.ts`, `lib/api.ts`, `components/audio-analysis/`, `frontend/tests/` | Presentation logic under `node --test`, including that a `null` key never renders a tonic | All three scenarios, both widths, both schemes, console checked | Every state reached deliberately; no handled failure reaches `app/error.tsx` | 3 |
+| 5 | Performance and mutation | `tests/test_audio_key.py`, a mutation script kept outside the repository | The 12 931-point ceiling; every mutation shown to fail a named test | — | If a mutation passes, the test is strengthened and the mutation re-run before the slice is done | 1–3 |
+| 6 | Documentation | the six files above | — | — | Limitations in the shipped voice; architecture row filled; "has not started" corrected; this file superseded, not deleted | 1–5 |
 
 ---
 
-## M. Implementation order
+## 13. Candidate B — melody note events
 
-Six slices. Each is independently reviewable, each leaves the suite green, and
-each states what the next one may assume.
+Recorded at enough depth to choose between the candidates. **Not fully specified;
+it needs one short design pass if it is selected.**
 
-### Slice 1 — the pure domain
+**The gap it closes.** "If I sing A4 → B4 → C5, can the system show that
+sequence?" Today: the frames exist and the graph draws them, but `notes.py`
+returns a histogram **sorted by duration, not by time**, and no endpoint returns
+an ordered sequence. A note-event sequence is the missing piece, and *melody* is
+named in the roadmap row.
 
-*Purpose.* The profile and the estimator, as pure functions over a timeline.
-Nothing else exists yet, and nothing can call them.
+**Why 10.7 was wrong to defer it.** See Correction 2. There is no new threshold:
+the analyzer's `_sustained()` rule — ≥ 5 consecutive frames within 1 semitone,
+`MIN_RANGE_FRAMES` and `RANGE_CONTINUITY_SEMITONES` at `analyzer.py:104-106` — is
+documented, tested, and exists to answer exactly "is this a note somebody sang?"
 
-*Files.* `backend/app/services/audio_analysis/key.py`,
-`models.py` (new frozen models), `backend/tests/test_audio_key.py`.
+**Sketch.** Input: the same stored timeline. Output: an ordered
+`tuple[NoteEvent, ...]` of `note_name`, `midi_note`, `start_seconds`,
+`end_seconds`, `frame_count`, `average_cents`. Derived on read, like `/notes`, so
+the storage, ownership, deletion and retention analysis in §7 and §11 carries over
+unchanged. One endpoint, `GET …/audio-analysis/melody`.
 
-*Tests.* Every deterministic fixture and every adversarial fixture from section
-G. Both profile sets compared; the sweep that sets both thresholds run and its
-numbers recorded in the test file's docstring.
+**The one design task before it is buildable.** `_sustained()` lives in
+`analyzer.py` and uses numpy; `notes.py` deliberately avoids importing numpy *"so
+aggregating a timeline does not drag numpy and a decoder in behind it"*. The rule
+must therefore be re-expressed in pure Python, and the constants moved to
+`models.py` and imported from there — the precedent `IN_TUNE_CENTS` already sets,
+with the comment saying why. Re-stating the numbers in two places is the drift
+this codebase explicitly guards against.
 
-*Browser.* None — nothing is reachable.
-
-*Acceptance.* 24/24 tonics, transposition invariance to 1e-9, every adversarial
-fixture `null` with the correct reason, deterministic across runs, and the
-chosen thresholds justified by recorded measurements rather than asserted.
-
-*Depends on.* Nothing.
-
-### Slice 2 — the service method
-
-*Purpose.* `AudioAnalysisService.key()`, mirroring `.notes()` exactly:
-ownership through `current()`, `None` when there is no completed analysis.
-
-*Files.* `services/orchestration/audio_analysis.py`,
-`tests/test_audio_analysis_orchestration.py`.
-
-*Tests.* Returns `None` for pending, failed and absent analyses; raises
-`RECORDING_NOT_FOUND` for another owner's recording; returns an estimate for a
-completed one. Driven with the existing stub analyzer, so no audio is decoded.
-
-*Browser.* None.
-
-*Acceptance.* No new repository method, no new SQL, and the ownership tests pass
-against a substituted resolver as `tests/test_resolver.py` already requires.
-
-*Depends on.* Slice 1.
-
-### Slice 3 — the endpoint
-
-*Purpose.* `GET …/audio-analysis/key`, with its schema.
-
-*Files.* `api/v1/routes/audio_analysis.py`, `app/schemas/audio_analysis.py`,
-`tests/test_audio_analysis_api.py`, `tests/test_ownership_api.py`, `docs/api.md`.
-
-*Tests.* Both `200` shapes; both `404`s; another owner gets the same `404` as a
-missing recording; the response is asserted to contain no `owner_id` and no
-credential field; the endpoint is asserted **not** to consume costly-request
-quota.
-
-*Browser.* `curl` through the running stack is enough at this slice.
-
-*Acceptance.* `docs/api.md` documents the endpoint including the `key: null`
-shape and `unmeasured_reason`; no `ErrorCode` member added.
-
-*Depends on.* Slice 2.
-
-### Slice 4 — the UI
-
-*Purpose.* The key card, all six states.
-
-*Files.* `frontend/types/api.ts`, `lib/api.ts`,
-`components/audio-analysis/`, `frontend/tests/`.
-
-*Tests.* The presentation logic as plain TypeScript under `node --test`, as the
-existing frontend tests are — including that a `null` key never renders a tonic
-anywhere in the output.
-
-*Browser.* All three verification scenarios in section K, at desktop and mobile
-width, in both colour schemes, with the console checked.
-
-*Acceptance.* Every state reached deliberately rather than assumed; no handled
-API failure reaches `app/error.tsx`.
-
-*Depends on.* Slice 3.
-
-### Slice 5 — performance and mutation
-
-*Purpose.* Prove it is fast and prove the tests bite.
-
-*Files.* `backend/tests/test_audio_key.py`, a mutation script kept outside the
-repository.
-
-*Tests.* The 12 931-point ceiling. Every mutation in section G shown to fail a
-named test, with the output recorded in the step's report.
-
-*Browser.* None.
-
-*Acceptance.* If any mutation passes, the test that should have caught it is
-strengthened and the mutation re-run before the slice is called done.
-
-*Depends on.* Slices 1–3.
-
-### Slice 6 — documentation
-
-*Purpose.* Make the shipped behaviour findable and its limits unavoidable.
-
-*Files.* `docs/audio-analysis.md`, `docs/limitations.md`,
-`docs/architecture.md`, `docs/roadmap.md`, `README.md`, this file.
-
-*Acceptance.* Section L is in `limitations.md` in the shipped voice; the
-architecture feature table has a row with its "Not" column filled; the "Phase 8
-has not started" claims are corrected; this file is marked superseded rather
-than deleted, so the reasoning behind the deferrals survives.
-
-*Depends on.* Slices 1–5.
+**What it is not.** Not musical transcription, not rhythm, not note *values*
+(crotchets and quavers need a tempo, which is deferred), not a melody extracted
+from a song, and not a claim that any note was correct.
 
 ---
 
-## Unknowns that need a product decision
+## 14. Open questions
 
-These are not implementation details and must not be resolved by whoever writes
-the code.
+Beyond the decision gate in §4, these need a product answer rather than an
+implementation choice:
 
-1. **Is a melodic key estimate what Phase 8 was for at all?** The roadmap says
-   "song analyser". There is no song, and there is no plan in this repository for
-   acquiring one. If the intent was always to analyse an uploaded backing track
-   or a reference recording, then Phase 8 as specified here is the wrong feature
-   and the right one starts with an input this product does not accept. **This is
-   the decision everything else depends on.**
-2. **Is a weak measurement worth shipping?** On unaccompanied voice this will
-   answer "not measured" often — correctly. A feature whose honest answer is
-   frequently "no" may still be worth having, or may not.
-3. **Relative major/minor: pick one, or show both?** They share seven pitch
-   classes. The specification currently returns `null` when they cannot be
-   separated. Showing "G major or E minor" is more informative and less decisive;
-   both are defensible and the choice is editorial.
-4. **How is low confidence presented?** Shown with the weakness stated, or
-   withheld entirely below a second, higher bar. Section F assumes the former.
-5. **Should note events (D4) be built, and if so what resolves the
-   minimum-duration contradiction** with `notes.py`'s deliberate refusal of such
-   a threshold?
-6. **Does Phase 9 still start from here?** Its "transpose suggestions" need a key
-   *and* a reference song's key. This delivers the first and not the second, so
-   Phase 9 remains blocked on Unknown 1 regardless of what is built here.
+1. **Is a weak measurement worth shipping?** On unaccompanied voice, key
+   estimation will often answer "not measured" — correctly. A feature whose
+   honest answer is frequently "no" may still be worth having.
+2. **Relative major / minor: pick one, or show both?** The specification returns
+   `null` when they cannot be separated. "G major or E minor" is more informative
+   and less decisive. Both are defensible; the choice is editorial.
+3. **How is low confidence presented?** Shown with the weakness stated, or
+   withheld below a second, higher bar. §9 assumes the former.
+4. **Does Phase 9 have a future at all in this product?** It needs a reference
+   song's range. Nothing in this repository provides one, nothing plans to, and
+   §8 of the Step 10.8 brief forbids inventing one. Until that is answered,
+   Phase 9 is not merely unbuilt — it is unbuildable, and both Phase 8 candidates
+   stand alone rather than leading anywhere.
