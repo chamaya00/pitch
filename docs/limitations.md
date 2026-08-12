@@ -290,9 +290,8 @@ many costly requests one identity may make. What that does **not** guarantee:
   Anyone who already has a key is unaffected — presenting a recognised key never
   touches that limit — but a genuine burst of *first* visits from one address
   can be refused.
-- **It does not reclaim anything.** Identities created before the limit existed,
-  and those created within it, are never cleaned up. There is no retention
-  policy and this step did not add one.
+- **It bounds the rate, not the total.** Reclaiming unused identities is Step
+  10.6's job; see below.
 - **Reading is never limited**, so it is not a defence against someone reading
   their own history repeatedly.
 
@@ -313,6 +312,29 @@ not know:
   fails, the page loses its header, footer and fonts — that is the point, since
   those are what failed. Recordings and keys are untouched by any of this;
   nothing is stored in the page.
+
+## Reclaiming unused identities
+
+An identity that owns **no recordings** and has not been used for the retention
+period (30 days by default) is deleted, along with its keys. What that does
+**not** cover:
+
+- **Identities that own recordings are never deleted, at any age.** Nothing in
+  this project specifies how long somebody's singing history should be kept, so
+  nothing decides it. An identity abandoned five years ago with one recording in
+  it stays forever.
+- **Cleanup does not run by itself.** There is no scheduler; it is a command an
+  operator runs. Nothing happens until somebody or something runs it.
+- **"Last seen" is coarse.** It is refreshed at most once an hour, so it can lag
+  real use by that much. That is far finer than a retention period measured in
+  days, but it is not a precise record of activity.
+- **Losing an empty identity is silent.** If yours is reclaimed you simply get a
+  new one on your next visit, with no message — because there is nothing to tell
+  you about. If you saved a key for an identity you never used, that key will
+  eventually stop working.
+- **Stored audio is not reclaimed by this**, because identities holding audio
+  are never eligible. Orphaned files from a partly failed deletion are still
+  reported by that deletion and are not swept up later.
 
 ## What the deployment does and does not protect
 

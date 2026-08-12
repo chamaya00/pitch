@@ -5,6 +5,7 @@ Secrets must never be hardcoded — see ``.env.example`` at the repository root.
 """
 
 import json
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -117,6 +118,33 @@ class Settings(BaseSettings):
     #: than having no limit, because it would look like protection.
     rate_limit_trusted_proxies: int = Field(default=0, ge=0, le=10)
 
+    # --- Identity retention (Step 10.6) ------------------------------------
+    #: How long an identity that owns **nothing** may sit unused before it is
+    #: reclaimed.
+    #:
+    #: **The repository specifies no retention period anywhere**, so this
+    #: default is a choice rather than a requirement, and it is configuration
+    #: rather than a constant for exactly that reason. Thirty days is long
+    #: enough that somebody who wandered off and came back would have to have
+    #: been gone a month, and short enough that crawler and probe traffic is
+    #: reclaimed while the table is still small.
+    #:
+    #: The reason a wrong value here is cheap: only identities holding **no
+    #: recordings** are ever eligible, and losing an empty identity is invisible
+    #: to whoever held it — their next request mints a fresh one, and what they
+    #: lost was nothing. Identities that own recordings are never reclaimed at
+    #: any age; see ``services/owners/retention.py``.
+    identity_retention_days: int = Field(default=30, ge=1, le=3650)
+
+    #: How stale ``owners.last_seen_at`` must be before a request rewrites it.
+    #:
+    #: The throttle exists so recording activity does not become a write on
+    #: every read — the same objection Step 10.3 raised against a
+    #: database-backed rate limiter. An hour is far finer than a retention
+    #: period measured in days, so the loss of precision cannot affect
+    #: eligibility.
+    identity_activity_throttle_seconds: int = Field(default=3600, ge=1, le=86_400)
+
     # --- CORS --------------------------------------------------------------
     #: ``NoDecode`` is required: without it pydantic-settings JSON-decodes any
     #: complex field read from the environment, so the documented
@@ -135,6 +163,14 @@ class Settings(BaseSettings):
                 return json.loads(text)
             return [origin.strip() for origin in text.split(",") if origin.strip()]
         return value
+
+    @property
+    def identity_retention(self) -> timedelta:
+        return timedelta(days=self.identity_retention_days)
+
+    @property
+    def identity_activity_throttle(self) -> timedelta:
+        return timedelta(seconds=self.identity_activity_throttle_seconds)
 
     @property
     def max_audio_size_bytes(self) -> int:

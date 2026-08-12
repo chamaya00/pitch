@@ -26,6 +26,7 @@ added without touching a single route.
 """
 
 import re
+from datetime import timedelta
 from typing import Annotated, Final
 
 from fastapi import Header, Request, Response
@@ -69,6 +70,7 @@ async def resolve_owner(
     owners: OwnerRepository,
     credentials: CredentialRepository,
     token: str | None,
+    activity_throttle: timedelta,
 ) -> Owner:
     """Resolve the caller through the bearer-key resolver.
 
@@ -90,6 +92,7 @@ async def resolve_owner(
         # knows nothing about addresses, and a test can substitute a guard that
         # counts calls.
         before_mint=lambda: guard_new_identity(request),
+        activity_throttle=activity_throttle,
     )
     return await resolver.resolve()
 

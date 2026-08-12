@@ -23,7 +23,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import anyio
@@ -1145,5 +1145,199 @@ def test_attaching_a_credential_changes_no_ownership(backend: Any) -> None:
         assert resolved.owner_id == owner.owner_id
         assert await prepared.owners.data_summary(owner.owner_id) == before
         assert await prepared.recordings.get(recording.recording_id, owner.owner_id) is not None
+
+    backend(work)
+
+
+# --- Identity retention -----------------------------------------------------
+
+
+async def _age(prepared: Backend, owner: Owner, when: datetime) -> None:
+    """Move an identity's activity signal into the past, whichever backend."""
+    if hasattr(prepared.owners, "set_last_seen"):
+        prepared.owners.set_last_seen(owner.owner_id, when)
+        return
+    async with prepared.owners._db.transaction() as connection:  # noqa: SLF001
+        await connection.execute(
+            "UPDATE owners SET last_seen_at = %s WHERE id = %s", (when, owner.owner_id)
+        )
+
+
+def _long_ago() -> datetime:
+    return datetime.now(UTC) - timedelta(days=400)
+
+
+def test_a_newly_created_owner_is_not_a_cleanup_candidate(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        await prepared.owner()
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == []
+
+    backend(work)
+
+
+def test_an_unused_empty_owner_becomes_a_candidate(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _age(prepared, owner, _long_ago())
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == [owner.owner_id]
+
+    backend(work)
+
+
+def test_an_owner_with_a_recording_is_never_a_candidate(backend: Any) -> None:
+    """However old. Deleting it would destroy somebody's history."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await prepared.recordings.create(make_recording(), owner.owner_id)
+        await _age(prepared, owner, _long_ago())
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == []
+
+    backend(work)
+
+
+def test_touching_an_owner_removes_it_from_the_candidates(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _age(prepared, owner, _long_ago())
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == [owner.owner_id]
+
+        await prepared.owners.touch(owner.owner_id, timedelta(0))
+
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == []
+
+    backend(work)
+
+
+def test_touching_is_throttled(backend: Any) -> None:
+    """A busy identity must not become a write on every read."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        recent = datetime.now(UTC) - timedelta(minutes=1)
+        await _age(prepared, owner, recent)
+
+        for _ in range(5):
+            await prepared.owners.touch(owner.owner_id, timedelta(hours=1))
+
+        # Still not a candidate against a cutoff just after the stored value:
+        # if any of those touches had written, it would have moved forward.
+        cutoff = datetime.now(UTC) - timedelta(seconds=30)
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == [owner.owner_id]
+
+    backend(work)
+
+
+def test_candidates_come_back_oldest_first(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        newer = await prepared.owner()
+        older = await prepared.owner()
+        await _age(prepared, newer, datetime.now(UTC) - timedelta(days=100))
+        await _age(prepared, older, datetime.now(UTC) - timedelta(days=900))
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert await prepared.owners.expired_owner_ids(cutoff, 100) == [
+            older.owner_id,
+            newer.owner_id,
+        ]
+
+    backend(work)
+
+
+def test_the_candidate_limit_is_honoured(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        for _ in range(4):
+            owner = await prepared.owner()
+            await _age(prepared, owner, _long_ago())
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert len(await prepared.owners.expired_owner_ids(cutoff, 2)) == 2
+
+    backend(work)
+
+
+def test_claiming_deletes_the_owner_and_its_credentials(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner, token = new_owner()
+        await prepared.owners.create(owner, token)
+        await _age(prepared, owner, _long_ago())
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        assert await prepared.owners.claim_expired_owner(owner.owner_id, cutoff) is True
+
+        assert await prepared.owners.get(owner.owner_id) is None
+        assert await prepared.owners.get_by_token(token) is None
+
+    backend(work)
+
+
+def test_claiming_refuses_an_owner_that_came_back(backend: Any) -> None:
+    """Race A: eligible when queried, active by the time it is claimed."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _age(prepared, owner, _long_ago())
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+
+        await prepared.owners.touch(owner.owner_id, timedelta(0))
+
+        assert await prepared.owners.claim_expired_owner(owner.owner_id, cutoff) is False
+        assert await prepared.owners.get(owner.owner_id) is not None
+
+    backend(work)
+
+
+def test_claiming_refuses_an_owner_that_uploaded(backend: Any) -> None:
+    """Race C: a recording arrives between the query and the claim."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _age(prepared, owner, _long_ago())
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+
+        assert await prepared.owners.claim_expired_owner(owner.owner_id, cutoff) is False
+        assert await prepared.recordings.get(stored.recording_id, owner.owner_id) is not None
+
+    backend(work)
+
+
+def test_claiming_twice_deletes_once(backend: Any) -> None:
+    """Race B, and idempotency: the second attempt is a no-op, not an error."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        await _age(prepared, owner, _long_ago())
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+
+        assert await prepared.owners.claim_expired_owner(owner.owner_id, cutoff) is True
+        assert await prepared.owners.claim_expired_owner(owner.owner_id, cutoff) is False
+
+    backend(work)
+
+
+def test_claiming_never_touches_another_owner(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        doomed = await prepared.owner()
+        keeper, keeper_token = new_owner()
+        await prepared.owners.create(keeper, keeper_token)
+        await _age(prepared, doomed, _long_ago())
+        await _age(prepared, keeper, _long_ago())
+        stored = await prepared.recordings.create(make_recording(), keeper.owner_id)
+
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        await prepared.owners.claim_expired_owner(doomed.owner_id, cutoff)
+
+        assert await prepared.owners.get(keeper.owner_id) is not None
+        assert await prepared.owners.get_by_token(keeper_token) == keeper
+        assert await prepared.recordings.get(stored.recording_id, keeper.owner_id) is not None
 
     backend(work)

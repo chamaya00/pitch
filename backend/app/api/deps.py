@@ -115,6 +115,7 @@ async def get_owner(
     response: Response,
     owners: OwnerRepositoryDep,
     credentials: CredentialRepositoryDep,
+    settings: SettingsDep,
     token: OwnerTokenHeader = None,
 ) -> Owner:
     """Resolve — or mint — the caller's identity.
@@ -123,7 +124,9 @@ async def get_owner(
     reaches it through ``OwnerIdDep``; none of them performs an identity check
     of its own, and none knows which resolver answered.
     """
-    return await resolve_owner(request, response, owners, credentials, token)
+    return await resolve_owner(
+        request, response, owners, credentials, token, settings.identity_activity_throttle
+    )
 
 
 OwnerDep = Annotated[Owner, Depends(get_owner)]

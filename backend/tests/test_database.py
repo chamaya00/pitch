@@ -10,9 +10,11 @@ without a database still runs the rest of the suite. They are not skipped
 quietly in CI: a run with no database says so in the skip reason.
 """
 
+import inspect
 import os
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import anyio
@@ -86,6 +88,30 @@ async def _with_database(work: Any) -> Any:
 def with_db(work: Any) -> Any:
     """Run ``work(database)`` against a fresh schema."""
     return run(lambda: _with_database(work))
+
+
+def run_at_utc() -> datetime:
+    """`now()` as the retention code sees it."""
+    return datetime.now(UTC)
+
+
+async def _warm_pool(database: Database, connections: int) -> None:
+    """Open several real connections at once so a race is actually a race."""
+
+    async def hold(started: anyio.Event, release: anyio.Event) -> None:
+        async with database.connection() as connection:
+            await connection.execute("SELECT 1")
+            started.set()
+            await release.wait()
+
+    release = anyio.Event()
+    async with anyio.create_task_group() as group:
+        events = [anyio.Event() for _ in range(connections)]
+        for event in events:
+            group.start_soon(hold, event, release)
+        for event in events:
+            await event.wait()
+        release.set()
 
 
 async def _make_owner(database: Database) -> tuple[Owner, str]:
@@ -823,3 +849,210 @@ def test_deleting_an_owner_takes_their_recordings_with_it() -> None:
 
 async def _unused() -> AsyncIterator[None]:  # pragma: no cover - typing anchor
     yield None
+
+
+# --- Identity retention -----------------------------------------------------
+#
+# What only a real database can be asked: that the row lock actually serialises
+# two concurrent cleanup runs, that deleting an owner really cascades, and that
+# the migration's backfill produced sensible values for rows that predate it.
+
+
+async def _age_owner(database: Database, owner_id: uuid.UUID, days: int) -> None:
+    async with database.transaction() as connection:
+        await connection.execute(
+            "UPDATE owners SET last_seen_at = now() - make_interval(days => %s) WHERE id = %s",
+            (days, owner_id),
+        )
+
+
+def test_reclaiming_an_owner_cascades_to_everything_it_had() -> None:
+    """Belt and braces: an eligible owner has no recordings, but if the
+    predicate were ever wrong the foreign keys must still leave nothing behind.
+    """
+
+    async def work(database: Database) -> None:
+        owner, token = await _make_owner(database)
+        await _age_owner(database, owner.owner_id, 400)
+        owners = PostgresOwnerRepository(database)
+
+        cutoff = run_at_utc() - timedelta(days=30)
+        assert await owners.claim_expired_owner(owner.owner_id, cutoff) is True
+
+        async with database.connection() as connection:
+            for table in ("owners", "credentials", "recordings"):
+                row = await fetch_one(connection, f"SELECT count(*) AS n FROM {table}")  # noqa: S608
+                assert row is not None
+                assert int(row["n"]) == 0, table
+        assert await owners.get_by_token(token) is None
+
+    with_db(work)
+
+
+def test_concurrent_cleanup_runs_delete_an_owner_exactly_once() -> None:
+    """Race B, against real PostgreSQL.
+
+    The pool is warmed first, and that is load-bearing: ``min_size`` is 1, so
+    without it the second task spends the race opening a connection and the two
+    never overlap. Step 10.2 learned that the hard way.
+    """
+
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        await _age_owner(database, owner.owner_id, 400)
+        owners = PostgresOwnerRepository(database)
+        await _warm_pool(database, 6)
+
+        cutoff = run_at_utc() - timedelta(days=30)
+        claimed: list[bool] = []
+
+        async def attempt() -> None:
+            claimed.append(await owners.claim_expired_owner(owner.owner_id, cutoff))
+
+        async with anyio.create_task_group() as group:
+            for _ in range(6):
+                group.start_soon(attempt)
+
+        assert claimed.count(True) == 1, f"{claimed.count(True)} runs each deleted the owner"
+        assert await owners.get(owner.owner_id) is None
+
+    with_db(work)
+
+
+def test_a_concurrent_visit_saves_an_owner_from_cleanup() -> None:
+    """Race A/C: ``touch`` and the claim contend for the same row lock."""
+
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        await _age_owner(database, owner.owner_id, 400)
+        owners = PostgresOwnerRepository(database)
+        await _warm_pool(database, 4)
+
+        cutoff = run_at_utc() - timedelta(days=30)
+        results: list[bool] = []
+
+        async def visit() -> None:
+            await owners.touch(owner.owner_id, timedelta(0))
+
+        async def clean() -> None:
+            results.append(await owners.claim_expired_owner(owner.owner_id, cutoff))
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(visit)
+            group.start_soon(clean)
+
+        # Whichever won, the two outcomes are consistent: either the owner is
+        # gone and was never touched, or it survived and is no longer eligible.
+        survived = await owners.get(owner.owner_id) is not None
+        assert survived == (results == [False])
+
+    with_db(work)
+
+
+def test_the_activity_index_exists_and_the_query_can_use_it() -> None:
+    """A schema assertion, not a plan assertion.
+
+    Which plan PostgreSQL picks depends on how much data there is, and on a
+    thirty-row table a sequential scan is *correct* — the first version of this
+    test asserted "the plan mentions the index" and failed for exactly that
+    reason. What is worth protecting is volume-independent: the index exists on
+    the column the candidate query filters and orders by, and that query does
+    not wrap the column in anything that would make the index unusable.
+
+    Measured at 50 000 owners (45 542 eligible): with the index, an index scan
+    reads 519 rows in 1.20 ms; with index scans disabled, a sequential scan
+    reads 47 944 rows and sorts them in 16.19 ms. Recorded in
+    ``docs/architecture.md``.
+    """
+
+    async def work(database: Database) -> None:
+        async with database.connection() as connection:
+            rows = await fetch_all(
+                connection,
+                "SELECT indexdef FROM pg_indexes WHERE tablename = 'owners'",
+            )
+        defs = [str(row["indexdef"]) for row in rows]
+        assert any("owners_last_seen_idx" in d and "last_seen_at" in d for d in defs), defs
+
+        # The predicate compares the bare column. Wrapping it — date_trunc,
+        # a cast, an expression — silently makes the index unusable at any size.
+        sql = inspect.getsource(PostgresOwnerRepository.expired_owner_ids)
+        assert "o.last_seen_at < %s" in sql, sql
+        assert "ORDER BY o.last_seen_at" in sql, sql
+
+    with_db(work)
+
+
+def test_an_owner_predating_the_activity_column_gets_a_sensible_backfill(tmp_path: Any) -> None:
+    """Migration 0003, applied to a database seeded through the old schema.
+
+    Inventing ``now()`` would make every identity look active; inventing
+    ``created_at`` would make a long-lived one look abandoned. The backfill uses
+    the newest thing the owner demonstrably did.
+    """
+
+    async def work(database: Database) -> None:
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        files = migration_files()
+        before, rest = files[:-1], files[-1:]
+        for path in before:
+            (staged / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        owner_id = uuid.uuid4()
+        recording_id = uuid.uuid4().hex
+        try:
+            async with database.transaction() as connection:
+                await connection.execute("CREATE SCHEMA retention_probe")
+                await connection.execute("SET LOCAL search_path TO retention_probe")
+                await apply_migrations(connection, staged)
+
+            async with database.transaction() as connection:
+                await connection.execute("SET LOCAL search_path TO retention_probe")
+                await connection.execute(
+                    "INSERT INTO owners (id, created_at) VALUES (%s, now() - interval '400 days')",
+                    (owner_id,),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO credentials (id, owner_id, credential_hash, label, created_at)
+                    VALUES (%s, %s, %s, 'k', now() - interval '400 days')
+                    """,
+                    (uuid.uuid4(), owner_id, hash_token(new_owner_token())),
+                )
+                # The newest evidence of life: an upload three days ago.
+                await connection.execute(
+                    """
+                    INSERT INTO recordings (id, owner_id, original_filename, audio_format,
+                                            duration_seconds, sample_rate, channels, size_bytes,
+                                            created_at, document)
+                    VALUES (%s, %s, 't.wav', 'wav', 2.0, 22050, 1, 1024,
+                            now() - interval '3 days', '{}'::jsonb)
+                    """,
+                    (recording_id, owner_id),
+                )
+
+            async with database.transaction() as connection:
+                await connection.execute("SET LOCAL search_path TO retention_probe")
+                assert await apply_migrations(connection, MIGRATIONS_DIR) == [p.name for p in rest]
+
+            async with database.connection() as connection:
+                await connection.execute("SET search_path TO retention_probe")
+                row = await fetch_one(
+                    connection,
+                    """
+                    SELECT last_seen_at,
+                           last_seen_at > now() - interval '4 days'  AS looks_recent,
+                           last_seen_at < now() + interval '1 minute' AS not_invented
+                      FROM owners WHERE id = %s
+                    """,
+                    (owner_id,),
+                )
+                assert row is not None
+                assert row["looks_recent"] is True, "the backfill ignored the recent upload"
+                assert row["not_invented"] is True, "the backfill invented a future timestamp"
+        finally:
+            async with database.transaction() as connection:
+                await connection.execute("DROP SCHEMA IF EXISTS retention_probe CASCADE")
+
+    with_db(work)

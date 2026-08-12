@@ -17,6 +17,7 @@ recordings.
 """
 
 import uuid
+from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from psycopg import errors
@@ -63,6 +64,15 @@ class OwnerRepository(Protocol):
 
     async def delete_owner(self, owner_id: uuid.UUID) -> bool:
         """Remove the owner row; analyses and recordings cascade with it."""
+
+    async def touch(self, owner_id: uuid.UUID, stale_after: timedelta) -> None:
+        """Record that this identity was just used, at most once per ``stale_after``.
+
+        The throttle is the whole design. Writing on every request would add a
+        write to every read — the objection Step 10.3 raised against a
+        database-backed rate limiter — so a busy identity costs one UPDATE per
+        interval and an idle one costs nothing.
+        """
 
 
 class PostgresOwnerRepository:
@@ -171,6 +181,87 @@ class PostgresOwnerRepository:
         async with self._db.transaction() as connection:
             affected = await execute(connection, "DELETE FROM owners WHERE id = %s", (owner_id,))
         return affected > 0
+
+    # --- Activity and retention --------------------------------------------
+
+    async def touch(self, owner_id: uuid.UUID, stale_after: timedelta) -> None:
+        """Bump ``last_seen_at``, but only if it is already stale.
+
+        The ``WHERE`` clause is the throttle: an identity used fifty times an
+        hour writes once. It also means the common case touches no rows at all,
+        so the statement is an index lookup and nothing more.
+
+        Failure here is deliberately not fatal to the request — see the caller.
+        """
+        async with self._db.transaction() as connection:
+            await execute(
+                connection,
+                """
+                UPDATE owners
+                   SET last_seen_at = now()
+                 WHERE id = %s
+                   AND last_seen_at < now() - %s::interval
+                """,
+                (owner_id, stale_after),
+            )
+
+    async def expired_owner_ids(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
+        """Identities that look reclaimable: no recordings, not seen since ``cutoff``.
+
+        ``NOT EXISTS`` rather than a join or a count: it stops at the first
+        recording, so an owner with a thousand of them costs the same as an
+        owner with one. Ordered by ``last_seen_at`` so the index supplies the
+        rows already sorted and the oldest are always dealt with first.
+
+        Advisory only. Everything it returns is re-checked under a lock.
+        """
+        async with self._db.connection() as connection:
+            rows = await fetch_all(
+                connection,
+                """
+                SELECT o.id
+                  FROM owners o
+                 WHERE o.last_seen_at < %s
+                   AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.owner_id = o.id)
+                 ORDER BY o.last_seen_at
+                 LIMIT %s
+                """,
+                (cutoff, limit),
+            )
+        return [uuid.UUID(str(row["id"])) for row in rows]
+
+    async def claim_expired_owner(self, owner_id: uuid.UUID, cutoff: datetime) -> bool:
+        """Re-assert eligibility under a row lock, and hold it for the deletion.
+
+        ``FOR UPDATE`` is what makes the races safe. ``touch`` updates the same
+        row, so a returning user either lands before this lock — and the
+        re-check below sees the new ``last_seen_at`` and refuses — or waits
+        until after the owner is gone. Two cleanup runs serialise the same way,
+        and ``SKIP LOCKED`` means the second moves on rather than blocking.
+
+        The transaction is **not** closed here: the caller deletes inside it, so
+        nothing can slip between the check and the delete.
+        """
+        async with self._db.transaction() as connection:
+            row = await fetch_one(
+                connection,
+                """
+                SELECT o.id
+                  FROM owners o
+                 WHERE o.id = %s
+                   AND o.last_seen_at < %s
+                   AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.owner_id = o.id)
+                   FOR UPDATE OF o SKIP LOCKED
+                """,
+                (owner_id, cutoff),
+            )
+            if row is None:
+                return False
+            # Deleted here, inside the lock, rather than by the caller: holding
+            # a psycopg transaction open across an await in another object
+            # would be a far easier thing to get wrong.
+            await execute(connection, "DELETE FROM owners WHERE id = %s", (owner_id,))
+        return True
 
     # --- Credentials -------------------------------------------------------
 

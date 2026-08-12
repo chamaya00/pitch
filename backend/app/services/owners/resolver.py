@@ -22,6 +22,7 @@ What a resolver may not do is as important as what it does:
 """
 
 from collections.abc import Callable
+from datetime import timedelta
 
 from app.core.errors import ApiError, ErrorCode
 from app.core.logging import get_logger
@@ -92,12 +93,14 @@ class BearerKeyResolver:
         key: str | None,
         on_mint: MintCallback,
         before_mint: MintGuard,
+        activity_throttle: timedelta,
     ) -> None:
         self._owners = owners
         self._credentials = credentials
         self._key = key
         self._on_mint = on_mint
         self._before_mint = before_mint
+        self._activity_throttle = activity_throttle
 
     async def resolve(self) -> Owner:
         """Return the caller's owner. See the class docstring for the rules."""
@@ -106,6 +109,14 @@ class BearerKeyResolver:
             if owner_id is not None:
                 owner = await self._owners.get(owner_id)
                 if owner is not None:
+                    # This identity is demonstrably in use. Recorded here
+                    # because it is the only place that knows — reading a
+                    # history writes nothing else — and it is what stops
+                    # retention from mistaking a quiet regular for an
+                    # abandoned row. Throttled in the repository, so a busy
+                    # identity costs one write per interval, not one per
+                    # request.
+                    await self._owners.touch(owner_id, self._activity_throttle)
                     return owner
                 # A credential whose owner is gone. Only reachable if a delete
                 # raced this lookup; the foreign key removes credentials with

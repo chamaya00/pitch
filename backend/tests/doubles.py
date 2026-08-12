@@ -22,6 +22,7 @@ service code above them cannot tell the two apart.
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Final
 
 from fastapi import FastAPI
@@ -53,7 +54,7 @@ from app.services.owners.identity import OwnerDataSummary
 from app.services.owners.models import Owner, new_owner
 from app.services.progress.sources import ProgressRow
 from app.services.recordings.history import RecordingHistoryEntry
-from app.services.recordings.models import Recording
+from app.services.recordings.models import Recording, utc_now
 from app.services.recordings.postgres_repository import RecordingAlreadyExistsError
 
 #: The statuses the partial unique indexes treat as "in flight". Duplicated from
@@ -125,6 +126,8 @@ class InMemoryOwnerRepository:
         credentials: CredentialStore | None = None,
     ) -> None:
         self._by_id: dict[uuid.UUID, Owner] = {}
+        #: The activity signal migration 0003 adds to ``owners``.
+        self._last_seen: dict[uuid.UUID, datetime] = {}
         self._credentials = credentials if credentials is not None else CredentialStore()
         # Optional back-reference so the identity summary and the cascade can be
         # answered from the same data the other doubles hold, rather than from a
@@ -140,6 +143,7 @@ class InMemoryOwnerRepository:
         credential, _ = new_credential(owner.owner_id, "Original key")
         self._credentials.add(credential.model_copy(update={"created_at": owner.created_at}), token)
         self._by_id[owner.owner_id] = owner
+        self._last_seen[owner.owner_id] = owner.created_at
         return owner
 
     async def get_by_token(self, token: str) -> Owner | None:
@@ -148,6 +152,54 @@ class InMemoryOwnerRepository:
 
     async def get(self, owner_id: uuid.UUID) -> Owner | None:
         return self._by_id.get(owner_id)
+
+    async def touch(self, owner_id: uuid.UUID, stale_after: timedelta) -> None:
+        """Same throttle as the SQL: rewrite only what is already stale."""
+        seen = self._last_seen.get(owner_id)
+        now = utc_now()
+        if seen is None or seen < now - stale_after:
+            self._last_seen[owner_id] = now
+
+    def last_seen(self, owner_id: uuid.UUID) -> datetime | None:
+        """For tests: what the activity signal currently says."""
+        return self._last_seen.get(owner_id)
+
+    def set_last_seen(self, owner_id: uuid.UUID, when: datetime) -> None:
+        """For tests: age an identity without waiting a month."""
+        self._last_seen[owner_id] = when
+
+    async def expired_owner_ids(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
+        """Empty identities not seen since ``cutoff``, oldest first."""
+        candidates = [
+            owner_id
+            for owner_id, seen in self._last_seen.items()
+            if owner_id in self._by_id and seen < cutoff and not self._owns_recordings(owner_id)
+        ]
+        candidates.sort(key=lambda owner_id: self._last_seen[owner_id])
+        return candidates[:limit]
+
+    async def claim_expired_owner(self, owner_id: uuid.UUID, cutoff: datetime) -> bool:
+        """Re-check and delete in one non-awaiting section.
+
+        Atomic for coroutines on one loop, which is the same guarantee the real
+        repository gets from ``FOR UPDATE`` — see the module docstring.
+        """
+        seen = self._last_seen.get(owner_id)
+        if owner_id not in self._by_id or seen is None or seen >= cutoff:
+            return False
+        if self._owns_recordings(owner_id):
+            return False
+        self._by_id.pop(owner_id, None)
+        self._credentials.drop_owner(owner_id)
+        self._last_seen.pop(owner_id, None)
+        if self._recordings is not None:
+            self._recordings.delete_for_owner(owner_id)
+        return True
+
+    def _owns_recordings(self, owner_id: uuid.UUID) -> bool:
+        if self._recordings is None:
+            return False
+        return any(owner == owner_id for owner, _ in self._recordings.records())
 
     async def data_summary(self, owner_id: uuid.UUID) -> OwnerDataSummary:
         """Counts, taken from the sibling doubles rather than a second store."""
@@ -179,6 +231,7 @@ class InMemoryOwnerRepository:
     async def delete_owner(self, owner_id: uuid.UUID) -> bool:
         """Cascades by hand, exactly as the foreign keys do in PostgreSQL."""
         owner = self._by_id.pop(owner_id, None)
+        self._last_seen.pop(owner_id, None)
         self._credentials.drop_owner(owner_id)
         if self._recordings is not None:
             self._recordings.delete_for_owner(owner_id)

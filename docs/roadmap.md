@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Song analyser: key, BPM, melody/range estimation, limitations messaging | Planned |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
 ## Phase 0 — delivered
 
@@ -156,6 +156,21 @@ Delivered in 10.5 — *deployment hardening*:
 - `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` on every
   response. No CSP and no HSTS, both deferred for stated reasons.
 
+Delivered in 10.6 — *identity retention*:
+
+- `owners.last_seen_at` (migration 0003), written when a credential resolves and
+  throttled so it is not a write on every read. Backfilled from the newest thing
+  each existing owner demonstrably did.
+- An identity is reclaimable only if it owns **no recordings** *and* has not been
+  seen for `IDENTITY_RETENTION_DAYS` (30 by default, and configurable because
+  nothing in this repository specifies a period). Identities that own recordings
+  are never reclaimed at any age — that would be a product decision nobody has
+  made.
+- `python -m app.db.cleanup_identities`, idempotent and safe to repeat, with
+  `--dry-run`. No scheduler was added.
+- Claim and delete are one transaction under `FOR UPDATE SKIP LOCKED`, so a
+  returning user or a second cleanup run cannot lose a race.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -163,11 +178,11 @@ considered and rejected for this slice — adding them while deferring reset,
 verification and rate limiting would make the system *less* safe than 128 random
 bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
 in Phase 10 are TLS termination (still an external responsibility — the proxy
-speaks HTTP and claims no HSTS), a Content-Security-Policy, a retention policy
-for unused identities, a shared rate-limit counter for multi-worker
-deployments, performance work, and every credential feature 10.2 deferred.
-Error pages landed in 10.4; the proxy, the internal network and the edge body
-cap landed in 10.5.
+speaks HTTP and claims no HSTS), a Content-Security-Policy, a shared rate-limit counter for multi-worker
+deployments, performance work, and every credential feature 10.2 deferred. Error pages landed
+in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
+retention of *empty* identities landed in 10.6, and retention of identities that
+hold recordings remains unspecified and unbuilt.
 
 The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while

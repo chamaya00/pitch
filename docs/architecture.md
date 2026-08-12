@@ -169,6 +169,58 @@ Three rules the code enforces rather than documents:
 - **A credential belonging to somebody else is "not found", not "refused"**, so
   the endpoint cannot be used to discover that an id is real.
 
+### Identity retention (10.6)
+
+Step 10.3 measured the problem and 10.5 did not solve it: an unauthenticated
+request mints an owner, so a crawler, a probe or one curious visit leaves two
+rows behind. Nothing ever reclaimed one. Four of the five owners in the
+development database had never uploaded anything.
+
+**An identity is reclaimable only when both hold: it owns no recordings, and it
+has not been seen for the retention period.** The first condition is what makes
+this safe rather than a judgement call — deleting an *empty* identity is
+invisible to whoever held it, since their next request mints a fresh one and
+what they lost was nothing. Deleting an identity that owns recordings destroys
+somebody's singing history, and **no retention requirement for that exists
+anywhere in this repository**, so it is not done at any age.
+
+**The retention period is configuration, not a constant.** Nothing specifies
+one, so `IDENTITY_RETENTION_DAYS` defaults to 30 and that default is recorded as
+a choice. A wrong value is cheap for the reason above.
+
+**Age is the wrong signal, so it is not the signal.** `owners.created_at` says
+when somebody arrived; reading a history writes nothing, so an identity created
+a year ago can be in daily use. Migration `0003` adds `owners.last_seen_at`,
+written when a credential resolves and throttled to at most one write per
+`IDENTITY_ACTIVITY_THROTTLE_SECONDS` — otherwise recording activity would become
+a write on every read, the objection 10.3 raised against a database-backed rate
+limiter. Existing rows were backfilled from the newest thing the owner
+demonstrably did, because inventing `now()` would make everyone look active and
+inventing `created_at` would make long-lived identities look abandoned.
+
+**Concurrency.** The candidate query is advisory; every candidate is re-checked
+under `SELECT … FOR UPDATE SKIP LOCKED` in the same transaction that deletes it.
+`touch` updates the same row, so a returning user either lands before the claim
+— and the re-check refuses — or waits until after the owner is gone. Two cleanup
+runs serialise the same way, and `SKIP LOCKED` means the loser moves on. The
+"owns no recordings" predicate sits in the same statement as the delete, so this
+path cannot remove an owner whose audio is still on disk: the files-before-rows
+invariant `OwnerDeletionService` protects is preserved by never being engaged,
+and the service asks that service for a second opinion before touching anything.
+
+**It is an operational command, not an endpoint**: `python -m
+app.db.cleanup_identities`, alongside `import_filesystem`. A route would be
+either unauthenticated — letting a stranger drive deletion — or would require a
+caller to name an owner, which no API in this project permits. There is no
+scheduler in this repository and this step deliberately did not add one; the
+command is idempotent, bounds its work with `--limit`, and exits non-zero if
+anything failed.
+
+Measured at 50 000 owners with 45 542 eligible: the candidate query takes
+**1.20 ms** using `owners_last_seen_idx` and reads 519 rows; with index scans
+disabled it takes **16.19 ms** and reads 47 944 rows plus a sort. The gap grows
+with the table, which is the failure this feature exists to prevent.
+
 ### Deployment topology (10.5)
 
 ```

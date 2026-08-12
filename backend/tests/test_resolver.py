@@ -17,6 +17,7 @@ one that does not.
 """
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import anyio
@@ -73,6 +74,10 @@ def resolver_for(
         key=key,
         on_mint=minted.append,
         before_mint=guard or CountingGuard(),
+        # Zero, so every resolution records activity. The throttle itself is
+        # tested where it lives — in the repository contract suite, against both
+        # backends — rather than being smuggled into these tests.
+        activity_throttle=timedelta(0),
     )
 
 
