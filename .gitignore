@@ -1,0 +1,39 @@
+# --- Secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- Node / Next.js --------------------------------------------------------
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# --- Local data ------------------------------------------------------------
+# Uploaded audio and generated artefacts must never be committed.
+storage/
+uploads/
+*.wav
+*.mp3
+*.m4a
+!backend/tests/fixtures/**
+
+# --- Tooling / OS ----------------------------------------------------------
+.DS_Store
+coverage/
+.coverage
+htmlcov/
+*.log
+.idea/
+.vscode/

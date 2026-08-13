@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+/*
+ * VocalLens design tokens.
+ *
+ * Dark-first, music-production inspired: near-black surfaces, a single accent,
+ * and a small set of semantic colours. Light mode is a genuine second theme
+ * rather than an afterthought, so the app stays accessible in bright rooms.
+ */
+
+:root {
+  --background: #f7f7f8;
+  --surface: #ffffff;
+  --surface-raised: #f0f0f2;
+  --border: #d9d9de;
+  --foreground: #14141a;
+  --muted: #5c5c68;
+  --accent: #4f46e5;
+  --accent-foreground: #ffffff;
+  --positive: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b0b0f;
+    --surface: #131319;
+    --surface-raised: #1c1c24;
+    --border: #2a2a35;
+    --foreground: #ececf1;
+    --muted: #9a9aa8;
+    --accent: #8b7cf6;
+    --accent-foreground: #12121a;
+    --positive: #4ade80;
+    --warning: #fbbf24;
+    --danger: #f87171;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-positive: var(--positive);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Keep keyboard focus obvious against dark surfaces. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Motion is used only to explain a state change: a card arriving, a bar moving.
+ * Every animation below is disabled under prefers-reduced-motion.
+ */
+
+@keyframes vl-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.fade-in {
+  animation: vl-fade-in 200ms ease-out both;
+}
+
+/* Indeterminate progress: only shown when real progress is unavailable. */
+@keyframes vl-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.indeterminate-bar {
+  animation: vl-indeterminate 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in,
+  .indeterminate-bar {
+    animation: none;
+  }
+  .indeterminate-bar {
+    width: 100%;
+    opacity: 0.6;
+  }
+}
