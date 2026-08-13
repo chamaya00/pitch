@@ -27,3 +27,17 @@ anthropic>=0.121,<1.0
 # docs/audio-analysis.md for the trade and the conditions for revisiting it.
 numpy>=1.26,<3.0
 soundfile>=0.12,<1.0
+
+# Step 7M — PostgreSQL as the source of truth. The binary build so a deployment
+# needs no libpq or compiler; the pool because `db/pool.py` opens one at startup
+# rather than a connection per request.
+#
+# These were imported from Step 7M onwards without ever being recorded here, so
+# a fresh checkout could not import `app.main` at all. Adding them writes down a
+# dependency the code already had — it does not introduce a new one.
+psycopg[binary]>=3.1,<4.0
+psycopg-pool>=3.2,<4.0
+
+# Used directly by the Deepgram adapter for its own HTTP calls, not only by the
+# tests that were previously carrying it via requirements-dev.txt.
+httpx>=0.27,<1.0
