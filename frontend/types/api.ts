@@ -287,6 +287,86 @@ export interface NoteBreakdown {
   notes: NoteSummary[];
 }
 
+/** The two modes this project estimates. There are deliberately no others. */
+export type KeyMode = "major" | "minor";
+
+/**
+ * Why no key was reported. **Not an error code.**
+ *
+ * A key that could not be established is a normal outcome, in the same way
+ * `INSUFFICIENT_PITCH_SIGNAL` is: the recording did not carry the evidence.
+ * These never arrive in the error envelope and never come with a failed request.
+ */
+export type KeyUnmeasuredReason =
+  | "TOO_FEW_PITCH_CLASSES"
+  | "TOO_LITTLE_VOICED_TIME"
+  | "AMBIGUOUS";
+
+/**
+ * How much of the pitched time went to one pitch class.
+ *
+ * A pitch *class*, not a note: `A2`, `A4` and `A5` all contribute here, because
+ * a key is a statement about pitch classes and the octave is irrelevant to it.
+ * `NoteSummary` is the octave-aware view of the same timeline.
+ */
+export interface PitchClassShare {
+  /** 0–11, where 0 is C. */
+  pitch_class: number;
+  /** Sharps only, e.g. `C#`. */
+  name: string;
+  /** Share of *pitched* time. These sum to 100. */
+  percentage_of_voiced_time: number;
+}
+
+/** One key, and how far it stood clear of the next one. */
+export interface KeyCandidate {
+  tonic: string;
+  mode: KeyMode;
+  /**
+   * Margin over the next-best candidate. **Not a correlation and not a
+   * probability**: random pitch classes correlate +0.49 with a real key profile
+   * and one held note +0.48, so a correlation would read as certainty for a hum.
+   */
+  confidence: number;
+}
+
+/**
+ * The key a recording's pitch classes best fit, with its runner-up.
+ *
+ * An estimate of what was sung, not a statement that it was right. There is no
+ * reference melody in this product.
+ */
+export interface KeyEstimate {
+  tonic: string;
+  mode: KeyMode;
+  confidence: number;
+  /** The candidate that came second, so a close call is visible. */
+  alternative: KeyCandidate | null;
+}
+
+/**
+ * The key implied by what was sung, or a stated reason there is none.
+ *
+ * `key: null` is a measurement outcome, not an error — a hum, an arpeggio or a
+ * chromatic wander all analyse successfully and establish no key. The evidence
+ * travels with the verdict either way, so `pitch_classes` is populated whether
+ * or not a key was reported.
+ */
+export interface MusicalKey {
+  recording_id: string;
+  audio_analysis_id: string;
+  /** `null` when the evidence did not establish one. */
+  key: KeyEstimate | null;
+  /** Present exactly when `key` is `null`. */
+  unmeasured_reason: KeyUnmeasuredReason | null;
+  /** Twelve entries in pitch-class order, including unused ones at zero. */
+  pitch_classes: PitchClassShare[];
+  distinct_pitch_classes: number;
+  voiced_seconds: number;
+  /** Which published key-profile set produced this, e.g. `temperley`. */
+  method: string;
+}
+
 /** Where a recording's audio feedback has got to. */
 export type AudioFeedbackStatus =
   | "not_requested"

@@ -10,6 +10,7 @@ import type {
   AudioAnalysisResponse,
   AudioFeedbackState,
   HealthResponse,
+  MusicalKey,
   NoteBreakdown,
   PitchTimeline,
   PublicConfig,
@@ -312,6 +313,28 @@ export function getNoteBreakdown(
   signal?: AbortSignal,
 ): Promise<NoteBreakdown> {
   return apiFetch<NoteBreakdown>(`/recordings/${recordingId}/audio-analysis/notes`, {
+    signal,
+    cache: "no-store",
+  });
+}
+
+/**
+ * The estimated musical key: which key the notes that were sung best fit.
+ *
+ * A third view of the same stored timeline, folded to twelve pitch classes.
+ * Derived on the server on every read, so there is nothing to poll and nothing
+ * to refresh.
+ *
+ * A `200` carrying `key: null` is a **successful** measurement that established
+ * no key, and must not be handled as a failure — `unmeasured_reason` says which
+ * evidence was missing. Only a recording with no completed audio analysis
+ * rejects, with `AUDIO_ANALYSIS_NOT_FOUND`.
+ */
+export function getMusicalKey(
+  recordingId: string,
+  signal?: AbortSignal,
+): Promise<MusicalKey> {
+  return apiFetch<MusicalKey>(`/recordings/${recordingId}/audio-analysis/key`, {
     signal,
     cache: "no-store",
   });
