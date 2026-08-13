@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   getAudioAnalysis,
+  getMusicalKey,
   getNoteBreakdown,
   getPitchTimeline,
   startAudioAnalysis,
@@ -14,7 +15,7 @@ import {
   type AudioAnalysisRunner,
   type AudioRunState,
 } from "@/lib/analysis-runner";
-import type { NoteBreakdown, PitchPoint } from "@/types/api";
+import type { MusicalKey, NoteBreakdown, PitchPoint } from "@/types/api";
 
 /**
  * React wrapper around the audio-analysis runner.
@@ -23,10 +24,10 @@ import type { NoteBreakdown, PitchPoint } from "@/types/api";
  * twice, stopping cleanly — parameterised by the response type. Two copies of
  * that logic would be two places for the overlapping-request bug to live.
  *
- * The timeline and the note breakdown are fetched once, after the analysis
- * completes. Both are derived views of the same stored measurement, so they are
- * requested together rather than in cascading effects, and a failure in either
- * leaves the other — and the summary numbers — intact.
+ * The timeline, the note breakdown and the estimated key are fetched once,
+ * after the analysis completes. All three are derived views of the same stored
+ * measurement, so they are requested together rather than in cascading effects,
+ * and a failure in any one leaves the others — and the summary numbers — intact.
  */
 
 /** Points requested for the graph. More than a chart can draw is waste. */
@@ -42,6 +43,15 @@ export interface AudioAnalysisController {
   /** The note breakdown, once fetched. `null` until then. */
   breakdown: NoteBreakdown | null;
   breakdownError: string | null;
+  /**
+   * The estimated key, once fetched. `null` until then.
+   *
+   * Note the two nulls: this is `null` while the request is in flight, and the
+   * `key` field *inside* it is `null` when the measurement established no key.
+   * The second is a successful answer and is not an error.
+   */
+  musicalKey: MusicalKey | null;
+  musicalKeyError: string | null;
 }
 
 function describeError(error: unknown): string {
@@ -61,6 +71,8 @@ export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
   const [timelineError, setTimelineError] = useState<string | null>(null);
   const [breakdown, setBreakdown] = useState<NoteBreakdown | null>(null);
   const [breakdownError, setBreakdownError] = useState<string | null>(null);
+  const [musicalKey, setMusicalKey] = useState<MusicalKey | null>(null);
+  const [musicalKeyError, setMusicalKeyError] = useState<string | null>(null);
   const runnerRef = useRef<AudioAnalysisRunner | null>(null);
 
   useEffect(() => {
@@ -102,6 +114,15 @@ export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
         setBreakdownError(describeError(error));
       });
 
+    getMusicalKey(recordingId, controller.signal)
+      .then(setMusicalKey)
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        // Only a genuine failure lands here. A recording whose notes settled no
+        // key answers 200 with `key: null`, which is a measurement, not this.
+        setMusicalKeyError(describeError(error));
+      });
+
     return () => controller.abort();
   }, [recordingId, completed, pointCount]);
 
@@ -109,5 +130,14 @@ export function useAudioAnalysis(recordingId: string): AudioAnalysisController {
     runnerRef.current?.start();
   }, []);
 
-  return { state, start, timeline, timelineError, breakdown, breakdownError };
+  return {
+    state,
+    start,
+    timeline,
+    timelineError,
+    breakdown,
+    breakdownError,
+    musicalKey,
+    musicalKeyError,
+  };
 }
