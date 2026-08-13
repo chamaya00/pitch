@@ -503,7 +503,7 @@ the distance to the nearest semitone, and rounding first throws away the
 measurement — and both return nothing for a value that cannot be a pitch: zero,
 a negative, a NaN, an infinity, or a frequency outside 20–5000 Hz.
 
-## Musical key (Phase 8, Slices 1–3)
+## Musical key (Phase 8, Slices 1–4)
 
 `backend/app/services/audio_analysis/key.py`, reachable through
 `AudioAnalysisService.key()`. A third aggregation of the same stored pitch
@@ -511,10 +511,37 @@ timeline, beside the note breakdown: it folds the timeline into twelve
 pitch-class shares and reports which key those shares best fit, or a stated
 reason there is none.
 
-Served at `GET /recordings/{id}/audio-analysis/key` — see [api.md](api.md).
-**No component renders it**: the endpoint answers and no VocalLens page asks it
-anything, which is Slice 4. It is not in the AI payload, the comparison or the
-progress series, and those remain deliberately out of scope.
+Served at `GET /recordings/{id}/audio-analysis/key` — see [api.md](api.md) — and
+rendered by `frontend/components/audio-analysis/musical-key-card.tsx`, below the
+note breakdown it shares a timeline with (Slice 4). It is not in the AI payload,
+the comparison or the progress series, and those remain deliberately out of
+scope.
+
+**The card shows the evidence in every state, including the one with no key.**
+That is the obligation attached to shipping a classification rather than a
+measurement: a reader told "not measured" can see the twelve pitch-class shares
+that led there, which is the difference between a refusal and a shrug.
+
+One threshold lives only in the frontend, `WEAK_KEY_CONFIDENCE = 0.19` in
+`lib/audio-analysis-metrics.ts`. It is **presentational and never a second
+refusal**: the backend's `MIN_KEY_CONFIDENCE = 0.05` decides whether a key is
+reported at all, and this decides only whether an answered key is shown with its
+weakness stated in words. It is set from the same sweep, at the bottom of the
+band a *weighted* melody reaches:
+
+| Input | Margin | Presented as |
+| --- | --- | --- |
+| Sung major melody | 0.262 | A key |
+| Pentatonic melody | 0.241 | A key |
+| Sung minor melody | 0.205 | A key |
+| Bare unweighted major scale | 0.146 | A key, on thin evidence |
+| Below the backend gate | < 0.05 | Not measured, with a reason |
+
+The bare scale is the case that fixes the line. The specification requires it be
+"answered, and answered weakly", and a synthesised one measured end to end
+through the real decoder and analyzer scores **0.147 with A minor as its
+runner-up** — its own relative minor, which is exactly the ambiguity the number
+is reporting.
 
 It differs from the note breakdown in exactly one way, and that difference is the
 whole feature: **the octave is discarded.** `A2`, `A4` and `A5` are three pitches
