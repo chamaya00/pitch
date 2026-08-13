@@ -24,11 +24,19 @@ import {
 } from "../lib/audio-analysis-errors.ts";
 import {
   IN_TUNE_CENTS,
+  KEY_UNMEASURED_MESSAGES,
+  MIN_PITCH_CLASS_SHARE,
   NOT_MEASURED,
+  WEAK_KEY_CONFIDENCE,
   hasNoteBreakdown,
+  hasPitchClassEvidence,
   hasPitchResult,
+  isWeakKey,
+  keyLabel,
+  keyUnmeasuredMessage,
   loudnessRows,
   noteRows,
+  pitchClassRows,
   rangeLabel,
   rangeRows,
   spectralRows,
@@ -47,9 +55,12 @@ import type {
   AudioAnalysisResponse,
   AudioSummary,
   DetectedRange,
+  KeyEstimate,
   LoudnessMetrics,
+  MusicalKey,
   NoteBreakdown,
   NoteSummary,
+  PitchClassShare,
   PitchStabilityMetrics,
   SpectralMetrics,
 } from "../types/api.ts";
@@ -581,4 +592,183 @@ test("the runner keeps polling while feedback is generating", () => {
   assert.equal(isActiveStatus("generating"), true);
   assert.equal(isTerminalStatus("generating"), false);
   assert.equal(isActiveStatus("not_requested"), false);
+});
+
+// --- Musical key -----------------------------------------------------------
+//
+// The card this covers is the only one in the product that reports a
+// *classification* rather than a measurement, so these tests are weighted
+// towards what it must refuse to say. The margins asserted below are the ones
+// the backend sweep actually produced (Temperley, hop 0.0232 s) rather than
+// numbers invented here — a change to the estimator that moves them should
+// break a test that says which fixture moved.
+
+/** Twelve shares in pitch-class order, from a sparse `{ pitchClass: share }`. */
+function shares(weights: Record<number, number>): PitchClassShare[] {
+  const names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  return names.map((name, pitchClass) => ({
+    pitch_class: pitchClass,
+    name,
+    percentage_of_voiced_time: weights[pitchClass] ?? 0,
+  }));
+}
+
+function estimate(overrides: Partial<KeyEstimate> = {}): KeyEstimate {
+  return {
+    tonic: "C",
+    mode: "major",
+    confidence: 0.262,
+    alternative: { tonic: "G", mode: "major", confidence: 0.198 },
+    ...overrides,
+  };
+}
+
+function musicalKey(overrides: Partial<MusicalKey> = {}): MusicalKey {
+  return {
+    recording_id: "b".repeat(32),
+    audio_analysis_id: "a".repeat(32),
+    key: estimate(),
+    unmeasured_reason: null,
+    pitch_classes: shares({ 0: 22.2, 2: 11.1, 4: 16.7, 5: 11.1, 7: 22.2, 9: 11.1, 11: 5.6 }),
+    distinct_pitch_classes: 7,
+    voiced_seconds: 4.18,
+    method: "temperley",
+    ...overrides,
+  };
+}
+
+test("a key is labelled by its tonic and mode, and nothing else", () => {
+  assert.equal(keyLabel(estimate()), "C major");
+  assert.equal(keyLabel(estimate({ tonic: "F#", mode: "minor" })), "F# minor");
+});
+
+test("a key that was never established has no label at all", () => {
+  // The whole point of the null state: there is no tonic to fall back on, so
+  // there must be no string a component could render as one.
+  assert.equal(keyLabel(null), null);
+});
+
+test("an unestablished key is not a weak key", () => {
+  // "Weak" implies a key was found. Nothing was.
+  assert.equal(isWeakKey(null), false);
+});
+
+test("the weak band sits between the backend's gate and a real melody", () => {
+  // Every number here came out of the sweep recorded beside WEAK_KEY_CONFIDENCE.
+  const measured: Array<[string, number, boolean]> = [
+    ["sung major melody", 0.262, false],
+    ["pentatonic melody", 0.241, false],
+    ["sung minor melody", 0.205, false],
+    ["bare unweighted scale", 0.146, true],
+    ["just above the backend gate", 0.051, true],
+  ];
+  for (const [name, confidence, weak] of measured) {
+    assert.equal(
+      isWeakKey(estimate({ confidence })),
+      weak,
+      `${name} (${confidence}) landed on the wrong side of the band`,
+    );
+  }
+});
+
+test("the weak boundary is inclusive upwards", () => {
+  assert.equal(isWeakKey(estimate({ confidence: WEAK_KEY_CONFIDENCE })), false);
+  assert.equal(isWeakKey(estimate({ confidence: WEAK_KEY_CONFIDENCE - 0.001 })), true);
+});
+
+test("every unmeasured reason is explained in words", () => {
+  for (const reason of ["TOO_FEW_PITCH_CLASSES", "TOO_LITTLE_VOICED_TIME", "AMBIGUOUS"] as const) {
+    const message = keyUnmeasuredMessage(reason);
+    assert.equal(message, KEY_UNMEASURED_MESSAGES[reason]);
+    assert.ok(message.length > 0, `${reason} had no message`);
+  }
+});
+
+test("an unknown or absent reason still reads as an outcome, not a fault", () => {
+  for (const reason of [null, undefined, "SOMETHING_NEW" as never]) {
+    const message = keyUnmeasuredMessage(reason);
+    assert.ok(message.length > 0);
+    for (const word of ["error", "failed", "wrong", "sorry", "problem"]) {
+      assert.ok(
+        !message.toLowerCase().includes(word),
+        `an unmeasured key was described with "${word}"`,
+      );
+    }
+  }
+});
+
+test("no unmeasured-key message blames the singer or claims a fault", () => {
+  const text = Object.values(KEY_UNMEASURED_MESSAGES).join(" ").toLowerCase();
+  for (const word of ["error", "failed", "invalid", "bad", "poor", "wrong"]) {
+    assert.ok(!text.includes(word), `an unmeasured reason said "${word}"`);
+  }
+});
+
+test("the pitch-class table keeps the server's order, zeroes included", () => {
+  const rows = pitchClassRows(shares({ 0: 50, 7: 50 }));
+  assert.equal(rows.length, 12, "all twelve classes are rows");
+  assert.deepEqual(
+    rows.map((row) => row.pitchClass),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+    "a key is decided as much by the absent classes as the present ones",
+  );
+  assert.equal(rows[1].share, "0.0%");
+});
+
+test("a pitch class below the share threshold is shown but not counted as used", () => {
+  const rows = pitchClassRows(
+    shares({ 0: 50, 4: 47.9, 7: MIN_PITCH_CLASS_SHARE, 11: MIN_PITCH_CLASS_SHARE - 0.1 }),
+  );
+  assert.equal(rows[7].used, true, "a class exactly at the threshold counts");
+  assert.equal(rows[11].used, false, "a stray frame does not count as a note");
+  assert.equal(rows[11].share, "1.9%", "and it is still shown rather than dropped");
+  assert.equal(rows[1].used, false);
+});
+
+test("pitch-class shares reach 100 across a real profile", () => {
+  const total = pitchClassRows(musicalKey().pitch_classes).reduce(
+    (sum, row) => sum + row.sharePercent,
+    0,
+  );
+  assert.ok(Math.abs(total - 100) < 0.01, `shares summed to ${total}`);
+});
+
+test("an empty profile is not twelve measured zeroes", () => {
+  assert.equal(hasPitchClassEvidence(null), false);
+  assert.equal(hasPitchClassEvidence(musicalKey({ pitch_classes: [] })), false);
+  assert.equal(hasPitchClassEvidence(musicalKey()), true);
+});
+
+test("the evidence survives a key that was never established", () => {
+  // The refusal must not take the numbers with it: a reader told "not measured"
+  // can still see the pitch classes that led there.
+  const refused = musicalKey({
+    key: null,
+    unmeasured_reason: "TOO_FEW_PITCH_CLASSES",
+    pitch_classes: shares({ 0: 60, 7: 40 }),
+    distinct_pitch_classes: 2,
+  });
+  assert.equal(keyLabel(refused.key), null);
+  assert.equal(hasPitchClassEvidence(refused), true);
+  assert.equal(pitchClassRows(refused.pitch_classes).filter((row) => row.used).length, 2);
+});
+
+test("no key label reads as a grade", () => {
+  const text = JSON.stringify([
+    keyLabel(estimate()),
+    pitchClassRows(musicalKey().pitch_classes),
+    Object.values(KEY_UNMEASURED_MESSAGES),
+  ]).toLowerCase();
+  for (const word of ["score", "grade", "rating", "ability", "accuracy", "correct"]) {
+    assert.ok(!text.includes(word), `the key card mentioned "${word}"`);
+  }
+});
+
+test("confidence is never formatted as a percentage", () => {
+  // A margin of 0.262 is not "26% certain", and the card must have no route to
+  // saying so: the presentation layer offers no percent helper for it.
+  const rows = pitchClassRows(musicalKey().pitch_classes);
+  assert.ok(rows.every((row) => row.share.endsWith("%")), "shares are percentages");
+  assert.equal(typeof estimate().confidence, "number");
+  assert.equal(estimate().confidence.toFixed(3), "0.262");
 });
