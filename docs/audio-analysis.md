@@ -503,7 +503,7 @@ the distance to the nearest semitone, and rounding first throws away the
 measurement — and both return nothing for a value that cannot be a pitch: zero,
 a negative, a NaN, an infinity, or a frequency outside 20–5000 Hz.
 
-## Musical key — built, not exposed (Phase 8, Slices 1–2)
+## Musical key (Phase 8, Slices 1–3)
 
 `backend/app/services/audio_analysis/key.py`, reachable through
 `AudioAnalysisService.key()`. A third aggregation of the same stored pitch
@@ -511,9 +511,10 @@ timeline, beside the note breakdown: it folds the timeline into twelve
 pitch-class shares and reports which key those shares best fit, or a stated
 reason there is none.
 
-**No route serves it, no schema describes it and no component renders it.** The
-measurement exists and no client can ask for it — the API and the UI are Slices 3
-and 4. It is not in the AI payload, the comparison or the progress series.
+Served at `GET /recordings/{id}/audio-analysis/key` — see [api.md](api.md).
+**No component renders it**: the endpoint answers and no VocalLens page asks it
+anything, which is Slice 4. It is not in the AI payload, the comparison or the
+progress series, and those remain deliberately out of scope.
 
 It differs from the note breakdown in exactly one way, and that difference is the
 whole feature: **the octave is discarded.** `A2`, `A4` and `A5` are three pitches

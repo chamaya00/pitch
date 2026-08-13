@@ -167,6 +167,7 @@ def test_another_owners_recording_is_a_404_not_a_403(
         "/audio-analysis",
         "/audio-analysis/pitch",
         "/audio-analysis/notes",
+        "/audio-analysis/key",
         "/audio-analysis/feedback",
     ],
 )

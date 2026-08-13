@@ -13,7 +13,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
-| 8 | Melodic key estimation (scope resolved in 10.8) | Started — domain (Slice 1) and service seam (Slice 2). Not exposed. [phase-8-specification.md](phase-8-specification.md) |
+| 8 | Melodic key estimation (scope resolved in 10.8) | Started — domain (1), service (2), API (3). No UI yet. [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
@@ -159,10 +159,15 @@ and `reference` never once means a reference recording.
   read `notes()` uses, handing the stored timeline to the estimator. Derived on
   read, so nothing is persisted, no migration exists, and every analysis ever
   completed is answerable.
+- **Slice 3** — `GET /recordings/{id}/audio-analysis/key`. A `200` carries the
+  key or a null key with the reason it could not be established, and the twelve
+  pitch-class shares either way; a recording with no *completed* analysis is a
+  different thing and answers `404`. No new error code, no schema change, no
+  migration.
 
-**Nothing exposes it.** There is no route, no schema, no frontend type and no UI,
-so the measurement exists and no client can ask for it. Slices 3–6 remain, and
-the phase is **not** complete until its definition of done is met.
+**No UI shows it.** The endpoint exists and answers, and no VocalLens page asks
+it anything — the frontend is Slice 4. Slices 4–6 remain, and the phase is
+**not** complete until its definition of done is met.
 
 ## Phase 10 — where it stands
 

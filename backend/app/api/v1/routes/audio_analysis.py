@@ -29,6 +29,7 @@ from app.core.errors import ApiError, ErrorCode
 from app.schemas.audio_analysis import (
     AudioAnalysisResponse,
     AudioFeedbackStateResponse,
+    MusicalKeyResponse,
     NoteBreakdownResponse,
     PitchTimelineResponse,
 )
@@ -246,6 +247,54 @@ async def get_note_breakdown(
             "That recording's audio analysis has not finished yet.",
         )
     return NoteBreakdownResponse.from_domain(analysis, notes)
+
+
+@router.get(
+    "/{recording_id}/audio-analysis/key",
+    response_model=MusicalKeyResponse,
+    summary="Get the estimated musical key",
+    description=(
+        "The key implied by **what was sung in this recording**, folded from the "
+        "same stored pitch timeline `/audio-analysis/pitch` returns.\n\n"
+        "It is not a claim that the key was the right one. There is no reference "
+        "melody in this product, so this says which key the notes best fit and "
+        "nothing about whether those were the intended notes.\n\n"
+        "**`key: null` is a measurement outcome, not an error.** A hum, a "
+        "three-note arpeggio or a chromatic wander all analyse successfully and "
+        "establish no key; `unmeasured_reason` says which evidence was missing, "
+        "and the twelve pitch-class shares are returned anyway so a reader can "
+        'see why. Render it as "not measured", never as a failure.\n\n'
+        "**`confidence` is a margin over the next-best candidate**, not a "
+        "correlation and not a probability. Random pitch classes correlate +0.49 "
+        "with a real key profile and a single held note +0.48, so a correlation "
+        "would read as near-certainty for a hum.\n\n"
+        "A recording whose audio analysis has not completed is a different thing "
+        "and answers `404`."
+    ),
+    responses=error_responses(
+        ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+        ErrorCode.RECORDING_NOT_FOUND,
+        ErrorCode.VALIDATION_ERROR,
+        ErrorCode.INTERNAL_ERROR,
+    ),
+)
+async def get_musical_key(
+    recording_id: RecordingIdPath,
+    service: AudioAnalysisServiceDep,
+    owner_id: OwnerIdDep,
+) -> MusicalKeyResponse:
+    """Return the key the analysis's pitch classes best fit, or say there is none."""
+    analysis = await _require_analysis(service, recording_id, owner_id)
+    key = await service.key(recording_id, owner_id)
+    if key is None:
+        # No *completed* analysis. Deliberately the same answer `/notes` gives,
+        # and deliberately not a null key: one means there is nothing to look
+        # at, the other means we looked and the notes settled nothing.
+        raise ApiError(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            "That recording's audio analysis has not finished yet.",
+        )
+    return MusicalKeyResponse.from_domain(analysis, key)
 
 
 @router.post(

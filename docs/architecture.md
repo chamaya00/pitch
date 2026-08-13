@@ -639,8 +639,9 @@ so the scope was a product decision rather than an engineering one. It was taken
 specification; the shortest version is that there is no song in this product to
 analyse, and `song` appears in the codebase only as a test upload filename.
 
-Two slices are built. `audio_analysis/key.py` folds a stored pitch timeline into
-twelve pitch-class shares and estimates the key those shares fit, and
+Three slices are built. `audio_analysis/key.py` folds a stored pitch timeline
+into twelve pitch-class shares and estimates the key those shares fit;
 `AudioAnalysisService.key()` reaches it through the same owner-scoped `current()`
-read `notes()` uses. **Nothing exposes it**: there is no route, no schema and no
-UI, so the measurement exists and no client can ask for it yet.
+read `notes()` uses; and `GET …/audio-analysis/key` serves it, adding no error
+code, no query and no persisted field. **No UI shows it** — the endpoint answers
+and no VocalLens page asks it anything yet.

@@ -585,3 +585,198 @@ def test_the_feedback_response_never_leaks_internals(client: TestClient, recordi
 
     for leak in ("Traceback", "/tmp", "api_key", "sk-ant", "anthropic", "system", "prompt"):
         assert leak not in text
+
+
+# --- Musical key (Phase 8, Slice 3) ----------------------------------------
+#
+# The estimator is tested exhaustively in ``test_audio_key.py`` and the service
+# seam in ``test_audio_analysis_orchestration.py``. What is tested here is the
+# HTTP contract: the two absences stay apart, the evidence is published, and the
+# response carries nothing it should not.
+
+
+def key_url(recording_id: str) -> str:
+    return f"{audio_url(recording_id)}/key"
+
+
+def melody_wav(path: Path, *, semitones: int = 0, seconds_per_note: float = 0.6) -> Path:
+    """A sung major phrase, optionally transposed: tonic and dominant carried.
+
+    Real audio through the real decoder and the real detector, so this exercises
+    the whole path rather than a constructed timeline. ``semitones`` shifts the
+    whole phrase, which is what makes a hard-coded tonic anywhere in the route or
+    the schema fail rather than pass.
+    """
+    #  C4    E4     G4     C4    F4     G4     A4     B4     G4     C4
+    phrase = [
+        261.626,
+        329.628,
+        391.995,
+        261.626,
+        349.228,
+        391.995,
+        440.0,
+        493.883,
+        391.995,
+        261.626,
+    ]
+    shift = 2.0 ** (semitones / 12.0)
+    samples: list[float] = []
+    for frequency in phrase:
+        samples += harmonic_samples(
+            frequency * shift, seconds=seconds_per_note, sample_rate=SAMPLE_RATE
+        )
+    return write_signal_wav(path, samples, sample_rate=SAMPLE_RATE)
+
+
+@pytest.mark.parametrize(("semitones", "tonic"), [(0, "C"), (5, "F"), (7, "G"), (1, "C#")])
+def test_a_sung_phrase_reports_the_key_it_fits(
+    client: TestClient, tmp_path: Path, semitones: int, tonic: str
+) -> None:
+    """The same phrase in four keys.
+
+    One key would not be enough: mutation showed that a tonic hard-coded in the
+    schema's ``from_domain`` passes a single-key test, because the fixture and
+    the fabrication agree. Transposing is what makes the mapping load-bearing.
+    """
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav", semitones=semitones))
+    client.post(audio_url(recording_id))
+
+    response = client.get(key_url(recording_id))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["key"] is not None
+    assert body["key"]["tonic"] == tonic
+    assert body["key"]["mode"] == "major"
+    assert body["unmeasured_reason"] is None
+    assert body["recording_id"] == recording_id
+
+
+def test_the_evidence_behind_the_key_is_published(client: TestClient, tmp_path: Path) -> None:
+    """A label with no evidence is a verdict. The twelve shares are the evidence."""
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    body = client.get(key_url(recording_id)).json()
+
+    assert [share["pitch_class"] for share in body["pitch_classes"]] == list(range(12))
+    assert sum(share["percentage_of_voiced_time"] for share in body["pitch_classes"]) == (
+        pytest.approx(100.0)
+    )
+    assert body["distinct_pitch_classes"] >= 5
+    assert body["voiced_seconds"] > 0
+    assert body["method"]
+
+
+def test_the_runner_up_is_returned_so_a_close_call_is_visible(
+    client: TestClient, tmp_path: Path
+) -> None:
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    key = client.get(key_url(recording_id)).json()["key"]
+
+    assert key["alternative"] is not None
+    assert (key["alternative"]["tonic"], key["alternative"]["mode"]) != (key["tonic"], key["mode"])
+
+
+def test_a_held_note_analyses_successfully_and_establishes_no_key(
+    client: TestClient, recording_id: str
+) -> None:
+    """The distinction this endpoint exists to keep.
+
+    A held A4 analyses perfectly well — range, stability and loudness are all
+    measured. It is simply one pitch class, which names no key. That is a `200`
+    with a null key and a reason, never a `404` and never an error.
+    """
+    client.post(audio_url(recording_id))
+
+    response = client.get(key_url(recording_id))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["key"] is None
+    assert body["unmeasured_reason"] == "TOO_FEW_PITCH_CLASSES"
+    assert len(body["pitch_classes"]) == 12
+    assert body["distinct_pitch_classes"] == 1
+
+
+def test_a_recording_that_was_never_analysed_has_no_key_resource(
+    client: TestClient, recording_id: str
+) -> None:
+    response = client.get(key_url(recording_id))
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "AUDIO_ANALYSIS_NOT_FOUND"
+
+
+def test_a_recording_whose_analysis_found_no_pitch_has_no_key_resource(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """A *failed* analysis is not a null key — there is nothing to look at."""
+    source = write_signal_wav(
+        tmp_path / "noise.wav",
+        noise_samples(seconds=2.0, sample_rate=SAMPLE_RATE),
+        sample_rate=SAMPLE_RATE,
+    )
+    recording_id = upload(client, source)
+    client.post(audio_url(recording_id))
+
+    assert client.get(audio_url(recording_id)).json()["status"] == "failed"
+    response = client.get(key_url(recording_id))
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "AUDIO_ANALYSIS_NOT_FOUND"
+
+
+def test_an_unknown_recording_has_no_key_resource(client: TestClient) -> None:
+    response = client.get(key_url("0" * 32))
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "RECORDING_NOT_FOUND"
+
+
+def test_a_malformed_recording_id_never_reaches_the_service(client: TestClient) -> None:
+    """Refused at the edge by the path constraint, like every sibling route."""
+    for bad in ("../../etc/passwd", "not-hex", "0" * 31, "0" * 33):
+        response = client.get(f"{RECORDINGS_URL}/{bad}/audio-analysis/key")
+        assert response.status_code in (404, 422), (bad, response.status_code)
+
+
+def test_the_key_response_carries_no_internal_identifiers(
+    client: TestClient, tmp_path: Path
+) -> None:
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    text = client.get(key_url(recording_id)).text
+
+    for forbidden in ("owner_id", "owner", "token", "credential", "hash", "password"):
+        assert forbidden not in text.lower(), forbidden
+
+
+def test_asking_for_a_key_twice_returns_the_same_answer(client: TestClient, tmp_path: Path) -> None:
+    """A derived measurement, so repeating the request cannot change it."""
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    first = client.get(key_url(recording_id)).json()
+    second = client.get(key_url(recording_id)).json()
+
+    assert first == second
+
+
+def test_reading_a_key_is_never_rate_limited(client: TestClient, tmp_path: Path) -> None:
+    """Reading is not charged, exactly as the note breakdown and timeline are not."""
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    statuses = {client.get(key_url(recording_id)).status_code for _ in range(30)}
+
+    assert statuses == {200}
+
+
+def test_the_key_endpoint_is_published_in_the_schema(client: TestClient) -> None:
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/v1/recordings/{recording_id}/audio-analysis/key" in paths

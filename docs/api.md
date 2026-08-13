@@ -705,6 +705,72 @@ tie, so the same analysis always renders the same way.
 Available only once the analysis has completed; otherwise `404`
 `AUDIO_ANALYSIS_NOT_FOUND`.
 
+### `GET /api/v1/recordings/{recording_id}/audio-analysis/key`
+
+The musical key implied by **what was sung in this recording**, folded from the
+same stored pitch timeline `/audio-analysis/pitch` returns. **Derived on read**,
+like `/notes`: nothing is persisted, no migration precedes it, and every analysis
+ever completed is answerable.
+
+```json
+{
+  "recording_id": "…",
+  "audio_analysis_id": "…",
+  "key": {
+    "tonic": "G",
+    "mode": "major",
+    "confidence": 0.246,
+    "alternative": { "tonic": "D", "mode": "major", "confidence": 0.198 }
+  },
+  "unmeasured_reason": null,
+  "pitch_classes": [
+    { "pitch_class": 0, "name": "C",  "percentage_of_voiced_time": 4.1 },
+    { "pitch_class": 1, "name": "C#", "percentage_of_voiced_time": 0.0 }
+  ],
+  "distinct_pitch_classes": 7,
+  "voiced_seconds": 5.84,
+  "method": "temperley"
+}
+```
+
+**This is not a claim that the key was the right one.** There is no reference
+melody in this product, so it says which key the notes best fit and nothing about
+whether those were the intended notes. It is not a score and not a grade.
+
+**`key: null` is a measurement outcome, not an error.** A hum, a three-note
+arpeggio and a chromatic wander all analyse successfully and establish no key.
+The response keeps its shape, `key` is `null`, and `unmeasured_reason` is one of
+`TOO_FEW_PITCH_CLASSES`, `TOO_LITTLE_VOICED_TIME` or `AMBIGUOUS`. That is a
+**reason, not an error code** — it never appears in the error envelope, is never
+an HTTP status, and is not in the vocabulary below. Render it as "not measured",
+the way every other unavailable measurement is rendered.
+
+**The evidence is published either way.** `pitch_classes` carries all twelve
+entries in pitch-class order, **including the unused ones at zero**, because a
+key is decided as much by which classes are absent as by which are present. A
+reader who is told "not measured" can see what led to it.
+
+**`confidence` is a margin over the next-best candidate**, not a correlation and
+not a probability. Random pitch classes correlate +0.49 with a real key profile
+and a single held note +0.48, so a correlation would read as near-certainty for a
+hum. `alternative` is the runner-up, so a close call is visible rather than
+hidden behind one confident label.
+
+`method` names the published profile set the estimate came from. The numbers are
+only interpretable against it, exactly as `settings` is for the summary.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Recording unknown, or another owner's | 404 | `RECORDING_NOT_FOUND` |
+| No **completed** analysis — never run, pending, or failed | 404 | `AUDIO_ANALYSIS_NOT_FOUND` |
+
+**No new error code.** A recording with no completed analysis is a different
+thing from a completed analysis that established no key, and the two answers stay
+apart: `404` for the first, `200` with a null key for the second.
+
+It is a read, so it is not charged against the costly-request limit. Repeating it
+returns byte-identical output; it writes nothing.
+
 ### `POST /api/v1/recordings/{recording_id}/audio-analysis/feedback`
 
 Ask a language model to explain the measured audio in plain language.
@@ -819,43 +885,6 @@ Starts analysis in the background.
 
 Generates the LLM interpretation of an existing analysis. Returns the structured
 object documented in [ai.md](ai.md). Requires `ANTHROPIC_API_KEY`.
-
-### `GET /api/v1/recordings/{recording_id}/audio-analysis/key` — Phase 8
-
-The musical key implied by what was sung, **derived on read** from the stored
-pitch timeline in the same way `/notes` is. Nothing new is persisted, so no
-migration precedes it and every existing completed analysis is answerable.
-
-Specified in full — request, both `200` shapes, statuses, ownership, idempotency
-and rate-limit behaviour — in
-[phase-8-specification.md](phase-8-specification.md#8-candidate-a--api). **The
-route is not implemented.** The measurement behind it is: `key.py` estimates it
-and `AudioAnalysisService.key()` reaches it through the owner-scoped read, but
-nothing serves it over HTTP, so no client can ask for the shape below yet.
-
-**200 OK**
-
-```json
-{
-  "key": { "tonic": "G", "mode": "major", "confidence": 0.246,
-           "alternative": { "tonic": "D", "mode": "major", "confidence": 0.198 } },
-  "pitch_classes": [ { "pitch_class": 0, "name": "C", "percentage_of_voiced_time": 4.1 } ],
-  "distinct_pitch_classes": 7,
-  "voiced_seconds": 5.84,
-  "method": "temperley"
-}
-```
-
-`key` is `null` when the evidence does not support one, with the same shape and
-an `unmeasured_reason` of `TOO_FEW_PITCH_CLASSES`, `TOO_LITTLE_VOICED_TIME` or
-`AMBIGUOUS`. That is a **normal outcome**, rendered as "not measured" — it is not
-an error code, never an HTTP status, and is not added to the vocabulary below.
-The measurements are returned alongside it either way, so a reader can see why.
-
-`404` `RECORDING_NOT_FOUND` for an unknown or another owner's recording, and
-`404` `AUDIO_ANALYSIS_NOT_FOUND` when there is no completed analysis. **No new
-error code.** It is a read, so it is not charged against the costly-request
-limit.
 
 ---
 

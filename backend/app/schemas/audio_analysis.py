@@ -29,8 +29,14 @@ from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioFeedback,
     AudioMetrics,
+    KeyAnalysis,
+    KeyCandidate,
+    KeyEstimate,
+    KeyMode,
+    KeyUnmeasuredReason,
     Loudness,
     NoteSummary,
+    PitchClassShare,
     PitchPoint,
     PitchStability,
     SpectralFeatures,
@@ -393,6 +399,136 @@ class NoteBreakdownResponse(BaseModel):
             total_frames=sum(note.frame_count for note in notes),
             in_tune_cents=IN_TUNE_CENTS,
             notes=[NoteSummaryResponse.from_domain(note) for note in notes],
+        )
+
+
+class PitchClassShareResponse(BaseModel):
+    """How much of the pitched time went to one pitch class."""
+
+    pitch_class: int = Field(description="0-11, where 0 is C.")
+    name: str = Field(description="Pitch class without an octave, sharps only, e.g. `C#`.")
+    percentage_of_voiced_time: float = Field(
+        description=(
+            "Share of the recording's **pitched** time. Silence and unvoiced "
+            "audio are excluded, so the twelve values sum to 100."
+        )
+    )
+
+    @classmethod
+    def from_domain(cls, share: PitchClassShare) -> "PitchClassShareResponse":
+        return cls(**share.model_dump())
+
+
+class KeyCandidateResponse(BaseModel):
+    """One key, and how far it stood clear of the next one."""
+
+    tonic: str = Field(description="Pitch class of the tonic, sharps only, e.g. `F#`.")
+    mode: KeyMode
+    confidence: float = Field(
+        description=(
+            "Margin between this candidate's correlation and the next candidate's. "
+            "**Not a correlation and not a probability**: random pitch classes "
+            "correlate +0.49 with a real key profile and one held note +0.48, so a "
+            "correlation would read as certainty for a hum. The margin is what "
+            "separates evidence from arithmetic."
+        )
+    )
+
+    @classmethod
+    def from_domain(cls, candidate: KeyCandidate) -> "KeyCandidateResponse":
+        return cls(**candidate.model_dump())
+
+
+class KeyEstimateResponse(BaseModel):
+    """The key a recording's pitch classes best fit, with its runner-up.
+
+    **An estimate of what was sung, not a statement that it was right.** There is
+    no reference melody in this product, so this cannot say whether the key was
+    the intended one - only which key the notes that were sung best fit.
+    """
+
+    tonic: str = Field(description="Pitch class of the tonic, sharps only, e.g. `F#`.")
+    mode: KeyMode
+    confidence: float = Field(description="See `alternative.confidence` for the definition.")
+    alternative: KeyCandidateResponse | None = Field(
+        default=None,
+        description=(
+            "The candidate that came second, so a close call is visible rather "
+            "than hidden behind one confident-looking label."
+        ),
+    )
+
+    @classmethod
+    def from_domain(cls, estimate: KeyEstimate) -> "KeyEstimateResponse":
+        return cls(
+            tonic=estimate.tonic,
+            mode=estimate.mode,
+            confidence=estimate.confidence,
+            alternative=(
+                KeyCandidateResponse.from_domain(estimate.alternative)
+                if estimate.alternative is not None
+                else None
+            ),
+        )
+
+
+class MusicalKeyResponse(BaseModel):
+    """The key implied by what was sung, or a stated reason there is none.
+
+    **`key: null` is a measurement outcome, not an error.** It means the analysis
+    ran, the timeline is there, and the notes in it do not establish a key -
+    which a hum, an arpeggio or a chromatic wander all produce. Render it as
+    "not measured", the way every other unavailable measurement is rendered.
+    `unmeasured_reason` says which evidence was missing.
+
+    The evidence travels with the verdict either way. `pitch_classes` is always
+    twelve entries when there was anything pitched to fold, **including the
+    unused classes at zero**, because a key is decided as much by which classes
+    are absent as by which are present.
+
+    A recording with no *completed* analysis is a different thing entirely and
+    answers `404`, not a null key.
+    """
+
+    recording_id: str
+    audio_analysis_id: str
+    key: KeyEstimateResponse | None = Field(
+        default=None, description="`null` when the evidence did not establish one."
+    )
+    unmeasured_reason: KeyUnmeasuredReason | None = Field(
+        default=None,
+        description=(
+            "Present exactly when `key` is `null`. **Not an error code**: it never "
+            "appears in the error envelope and is never an HTTP status."
+        ),
+    )
+    pitch_classes: list[PitchClassShareResponse] = Field(
+        description="Twelve entries in pitch-class order, including unused ones at zero."
+    )
+    distinct_pitch_classes: int = Field(
+        description="Pitch classes carrying more than a negligible share of the pitched time."
+    )
+    voiced_seconds: float = Field(description="Pitched time the profile was folded from.")
+    method: str = Field(
+        description=(
+            "Which published key-profile set produced this. The numbers are only "
+            "interpretable against it, as `settings` is for the summary."
+        )
+    )
+
+    @classmethod
+    def from_domain(cls, analysis: AudioAnalysis, key: KeyAnalysis) -> "MusicalKeyResponse":
+        return cls(
+            recording_id=analysis.recording_id,
+            audio_analysis_id=analysis.audio_analysis_id,
+            key=(KeyEstimateResponse.from_domain(key.key) if key.key is not None else None),
+            unmeasured_reason=key.unmeasured_reason,
+            pitch_classes=[
+                PitchClassShareResponse.from_domain(share) for share in key.pitch_classes
+            ],
+            distinct_pitch_classes=key.distinct_pitch_classes,
+            voiced_seconds=key.voiced_seconds,
+            method=key.method,
         )
 
 
