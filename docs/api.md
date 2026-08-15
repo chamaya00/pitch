@@ -684,6 +684,12 @@ recording with nothing voiced has `range: null` — not a range of zero semitone
 range measured at a 0.80 clarity threshold is not the same measurement as one
 taken at 0.90.
 
+`pitch_point_count` says how many frames the timeline holds **without the server
+reading them**: this response is served from the stored analysis with its
+timeline left in the database, so polling it while a measurement runs does not
+cost a document per poll. Fetch the points themselves from `/audio-analysis/pitch`.
+See [architecture.md](architecture.md).
+
 There is deliberately no score, no grade, and no timbre label.
 
 | Failure | Status | Code |

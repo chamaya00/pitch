@@ -21,7 +21,7 @@ names.
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Final, Self
+from typing import Any, Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -502,16 +502,25 @@ TERMINAL_STATUSES: Final[frozenset[AudioAnalysisStatus]] = frozenset(
 )
 
 
-class AudioAnalysis(BaseModel):
-    """One deterministic audio analysis of one recording.
+class AudioAnalysisSummary(BaseModel):
+    """One deterministic audio analysis of one recording, **without its timeline**.
+
+    Everything a record says about itself — what state it is in, why it failed,
+    what was measured — except the frame-by-frame pitch points. The timeline is
+    the whole cost of a stored analysis: about 1.6 MB of JSON for a five-minute
+    recording against 1.2 kB for everything else, so a reader that does not
+    return it should not pay for it. :class:`AudioAnalysis` is this plus the
+    points, and the split is a *type*, not a convention — see below.
 
     The validator encodes what makes a stored record trustworthy: a failure
     always says why, a success never carries a stale error code, and a completed
-    record always has its metrics attached.
+    record always has its metrics attached. Those rules are stated once, here,
+    and inherited, so a summary read cannot be validated more loosely than the
+    record it summarises.
 
-    ``pitch_points`` is the timeline. It can be long — tens of thousands of
-    entries for a long recording — so the API exposes it on its own path rather
-    than inside the summary response.
+    ``pitch_point_count`` is how many points the stored timeline holds, and it is
+    the reason a summary is honest rather than lossy: a reader can still tell
+    "measured 12 931 frames" from "measured nothing" without loading either.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -527,7 +536,9 @@ class AudioAnalysis(BaseModel):
     error_code: ErrorCode | None = None
 
     metrics: AudioMetrics | None = None
-    pitch_points: tuple[PitchPoint, ...] = ()
+    #: Frames in the stored timeline. On :class:`AudioAnalysis` it is derived
+    #: from the points themselves and cannot be set independently of them.
+    pitch_point_count: int = Field(default=0, ge=0)
 
     #: Generated prose about the measurements. Optional in every sense: an
     #: analysis is complete without it, and a provider outage costs the prose
@@ -548,7 +559,7 @@ class AudioAnalysis(BaseModel):
         if self.status is AudioAnalysisStatus.COMPLETED and self.metrics is None:
             raise ValueError("a completed audio analysis must have metrics")
 
-        if self.pitch_points and self.metrics is None:
+        if self.pitch_point_count and self.metrics is None:
             raise ValueError("pitch points cannot exist without the metrics describing them")
 
         # The same rule the speech analysis keeps: prose is never stored
@@ -570,3 +581,40 @@ class AudioAnalysis(BaseModel):
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+
+class AudioAnalysis(AudioAnalysisSummary):
+    """A summary **with** its pitch timeline attached.
+
+    ``pitch_points`` can be long — tens of thousands of entries for a long
+    recording — which is why the API exposes it on its own path rather than
+    inside the summary response, and why most reads use the base class instead.
+
+    A subclass rather than a sibling, and that direction is deliberate. Anything
+    that only needs the state, the measurements or the feedback accepts a
+    :class:`AudioAnalysisSummary` and is handed either kind; anything that reads
+    the timeline — the note breakdown, the key, and **every write**, which
+    re-serialises the whole document — asks for this type and cannot be given a
+    record whose points were left in the database. That is a type error at the
+    call site rather than a silently empty timeline, which is the failure this
+    split exists to prevent.
+
+    ``pitch_point_count`` is set here from the points themselves, so it can
+    never disagree with them and no caller has to maintain it.
+    """
+
+    pitch_points: tuple[PitchPoint, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _count_the_points(cls, data: Any) -> Any:
+        """Derive the count from the timeline, whatever a caller supplied.
+
+        A stored document written before this field existed has no count, and
+        one written after has a count that is already correct; recomputing
+        covers both and makes a stale or forged value unrepresentable.
+        """
+        if isinstance(data, dict):
+            points = data.get("pitch_points") or ()
+            return {**data, "pitch_point_count": len(points)}
+        return data

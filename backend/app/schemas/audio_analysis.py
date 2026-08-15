@@ -27,6 +27,7 @@ from app.services.audio_analysis.models import (
     IN_TUNE_CENTS,
     AnalysisSettings,
     AudioAnalysis,
+    AudioAnalysisSummary,
     AudioFeedback,
     AudioMetrics,
     KeyAnalysis,
@@ -238,7 +239,7 @@ class AudioAnalysisResponse(BaseModel):
     )
 
     @classmethod
-    def from_domain(cls, analysis: AudioAnalysis) -> "AudioAnalysisResponse":
+    def from_domain(cls, analysis: AudioAnalysisSummary) -> "AudioAnalysisResponse":
         return cls(
             audio_analysis_id=analysis.audio_analysis_id,
             recording_id=analysis.recording_id,
@@ -250,7 +251,7 @@ class AudioAnalysisResponse(BaseModel):
             summary=(
                 AudioSummaryResponse.from_domain(analysis.metrics) if analysis.metrics else None
             ),
-            pitch_point_count=len(analysis.pitch_points),
+            pitch_point_count=analysis.pitch_point_count,
         )
 
 
@@ -313,7 +314,7 @@ class AudioFeedbackStateResponse(BaseModel):
     )
 
     @classmethod
-    def from_domain(cls, analysis: AudioAnalysis) -> "AudioFeedbackStateResponse":
+    def from_domain(cls, analysis: AudioAnalysisSummary) -> "AudioFeedbackStateResponse":
         return cls(
             recording_id=analysis.recording_id,
             audio_analysis_id=analysis.audio_analysis_id,
@@ -390,7 +391,7 @@ class NoteBreakdownResponse(BaseModel):
 
     @classmethod
     def from_domain(
-        cls, analysis: AudioAnalysis, notes: tuple[NoteSummary, ...]
+        cls, analysis: AudioAnalysisSummary, notes: tuple[NoteSummary, ...]
     ) -> "NoteBreakdownResponse":
         return cls(
             recording_id=analysis.recording_id,
@@ -517,7 +518,7 @@ class MusicalKeyResponse(BaseModel):
     )
 
     @classmethod
-    def from_domain(cls, analysis: AudioAnalysis, key: KeyAnalysis) -> "MusicalKeyResponse":
+    def from_domain(cls, analysis: AudioAnalysisSummary, key: KeyAnalysis) -> "MusicalKeyResponse":
         return cls(
             recording_id=analysis.recording_id,
             audio_analysis_id=analysis.audio_analysis_id,
@@ -576,7 +577,7 @@ class PitchTimelineResponse(BaseModel):
         return cls(
             recording_id=analysis.recording_id,
             audio_analysis_id=analysis.audio_analysis_id,
-            total_points=len(analysis.pitch_points),
+            total_points=analysis.pitch_point_count,
             returned_points=len(points),
             decimation=decimation,
             points=[PitchPointResponse.from_domain(point) for point in points],

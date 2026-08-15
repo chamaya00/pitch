@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11) |
 
 ## Phase 0 — delivered
 
@@ -411,6 +411,40 @@ Delivered in 10.10 — *a rate-limit counter every worker shares*:
   fresh schema failed **25 of 30**; with the lock first, 30 of 30 succeed. It
   only ever bit an empty database, which is why no existing test caught it.
 
+Delivered in 10.11 — *the read path stops paying for the pitch timeline*:
+
+- The first performance work in the phase, and the failure was measured before
+  it was fixed. One stored analysis of a five-minute recording is **1 596 kB of
+  pitch timeline and 1.2 kB of everything else**, and *every* read loaded all of
+  it — including the reads that return no pitch point at all.
+- The worst of them is the one the browser **polls** while a measurement runs.
+  `GET /audio-analysis` returns a range, a stability block and a count; it was
+  costing 116.7 ms and 19 MB of peak allocation per poll to do it.
+- `AudioAnalysisSummary` is the record without the points, plus a
+  `pitch_point_count` so a reader can still tell "measured 12 931 frames" from
+  "measured nothing". `AudioAnalysis` is that **plus** the timeline, as a
+  subclass — so anything needing only state accepts either, and anything reading
+  the points, or writing the document back, asks for the full type. Handing a
+  summary to a write is a type error rather than a silently erased timeline.
+  The count is derived from the points and a supplied value is discarded, so it
+  cannot drift or be forged.
+- In SQL: `document - 'pitch_points'` with `jsonb_array_length` beside it, so
+  PostgreSQL drops the points before the row crosses the socket. Through the
+  real driver, **83.8 ms and 19 151 kB → 1.8 ms and 15 kB**. End to end over
+  HTTP: `GET /audio-analysis` 116.7 → 8.4 ms, `GET …/feedback` 120.2 → 8.6 ms.
+- `/pitch` and `/key` are **unchanged**, and that is the result rather than a
+  gap: they return or fold the points, so they still load them. The split makes
+  paying for a timeline a choice a route makes, not a cost every route pays.
+- `/notes` halved, 189.0 → 90.2 ms, for a different reason found on the way: it
+  loaded its analysis **twice**, once for the ids in its response and once
+  through `service.notes`. `notes_of` is now the seam `key_of` was given in
+  Phase 8 slice 5, closing the same window — two loads can straddle a
+  re-analysis and pair one record's ids with another record's notes.
+- Nothing was migrated, nothing is cached, nothing is stored twice, and every
+  analysis ever written answers the new reads. The contract suite covers them
+  against **both** repository implementations, so a double that quietly kept the
+  points fails the same assertion the database passes.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -418,8 +452,11 @@ considered and rejected for this slice — adding them while deferring reset,
 verification and rate limiting would make the system *less* safe than 128 random
 bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
 in Phase 10 are TLS termination (still an external responsibility — the proxy
-speaks HTTP and claims no HSTS), performance work, and every credential feature
-10.2 deferred. The shared rate-limit counter landed in 10.10. Error pages landed
+speaks HTTP and claims no HSTS) and every credential feature 10.2 deferred.
+Performance work **started** in 10.11 and is not finished: that step addressed
+the audio-analysis read path, and the speech pipeline, the history list and the
+frontend bundle have not been measured at all. The shared rate-limit counter
+landed in 10.10. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
 hold recordings remains unspecified and unbuilt. The Content-Security-Policy

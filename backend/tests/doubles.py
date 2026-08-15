@@ -36,6 +36,7 @@ from app.services.analysis.postgres_repository import (
 from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
+    AudioAnalysisSummary,
     AudioFeedbackStatus,
 )
 from app.services.audio_analysis.postgres_repository import (
@@ -466,6 +467,16 @@ class InMemoryAnalysisRepository:
                 del self._records[stored_id]
 
 
+def _summary_of(analysis: AudioAnalysis) -> AudioAnalysisSummary:
+    """Drop the timeline, exactly as ``document - 'pitch_points'`` does in SQL.
+
+    Built by *removing* the points rather than by copying fields across, so a
+    field added to the record cannot go missing from the summary here while the
+    database keeps returning it.
+    """
+    return AudioAnalysisSummary.model_validate(analysis.model_dump(exclude={"pitch_points"}))
+
+
 class InMemoryAudioAnalysisRepository:
     """Audio analyses in a dictionary."""
 
@@ -487,6 +498,10 @@ class InMemoryAudioAnalysisRepository:
     async def get(self, audio_analysis_id: str) -> AudioAnalysis | None:
         return self._records.get(audio_analysis_id)
 
+    async def summary(self, audio_analysis_id: str) -> AudioAnalysisSummary | None:
+        stored = self._records.get(audio_analysis_id)
+        return None if stored is None else _summary_of(stored)
+
     async def update(
         self, analysis: AudioAnalysis, *, expect_status: AudioAnalysisStatus
     ) -> AudioAnalysis:
@@ -498,7 +513,7 @@ class InMemoryAudioAnalysisRepository:
         self._records[analysis.audio_analysis_id] = analysis
         return analysis
 
-    async def claim_feedback(self, audio_analysis_id: str) -> AudioAnalysis | None:
+    async def claim_feedback(self, audio_analysis_id: str) -> AudioAnalysisSummary | None:
         stored = self._records.get(audio_analysis_id)
         if stored is None or stored.status is not AudioAnalysisStatus.COMPLETED:
             return None
@@ -516,10 +531,18 @@ class InMemoryAudioAnalysisRepository:
             }
         )
         self._records[audio_analysis_id] = claimed
-        return claimed
+        # The SQL claims by conditional UPDATE and returns the document with its
+        # timeline stripped; returning the whole record here would let a caller
+        # depend on points the database never sends.
+        return _summary_of(claimed)
 
     async def latest_for_recording(self, recording_id: str) -> AudioAnalysis | None:
         for analysis in await self.list_for_recording(recording_id):
+            return analysis
+        return None
+
+    async def latest_summary_for_recording(self, recording_id: str) -> AudioAnalysisSummary | None:
+        for analysis in await self.list_summaries_for_recording(recording_id):
             return analysis
         return None
 
@@ -531,6 +554,9 @@ class InMemoryAudioAnalysisRepository:
             key=lambda analysis: (analysis.created_at, analysis.audio_analysis_id), reverse=True
         )
         return matches
+
+    async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
+        return [_summary_of(analysis) for analysis in await self.list_for_recording(recording_id)]
 
     def delete_for_recording(self, recording_id: str) -> None:
         """The cascade from ``recordings``. Not part of any production protocol."""

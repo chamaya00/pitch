@@ -39,6 +39,8 @@ from app.services.audio_analysis.models import (
     AnalysisSettings,
     AudioAnalysis,
     AudioAnalysisStatus,
+    AudioAnalysisSummary,
+    AudioFeedbackStatus,
     AudioMetrics,
     KeyMode,
     KeyUnmeasuredReason,
@@ -598,20 +600,42 @@ class CountingAnalysisRepository(InMemoryAudioAnalysisRepository):
     thousands of points at the accepted maximum — and it is the expensive part
     of any request that derives something from it, far outweighing the
     arithmetic. Counting them is how a second one gets noticed.
+
+    ``summary_loads`` counts the reads that leave the timeline in the database.
+    Those are the cheap ones — 1.7 ms against 87 ms, measured — and they are
+    counted separately rather than ignored so a test can say "this path read the
+    record, and read it the inexpensive way" instead of only "it read nothing".
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.writes = 0
         self.loads = 0
+        self.summary_loads = 0
 
     async def create(self, analysis: AudioAnalysis) -> AudioAnalysis:
         self.writes += 1
         return await super().create(analysis)
 
+    async def get(self, audio_analysis_id: str) -> AudioAnalysis | None:
+        self.loads += 1
+        return await super().get(audio_analysis_id)
+
+    async def summary(self, audio_analysis_id: str) -> AudioAnalysisSummary | None:
+        self.summary_loads += 1
+        return await super().summary(audio_analysis_id)
+
     async def latest_for_recording(self, recording_id: str) -> AudioAnalysis | None:
         self.loads += 1
         return await super().latest_for_recording(recording_id)
+
+    async def latest_summary_for_recording(self, recording_id: str) -> AudioAnalysisSummary | None:
+        self.summary_loads += 1
+        return await super().latest_summary_for_recording(recording_id)
+
+    async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
+        self.summary_loads += 1
+        return await super().list_summaries_for_recording(recording_id)
 
     async def update(
         self, analysis: AudioAnalysis, *, expect_status: AudioAnalysisStatus
@@ -619,7 +643,7 @@ class CountingAnalysisRepository(InMemoryAudioAnalysisRepository):
         self.writes += 1
         return await super().update(analysis, expect_status=expect_status)
 
-    async def claim_feedback(self, audio_analysis_id: str) -> AudioAnalysis | None:
+    async def claim_feedback(self, audio_analysis_id: str) -> AudioAnalysisSummary | None:
         self.writes += 1
         return await super().claim_feedback(audio_analysis_id)
 
@@ -1121,3 +1145,107 @@ def _seconds(call: Callable[[], None]) -> float:
     start = time.perf_counter()
     call()
     return time.perf_counter() - start
+
+
+# --- Which reads carry a timeline ------------------------------------------
+#
+# The stored document is almost entirely its pitch timeline — 1 596 kB against
+# 1.2 kB for everything else at the longest accepted recording, which measured
+# 87 ms and 19 MB of peak allocation per read versus 1.7 ms and 14 kB without
+# the points. These count which paths pay for it, so a decision about state that
+# starts loading a timeline fails here.
+
+
+def test_starting_an_analysis_reads_no_timeline(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    recording_id: str,
+) -> None:
+    """`start` decides from statuses and timestamps, never from points.
+
+    It is also the worst place to load one: the decision walks *every* analysis
+    the recording has ever had, so a re-analysed recording would cost a document
+    per attempt on each ``POST``.
+    """
+    analyses = CountingAnalysisRepository()
+    _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    started = run(lambda: service.start(recording_id, OWNER_ID))
+
+    assert started.created is False
+    assert analyses.loads == 0
+    assert analyses.summary_loads > 0
+    # The record it hands back knows how much was measured without holding it.
+    assert started.analysis.pitch_point_count > 0
+    assert not hasattr(started.analysis, "pitch_points")
+
+
+def test_claiming_feedback_reads_no_timeline(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    recording_id: str,
+) -> None:
+    """The claim decides whether a paid provider call may happen.
+
+    Every input to that decision is a status, an error code or the presence of
+    metrics. The timeline is loaded once by `run_feedback`, after the claim has
+    been won, so a request that loses the race pays nothing for the points.
+    """
+    analyses = CountingAnalysisRepository()
+    _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    claimed = run(lambda: service.start_feedback(recording_id, OWNER_ID))
+
+    assert claimed.feedback_status is AudioFeedbackStatus.GENERATING
+    assert analyses.loads == 0
+    assert not hasattr(claimed, "pitch_points")
+
+
+def test_reading_the_note_breakdown_loads_the_analysis_once(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    recording_id: str,
+) -> None:
+    """The property Phase 8 slice 5 established for the key, now for the notes."""
+    analyses = CountingAnalysisRepository()
+    _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    notes = run(lambda: service.notes(recording_id, OWNER_ID))
+
+    assert notes
+    assert analyses.loads == 1
+
+
+def test_a_summary_read_still_reports_the_measured_frames(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    analyses: InMemoryAudioAnalysisRepository,
+    recording_id: str,
+) -> None:
+    """Leaving the points in the store must not lose the fact that they exist.
+
+    A summary reporting no points would read exactly like an analysis that
+    measured nothing — the one thing a stripped document could quietly get
+    wrong.
+    """
+    points = _timeline(_C_MAJOR_MELODY)
+    _store_completed(analyses, recording_id, points)
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    summary = run(lambda: service.current(recording_id, OWNER_ID))
+    whole = run(lambda: service.current_timeline(recording_id, OWNER_ID))
+
+    assert summary is not None and whole is not None
+    assert summary.pitch_point_count == len(points) == len(whole.pitch_points)
+    assert summary.audio_analysis_id == whole.audio_analysis_id

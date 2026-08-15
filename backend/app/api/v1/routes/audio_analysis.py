@@ -36,6 +36,7 @@ from app.schemas.audio_analysis import (
 from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
+    AudioAnalysisSummary,
     AudioFeedbackStatus,
 )
 from app.services.orchestration.audio_analysis import AudioAnalysisService
@@ -189,7 +190,7 @@ async def get_pitch_timeline(
     ] = DEFAULT_MAX_POINTS,
 ) -> PitchTimelineResponse:
     """Return the analysis's pitch points, decimated to ``max_points``."""
-    analysis = await _require_analysis(service, recording_id, owner_id)
+    analysis = await _require_timeline(service, recording_id, owner_id)
     if analysis.status is not AudioAnalysisStatus.COMPLETED:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
@@ -239,8 +240,13 @@ async def get_note_breakdown(
     owner_id: OwnerIdDep,
 ) -> NoteBreakdownResponse:
     """Return the analysis's pitched time, aggregated by note."""
-    analysis = await _require_analysis(service, recording_id, owner_id)
-    notes = await service.notes(recording_id, owner_id)
+    analysis = await _require_timeline(service, recording_id, owner_id)
+    # Aggregated from the record already loaded, exactly as the key is below.
+    # This route used to resolve the analysis and then call `service.notes`,
+    # which resolved it again — two loads of a document whose timeline is the
+    # whole cost of the request, and a window in which a re-analysis between
+    # them could pair one analysis's ids with another analysis's notes.
+    notes = service.notes_of(analysis)
     if notes is None:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
@@ -284,7 +290,7 @@ async def get_musical_key(
     owner_id: OwnerIdDep,
 ) -> MusicalKeyResponse:
     """Return the key the analysis's pitch classes best fit, or say there is none."""
-    analysis = await _require_analysis(service, recording_id, owner_id)
+    analysis = await _require_timeline(service, recording_id, owner_id)
     # Folded from the record already loaded, not fetched again: the pitch
     # timeline is the expensive part of this request and a second read would
     # buy nothing but the chance of pairing one analysis's ids with another
@@ -394,8 +400,32 @@ async def get_audio_feedback(
 
 async def _require_analysis(
     service: AudioAnalysisService, recording_id: str, owner_id: uuid.UUID
-) -> AudioAnalysis:
+) -> AudioAnalysisSummary:
+    """The recording's current analysis, without its pitch timeline.
+
+    What the two summary routes need. Neither returns a pitch point, and
+    loading the timeline for them cost 87 ms and 19 MB per request at the
+    longest recording this product accepts — on the read the browser polls
+    while a measurement runs.
+    """
     analysis = await service.current(recording_id, owner_id)
+    if analysis is None:
+        raise ApiError(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            "That recording's audio has not been analysed yet.",
+        )
+    return analysis
+
+
+async def _require_timeline(
+    service: AudioAnalysisService, recording_id: str, owner_id: uuid.UUID
+) -> AudioAnalysis:
+    """The same record **with** its pitch timeline, for the three routes built on it.
+
+    Separate from :func:`_require_analysis` so that paying for the points is a
+    choice a route makes, and visible in its own body.
+    """
+    analysis = await service.current_timeline(recording_id, owner_id)
     if analysis is None:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
