@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10) |
 
 ## Phase 0 — delivered
 
@@ -370,6 +370,47 @@ Delivered in 10.9 — *a Content-Security-Policy that is real*:
   `force-dynamic`, and setting the policy on the request as well as the
   response) are asserted from the files that carry them.
 
+Delivered in 10.10 — *a rate-limit counter every worker shares*:
+
+- 10.3 wrote down that its limiter was one process's memory and that several
+  workers would multiply the limit. That caveat sat in three files and was never
+  measured. It is now, against a real server at a limit of five new identities
+  per hour: **1 worker → 5, 2 → 10, 4 → 20, 8 → 34**. The multiplier is not
+  approximately the worker count; it *is* the worker count.
+- The reason 10.3 gave for rejecting a database-backed counter — it "would add a
+  write to every request in order to bound the cost of writes" — **did not
+  survive re-inspection of the call sites**. Neither guard runs on every request:
+  the identity guard runs only from `before_mint`, immediately before two rows
+  are inserted, and the costly guard only on uploading, either analysis, feedback
+  and adding a key. Reading is never limited. Every counted request was already
+  about to write, which is the same ground 10.6 stood on.
+- `RateLimiter`, an async protocol with two implementations — exactly where 10.3
+  said a shared counter would belong if one were ever needed. The in-process
+  algorithm is untouched and still synchronous and I/O-free.
+- The correctness argument is one statement: an `INSERT ... ON CONFLICT DO
+  UPDATE` that rolls the window and counts the attempt together, so two workers
+  collide on the primary key and the second applies its increment to the row the
+  first committed. The obvious alternative was built to see it fail — a
+  read-then-write limiter allowed **40 of 40** attempts against a limit of 5,
+  where the upsert allowed exactly 5.
+- One contract suite runs against both limiters, so a shared counter that
+  disagreed with the one it replaces fails the same assertion. Nothing in it
+  sleeps: the in-process limiter gets a hand-cranked clock and the shared one has
+  its stored window backdated.
+- **The default stays in-process**, because for a single-worker deployment it is
+  not a compromise — 0.001 ms against 0.9 ms, and exact. `RATE_LIMIT_BACKEND=
+  database` is opt-in, and selecting it without `DATABASE_URL` is refused at
+  startup rather than falling back to four counters that look like one.
+- What it gives up is written down rather than glossed: the shared window is
+  anchored to the database server's wall clock, because a monotonic clock is
+  meaningless between machines.
+- **A bug older than this step surfaced and was fixed.** Making several workers a
+  supported shape exposed that `apply_migrations` created `schema_migrations`
+  *before* taking its advisory lock, and `CREATE TABLE IF NOT EXISTS` is not
+  atomic against a concurrent create. Six workers booting together against a
+  fresh schema failed **25 of 30**; with the lock first, 30 of 30 succeed. It
+  only ever bit an empty database, which is why no existing test caught it.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -377,8 +418,8 @@ considered and rejected for this slice — adding them while deferring reset,
 verification and rate limiting would make the system *less* safe than 128 random
 bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
 in Phase 10 are TLS termination (still an external responsibility — the proxy
-speaks HTTP and claims no HSTS), a shared rate-limit counter for multi-worker
-deployments, performance work, and every credential feature 10.2 deferred. Error pages landed
+speaks HTTP and claims no HSTS), performance work, and every credential feature
+10.2 deferred. The shared rate-limit counter landed in 10.10. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
 hold recordings remains unspecified and unbuilt. The Content-Security-Policy
