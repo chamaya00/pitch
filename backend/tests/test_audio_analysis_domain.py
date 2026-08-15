@@ -19,6 +19,7 @@ from app.services.audio_analysis.models import (
     AnalysisSettings,
     AudioAnalysis,
     AudioAnalysisStatus,
+    AudioAnalysisSummary,
     AudioMetrics,
     Loudness,
     PitchPoint,
@@ -77,6 +78,21 @@ def metrics(**overrides: object) -> AudioMetrics:
     return AudioMetrics(**base)  # type: ignore[arg-type]
 
 
+def _points(count: int) -> tuple[PitchPoint, ...]:
+    """A timeline of ``count`` measured frames."""
+    return tuple(
+        PitchPoint(
+            timestamp_seconds=index * 0.02,
+            frequency_hz=440.0,
+            midi_note=69,
+            note_name="A4",
+            cents=0.0,
+            confidence=0.95,
+        )
+        for index in range(count)
+    )
+
+
 def analysis(**overrides: object) -> AudioAnalysis:
     base: dict[str, object] = {
         "audio_analysis_id": new_audio_analysis_id(),
@@ -115,6 +131,92 @@ def test_pitch_points_cannot_exist_without_the_metrics_describing_them() -> None
     )
     with pytest.raises(ValidationError):
         analysis(pitch_points=(point,))
+
+
+def test_the_point_count_is_derived_from_the_points() -> None:
+    """It is a fact about the timeline, not a field a caller maintains."""
+    record = analysis(
+        status=AudioAnalysisStatus.COMPLETED, metrics=metrics(), pitch_points=_points(4)
+    )
+
+    assert record.pitch_point_count == 4
+
+
+def test_a_supplied_point_count_cannot_disagree_with_the_timeline() -> None:
+    """A stored document carries the count; the points remain authoritative.
+
+    Without this, a document edited or written by an older version of the code
+    could claim a length its own array does not have — and the summary reads,
+    which take the count on trust because they never see the array, would repeat
+    the lie.
+    """
+    record = AudioAnalysis.model_validate(
+        {
+            "audio_analysis_id": new_audio_analysis_id(),
+            "recording_id": RECORDING_ID,
+            "status": AudioAnalysisStatus.COMPLETED,
+            "metrics": metrics().model_dump(),
+            "pitch_points": [point.model_dump() for point in _points(2)],
+            "pitch_point_count": 9999,
+        }
+    )
+
+    assert record.pitch_point_count == 2
+
+
+def test_a_document_written_before_the_count_existed_still_reports_one() -> None:
+    """Nothing was migrated, so every stored analysis has to answer this."""
+    stored = analysis(
+        status=AudioAnalysisStatus.COMPLETED, metrics=metrics(), pitch_points=_points(3)
+    ).model_dump()
+    del stored["pitch_point_count"]
+
+    assert AudioAnalysis.model_validate(stored).pitch_point_count == 3
+
+
+def test_a_summary_has_no_timeline_to_read() -> None:
+    """The whole safety property of the split, asserted rather than assumed.
+
+    A summary that carried an empty ``pitch_points`` would let the note
+    breakdown and the key be computed from a timeline that was simply left in
+    the database — a silently wrong answer rather than a failure. The attribute
+    does not exist, so that code cannot be written.
+    """
+    summary = AudioAnalysisSummary.model_validate(
+        analysis(
+            status=AudioAnalysisStatus.COMPLETED, metrics=metrics(), pitch_points=_points(5)
+        ).model_dump(exclude={"pitch_points"})
+    )
+
+    assert not hasattr(summary, "pitch_points")
+    assert summary.pitch_point_count == 5
+    # And a full record is usable everywhere a summary is, never the reverse.
+    assert isinstance(
+        analysis(status=AudioAnalysisStatus.COMPLETED, metrics=metrics()), AudioAnalysisSummary
+    )
+
+
+def test_a_summary_keeps_every_invariant_the_record_has() -> None:
+    """The rules are inherited, so a timeline-free read cannot be validated loosely."""
+    with pytest.raises(ValidationError):
+        AudioAnalysisSummary(
+            audio_analysis_id=new_audio_analysis_id(),
+            recording_id=RECORDING_ID,
+            status=AudioAnalysisStatus.FAILED,
+        )
+    with pytest.raises(ValidationError):
+        AudioAnalysisSummary(
+            audio_analysis_id=new_audio_analysis_id(),
+            recording_id=RECORDING_ID,
+            status=AudioAnalysisStatus.COMPLETED,
+        )
+    with pytest.raises(ValidationError):
+        # Points counted without the metrics that describe them.
+        AudioAnalysisSummary(
+            audio_analysis_id=new_audio_analysis_id(),
+            recording_id=RECORDING_ID,
+            pitch_point_count=5,
+        )
 
 
 def test_completed_at_belongs_only_to_a_finished_analysis() -> None:

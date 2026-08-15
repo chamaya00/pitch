@@ -198,6 +198,21 @@ def make_audio(recording_id: str, **overrides: Any) -> AudioAnalysis:
     return AudioAnalysis.model_validate(payload)
 
 
+def _points(count: int) -> list[dict[str, Any]]:
+    """A timeline of ``count`` measured frames, for reads that must not return it."""
+    return [
+        {
+            "timestamp_seconds": round(index * 0.023, 3),
+            "frequency_hz": 440.0,
+            "midi_note": 69,
+            "note_name": "A4",
+            "cents": 0.0,
+            "confidence": 0.95,
+        }
+        for index in range(count)
+    ]
+
+
 def completed_audio(recording_id: str, **overrides: Any) -> AudioAnalysis:
     """A finished audio analysis, which is the only kind feedback can be claimed on."""
     from tests.test_audio_feedback import metrics  # reuse the built AudioMetrics fixture data
@@ -535,8 +550,134 @@ def test_a_claim_leaves_the_measurements_untouched(backend: Any) -> None:
 def test_a_missing_audio_analysis_is_none_not_an_error(backend: Any) -> None:
     async def work(prepared: Backend) -> None:
         assert await prepared.audio.get(new_audio_analysis_id()) is None
+        assert await prepared.audio.summary(new_audio_analysis_id()) is None
         assert await prepared.audio.claim_feedback(new_audio_analysis_id()) is None
         assert await prepared.audio.latest_for_recording(uuid.uuid4().hex) is None
+        assert await prepared.audio.latest_summary_for_recording(uuid.uuid4().hex) is None
+        assert await prepared.audio.list_summaries_for_recording(uuid.uuid4().hex) == []
+
+    backend(work)
+
+
+# --- Audio analyses, read without their timelines --------------------------
+#
+# The summary reads are the whole point of ``AudioAnalysisSummary``: PostgreSQL
+# evaluates ``document - 'pitch_points'`` and never sends the points, and the
+# double drops them in Python. These assert the two agree about what survives —
+# everything except the timeline, plus a count of it — because a double that
+# quietly kept the points would let a route depend on data the database does
+# not return.
+
+
+def test_a_summary_read_carries_everything_but_the_timeline(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        created = await prepared.audio.create(
+            completed_audio(stored.recording_id, pitch_points=_points(7))
+        )
+
+        summary = await prepared.audio.summary(created.audio_analysis_id)
+
+        assert summary is not None
+        assert not hasattr(summary, "pitch_points")
+        assert summary.pitch_point_count == 7
+        # Everything else is the record as stored, field for field.
+        assert summary.model_dump() == created.model_dump(exclude={"pitch_points"})
+
+    backend(work)
+
+
+def test_a_summary_of_a_record_with_no_timeline_counts_zero(backend: Any) -> None:
+    """A pending record's document has no ``pitch_points`` key at all."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        created = await prepared.audio.create(make_audio(stored.recording_id))
+
+        summary = await prepared.audio.summary(created.audio_analysis_id)
+
+        assert summary is not None
+        assert summary.pitch_point_count == 0
+        assert summary.status is AudioAnalysisStatus.PENDING
+
+    backend(work)
+
+
+def test_the_latest_summary_is_the_latest_analysis(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            make_audio(
+                stored.recording_id,
+                status=AudioAnalysisStatus.FAILED,
+                error_code="INSUFFICIENT_PITCH_SIGNAL",
+            )
+        )
+        await prepared.audio.create(completed_audio(stored.recording_id, pitch_points=_points(3)))
+
+        summary = await prepared.audio.latest_summary_for_recording(stored.recording_id)
+        whole = await prepared.audio.latest_for_recording(stored.recording_id)
+
+        assert summary is not None
+        assert whole is not None
+        # The two reads must select the same row, or a poll and a graph would
+        # describe different analyses of the same recording.
+        assert summary.audio_analysis_id == whole.audio_analysis_id
+        assert summary.pitch_point_count == len(whole.pitch_points) == 3
+
+    backend(work)
+
+
+def test_summaries_are_listed_newest_first(backend: Any) -> None:
+    """``_existing_for`` walks this list to decide which analysis to hand back.
+
+    An order that differed between the two implementations would make a repeated
+    ``POST`` resume a different attempt depending on the store, so the ordering
+    is asserted here rather than left to whichever the double happens to produce.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        for day in (2, 3, 1):
+            await prepared.audio.create(
+                make_audio(
+                    stored.recording_id,
+                    created_at=datetime(2026, 8, day, tzinfo=UTC),
+                    status=AudioAnalysisStatus.FAILED,
+                    error_code="AUDIO_ANALYSIS_FAILED",
+                )
+            )
+
+        summaries = await prepared.audio.list_summaries_for_recording(stored.recording_id)
+
+        assert [summary.created_at.day for summary in summaries] == [3, 2, 1]
+
+    backend(work)
+
+
+def test_claiming_feedback_answers_without_the_timeline(backend: Any) -> None:
+    """The claim is a conditional UPDATE; it never needed to return the points."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        created = await prepared.audio.create(
+            completed_audio(stored.recording_id, pitch_points=_points(5))
+        )
+
+        claimed = await prepared.audio.claim_feedback(created.audio_analysis_id)
+
+        assert claimed is not None
+        assert not hasattr(claimed, "pitch_points")
+        assert claimed.pitch_point_count == 5
+        # And the stored timeline is still there for the run that follows.
+        whole = await prepared.audio.get(created.audio_analysis_id)
+        assert whole is not None
+        assert len(whole.pitch_points) == 5
 
     backend(work)
 
