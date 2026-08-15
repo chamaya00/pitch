@@ -112,6 +112,53 @@ error rather than a silent skip. They are applied at startup under a PostgreSQL
 advisory lock, so several processes booting together apply them once between
 them.
 
+### Reading a document without the part nobody asked for (10.11)
+
+One JSONB document per analysis is the right shape — the pitch timeline is
+written once, read whole and never queried by predicate, so a table of one row
+per frame would be ~13 000 rows per recording serving a query nobody issues. But
+it makes every read the size of the *longest* thing in the document. Measured on
+a completed analysis of a five-minute recording: **1 596 kB of timeline against
+1.2 kB for everything else.**
+
+Most reads want the 1.2 kB. The summary endpoint, the feedback state, the
+feedback claim and the staleness sweep all decide from a status, an error code
+or the presence of metrics, and none of them returns a single pitch point. They
+were loading and validating all 12 931 points anyway — including on the read the
+browser **polls** while a measurement runs.
+
+The fix is a second read, and a type that stops it being misapplied:
+
+| Type | Carries | Used by |
+| --- | --- | --- |
+| `AudioAnalysisSummary` | everything but the timeline, plus `pitch_point_count` | the summary and feedback routes, `start`, the feedback claim, the staleness sweep |
+| `AudioAnalysis` (a subclass) | that, plus the points | `/pitch`, `/notes`, `/key`, and **every write** |
+
+The direction of the subclassing is the guarantee. Anything needing only state
+accepts a summary and is handed either kind; anything reading the points — or
+re-serialising the document, which a summary would rewrite *without* them — asks
+for the full type, and handing it a summary is a type error rather than a
+silently empty timeline. `pitch_point_count` is derived from the points
+themselves and a supplied value is discarded, so a summary can still say how
+much was measured without anyone maintaining a second copy.
+
+In SQL the summary form selects `document - 'pitch_points'` with
+`jsonb_array_length` beside it, so PostgreSQL drops the points before the row
+crosses the socket. Through the real driver: **83.8 ms and 19 151 kB peak
+allocation → 1.8 ms and 15 kB.** End to end over HTTP, `GET /audio-analysis`
+went from 116.7 ms to 8.4 ms and `GET …/feedback` from 120.2 ms to 8.6 ms;
+`/pitch` and `/key` are unchanged, because they genuinely need what they load.
+
+`/notes` halved, 189.0 ms → 90.2 ms, for a different reason: it was loading its
+analysis **twice**, once for the ids in its response and once through
+`service.notes`. `notes_of` is now the seam `key_of` was given in Phase 8 slice
+5, and closes the same window — two loads can straddle a re-analysis and pair
+one record's ids with another record's notes.
+
+What this is *not*: a cache, a denormalisation, or a schema change. Nothing was
+migrated, nothing is stored twice, and every analysis ever written answers the
+new reads.
+
 ### Concurrency belongs to the database
 
 Until Step 7M both orchestrators guarded their find-or-create decision with a
@@ -784,10 +831,12 @@ analyse, and `song` appears in the codebase only as a test upload filename.
 
 **Phase 8 is now built.** `audio_analysis/key.py` folds a stored pitch timeline
 into twelve pitch-class shares and estimates the key those shares fit;
-`AudioAnalysisService.key()` reaches it through the same owner-scoped `current()`
-read `notes()` uses; `GET …/audio-analysis/key` serves it, adding no error code,
-no query and no persisted field; and `musical-key-card.tsx` renders it below the
-note breakdown it shares a timeline with.
+`AudioAnalysisService.key()` reaches it through the same owner-scoped read
+`notes()` uses — `current_timeline()` since 10.11, when the reads that need no
+timeline stopped using the one that loads it; `GET …/audio-analysis/key` serves
+it, adding no error code, no query and no persisted field; and
+`musical-key-card.tsx` renders it below the note breakdown it shares a timeline
+with.
 
 It added no architecture, which was the point of specifying it that way. There is
 no new table, no migration, no dependency, no provider, no background work and no
