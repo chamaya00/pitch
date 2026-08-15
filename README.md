@@ -38,6 +38,12 @@ Implemented and working end to end:
   (RMS, peak, dynamic-range estimate, clipping) and spectral characteristics
   (centroid, bandwidth, rolloff, zero-crossing rate, flatness), plus a pitch
   timeline for the graph.
+- **Musical key** — the key implied by what was sung, folded from the same pitch
+  timeline. It refuses rather than guesses: a hum, an arpeggio or a wandering
+  phrase is reported as "not measured" with the reason and the evidence shown.
+- **Recording history, comparison and progress** — an owner's recordings over
+  time, two of them side by side, and their measurements charted. Deterministic
+  arithmetic throughout: no grade, no level, no trend line.
 - **AI feedback** — an LLM explaining the speech measurements. It never produces
   a number and never produces a score.
 
@@ -51,8 +57,11 @@ selected the speech output is demo data, and the UI says so in a banner rather
 than passing it off as analysis.
 
 **Not implemented yet:** vocal/instrument separation, song melody extraction,
-song key estimation, song compatibility, transpose recommendation, and progress
-tracking across recordings. See [docs/roadmap.md](docs/roadmap.md).
+song compatibility, transpose recommendation, tempo and beat tracking, and
+musical transcription. The key estimate above is the key of *what you sang* —
+this product accepts no song, no reference track and no second audio input, so
+there is nothing to compare a recording against. See
+[docs/roadmap.md](docs/roadmap.md).
 
 Every result is an **audio-based estimate from one recording**. Nothing here has
 been validated against annotated reference data; see
@@ -194,7 +203,7 @@ Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL`) are never hardcoded or committed.
 
 - [docs/architecture.md](docs/architecture.md) — system design and conventions
 - [docs/api.md](docs/api.md) — endpoint reference
-- [docs/audio-analysis.md](docs/audio-analysis.md) — live pitch detection, and the planned backend pipeline
+- [docs/audio-analysis.md](docs/audio-analysis.md) — live pitch detection, the backend pipeline, and musical key
 - [docs/ai.md](docs/ai.md) — LLM interpretation layer
 - [docs/limitations.md](docs/limitations.md) — what VocalLens cannot tell you
 - [docs/roadmap.md](docs/roadmap.md) — development phases

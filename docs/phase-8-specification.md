@@ -1,13 +1,25 @@
 # Phase 8 — specification
 
-> **Status: specification only. None of this is implemented.**
+> **Status: superseded. Phase 8 is built, and this is the record of how it was
+> decided — not a description of the running system.**
 >
-> Nothing described below exists in the repository, except where a slice is
-> marked delivered in [Implementation slices](#implementation-slices).
+> Candidate A shipped in full: all six slices are delivered and the definition of
+> done is met. For what the code actually does, read
+> [audio-analysis.md](audio-analysis.md) (algorithm, profile set, thresholds,
+> what didn't work, cost), [api.md](api.md) (the endpoint and both response
+> shapes), [limitations.md](limitations.md) (what it will not tell you) and
+> [architecture.md](architecture.md) (where it lives). Where this file and those
+> disagree, **they are right and this is history** — three of its claims were
+> corrected by measurement during implementation, and the corrections are
+> recorded below rather than edited into the original text.
+>
+> Kept rather than deleted because the reasoning is the valuable part: the
+> decision gate, the two candidate scopes, the three corrections, and the
+> measurements that ruled out the obvious implementation. Candidate B (§13) and
+> every non-scope item in §5 remain unbuilt and out of scope.
 >
 > **The decision gate was answered on 2026-08-12: Candidate A — musical key.**
-> See [The decision gate](#4-the-decision-gate). Candidate B (§13) and every
-> non-scope item in §5 remain unbuilt and out of scope.
+> See [The decision gate](#4-the-decision-gate).
 
 ## Revision history
 
@@ -19,6 +31,8 @@
 | 10.8 (Slice 1) | Pure domain built and measured. Thresholds set from a sweep, the profile set chosen on evidence, and **one specification claim corrected by the measurements** — see below. |
 | 10.8 (Slices 2–3) | The service read and the endpoint. Derived on read, no migration, no new error code. |
 | 10.8 (Slice 4) | The card. Every state in §9 built, and each one reached deliberately in a browser against the real stack; §9's open question 3 answered by measurement — see below. |
+| 10.8 (Slice 5) | The performance ceiling and the mutation run. The endpoint stopped loading the analysis document twice. One mutation survived the first run and exposed an untested property — the definition of the confidence margin — which `AMBIGUOUS_MODE` now pins. |
+| 10.8 (Slice 6) | The documentation sweep, and this file marked superseded. **Phase 8 complete.** |
 
 ### What the Slice 1 sweep settled
 
@@ -794,8 +808,8 @@ updated; this file marked superseded, not deleted.
 | 2 ✅ | **Delivered.** `AudioAnalysisService.key()` | `orchestration/audio_analysis.py`, `test_audio_analysis_orchestration.py` | `None` for pending/failed/absent; `RECORDING_NOT_FOUND` for another owner; estimate for a completed one, driven by the existing stub analyzer | — | No new repository method, no new SQL, ownership passes through a substituted resolver | 1 |
 | 3 ✅ | **Delivered.** The endpoint | `routes/audio_analysis.py`, `schemas/audio_analysis.py`, `test_audio_analysis_api.py`, `test_ownership_api.py`, `docs/api.md` | Both `200` shapes; both `404`s; another owner gets the same `404`; response asserted free of `owner_id`; asserted not to consume costly-request quota | `curl` through the running stack | `docs/api.md` documents the `null` shape and `unmeasured_reason`; no `ErrorCode` member added | 2 |
 | 4 ✅ | **Delivered.** The UI | `types/api.ts`, `lib/api.ts`, `lib/audio-analysis-metrics.ts`, `hooks/use-audio-analysis.ts`, `components/audio-analysis/musical-key-card.tsx`, `tests/audio-analysis.test.ts` | 50 tests (16 new). A `null` key returns no label at all, the weak band is pinned to the measured fixtures, and no key string reads as a grade | Measured, low-confidence and not-measured at 390 px and 1280 px in both schemes — 12 runs, no console output, no horizontal overflow — plus the unavailable/error state forced separately. Loading is the state each run passes through before it settles | Met. Every state reached deliberately; a forced `404` on the key call alone is handled inline and `app/error.tsx` is not reached | 3 |
-| 5 | Performance and mutation | `tests/test_audio_key.py`, a mutation script kept outside the repository | The 12 931-point ceiling; every mutation shown to fail a named test | — | If a mutation passes, the test is strengthened and the mutation re-run before the slice is done | 1–3 |
-| 6 | Documentation | the six files above | — | — | Limitations in the shipped voice; architecture row filled; "has not started" corrected; this file superseded, not deleted | 1–5 |
+| 5 ✅ | **Delivered.** Performance and mutation | `tests/test_audio_key.py`, `orchestration/audio_analysis.py`, `routes/audio_analysis.py`, a mutation script kept outside the repository | The ceiling derived from `max_audio_duration_seconds` and `HOP_SECONDS`, not written down: 1.35 ms at 12 931 points, under half `summarise_notes`, 7 216 bytes peak, sub-quadratic at 4× | — | Met. 21 mutations: 20 caught by a named test, 1 confirmed equivalent. One survived — the margin redefined over the next *different tonic* — because every adversarial fixture is stopped by the pitch-class gate before the correlation is reached. `AMBIGUOUS_MODE` closes it and the run was repeated. The endpoint also stopped loading the analysis document twice | 1–3 |
+| 6 ✅ | **Delivered.** Documentation | the six files above | — | — | Met. `audio-analysis.md` carries the algorithm, the profile race, all four thresholds with their measurements, what didn't work and the cost; `limitations.md` has the section in the shipped voice; `architecture.md` has its row and its corrections; `README.md` no longer lists shipped features as unbuilt; this file superseded, not deleted | 1–5 |
 
 ---
 

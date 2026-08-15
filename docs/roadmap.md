@@ -13,7 +13,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
-| 8 | Melodic key estimation (scope resolved in 10.8) | Started — domain (1), service (2), API (3), UI (4). [phase-8-specification.md](phase-8-specification.md) |
+| 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
@@ -74,11 +74,13 @@ Four of the seven measurements have no desirable direction, and the three that
 do are defined against equal temperament rather than against singing. See
 [api.md](api.md) and [limitations.md](limitations.md).
 
-**Phase 8 has not started.** Nothing about song analysis, key, BPM, melody
-extraction or transposition exists — verified by search, not assumed, and
-re-verified by the Step 10.7 audit.
+**Phase 8 had not started at the end of Phase 7.** Nothing about song analysis,
+key, BPM, melody extraction or transposition existed — verified by search, not
+assumed, and re-verified by the Step 10.7 audit. Musical key was built afterwards,
+in 10.8; song analysis, BPM, melody extraction and transposition still do not
+exist.
 
-## Phase 8 — specified in 10.7, not built
+## Phase 8 — how it was scoped (10.7)
 
 The roadmap row above was one table cell, and Step 10.7 turned it into
 [phase-8-specification.md](phase-8-specification.md) without building any of it.
@@ -109,7 +111,7 @@ margin over the next-best candidate of any kind, with two independent evidence
 gates and the adversarial fixtures — hum, two notes, noise, chromatic wander — a
 required part of the suite.
 
-## Phase 8 — blocked by a product decision (10.8)
+## Phase 8 — how the scope was decided (10.8)
 
 Step 10.8 re-audited to resolve the question 10.7 left open, and **two of 10.7's
 load-bearing claims did not survive re-inspection**:
@@ -175,9 +177,29 @@ and `reference` never once means a reference recording.
   evidence; a hum reads *Not measured*, `TOO_FEW_PITCH_CLASSES`, with its one
   pitch class at 100% shown anyway.
 
-**Slices 5 and 6 remain** — the performance ceiling and the mutation run, then
-the documentation sweep — and the phase is **not** complete until its definition
-of done is met.
+- **Slice 5** — the performance ceiling and the mutation run. The endpoint stopped
+  loading the analysis document twice: `key_of()` folds a record the caller
+  already holds, which halves the expensive part of the read and closes the
+  window in which two loads could straddle a re-analysis. The ceiling is derived
+  from `max_audio_duration_seconds` and `HOP_SECONDS` rather than written down —
+  12 931 points, 1.35 ms, under half what `summarise_notes` costs over the same
+  timeline, and 7 216 bytes of peak allocation because the fold copies nothing.
+  21 mutations: 20 caught by a named test, 1 confirmed equivalent. **One
+  survived** — redefining confidence as the margin over the next *different
+  tonic*, the alternative `key.py` argues against at length — because every
+  adversarial fixture was stopped by the pitch-class gate before the correlation
+  was reached, so none could see how the margin was defined. `AMBIGUOUS_MODE`
+  closes it, and the mutation was re-run.
+- **Slice 6** — the documentation sweep. `audio-analysis.md` carries the
+  algorithm, the profile race and the one that lost, all four thresholds with the
+  measurements that set them, what didn't work and the cost; `limitations.md`
+  gains the musical-key section; `architecture.md` gains its feature-allocation
+  row and its stale claims corrected; `README.md` stops listing shipped features
+  as unbuilt; and the specification is marked superseded rather than deleted.
+
+**Phase 8 is complete.** Its definition of done is met, and what it deliberately
+does not contain — tempo, beats, melody transcription, note events, a reference
+song, transposition and compatibility — is unchanged and still out of scope.
 
 ## Phase 10 — where it stands
 

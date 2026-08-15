@@ -503,7 +503,7 @@ the distance to the nearest semitone, and rounding first throws away the
 measurement — and both return nothing for a value that cannot be a pitch: zero,
 a negative, a NaN, an infinity, or a frequency outside 20–5000 Hz.
 
-## Musical key (Phase 8, Slices 1–4)
+## Musical key (Phase 8)
 
 `backend/app/services/audio_analysis/key.py`, reachable through
 `AudioAnalysisService.key()`. A third aggregation of the same stored pitch
@@ -511,11 +511,14 @@ timeline, beside the note breakdown: it folds the timeline into twelve
 pitch-class shares and reports which key those shares best fit, or a stated
 reason there is none.
 
+```
+pitch timeline ─▶ pitch-class profile ─▶ 24 correlations ─▶ key | None
+```
+
 Served at `GET /recordings/{id}/audio-analysis/key` — see [api.md](api.md) — and
 rendered by `frontend/components/audio-analysis/musical-key-card.tsx`, below the
-note breakdown it shares a timeline with (Slice 4). It is not in the AI payload,
-the comparison or the progress series, and those remain deliberately out of
-scope.
+note breakdown it shares a timeline with. It is not in the AI payload, the
+comparison or the progress series, and those remain deliberately out of scope.
 
 **The card shows the evidence in every state, including the one with no key.**
 That is the obligation attached to shipping a classification rather than a
@@ -564,11 +567,108 @@ Three properties, and the third is why the feature is safe to show at all:
   is not enough: a three-class arpeggio scores **0.309**, *higher than real
   music*, and only a distinct-pitch-class count catches it.
 
-The algorithm, the profile-set comparison and every threshold with the
-measurement that set it are in
-[phase-8-specification.md](phase-8-specification.md) and in the module's own
-constants. **Nothing here has been validated against human singing**: every
-fixture is synthetic, and this repository holds no annotated corpus to do it with.
+### The profile set, and the one that lost
+
+Two published key-profile sets were run against the whole fixture set before
+either was adopted, and neither was chosen on reputation. Both identify **all 24**
+synthetic keys correctly, so accuracy did not decide it. What decided it is the
+gap between the inputs that must be answered and the inputs that must not:
+
+| Margin | Krumhansl–Kessler | Temperley |
+| --- | --- | --- |
+| Sung major melody | 0.246 | 0.262 |
+| Sung minor melody | 0.276 | 0.205 |
+| Chromatic wander | 0.072 | 0.010 |
+| Random weights | 0.088 | 0.013 |
+
+**Krumhansl–Kessler** (1982) comes from probe-tone listening experiments — what
+listeners reported. **Temperley** (2001) is derived from the Kostka–Payne corpus
+— what music actually contains. Krumhansl–Kessler separates music from noise by
+about 3×; Temperley by about 12×. The wider band is what lets the confidence gate
+sit clear of the noise floor without discarding real melodies, so Temperley ships
+as `DEFAULT_PROFILE_SET`. Krumhansl–Kessler is kept in `PROFILE_SETS` and stays
+under test; a result names the set it used.
+
+### Thresholds, and the measurements that set them
+
+Every threshold was left unset until the fixtures existed, then swept. All four
+live beside their measurements in `key.py`:
+
+| Constant | Value | What set it |
+| --- | --- | --- |
+| `MIN_DISTINCT_PITCH_CLASSES` | 5 | The smallest value admitting a pentatonic melody (0.241) while refusing a four-class arpeggio (0.171) |
+| `MIN_VOICED_SECONDS` | 1.0 | Derived, not picked: five held notes at the analyzer's own 116 ms rule is ~0.58 s, rounded up |
+| `MIN_KEY_CONFIDENCE` | 0.05 | The noise floor — uniform 0.000, chromatic 0.010, random 0.013, worst refusable fixture 0.022 |
+| `MIN_PITCH_CLASS_SHARE` | 2.0 % | A stray frame in a two-second recording is worth ~1.2 % of voiced time; the least-used class of a real seven-note melody is several times that |
+
+`MIN_VOICED_SECONDS` earns its place independently: a five-class fixture only
+0.53 s long scores 0.281 and passes every other gate. `MIN_KEY_CONFIDENCE` sits
+in the empty band between noise and music — real melodies jittered ±50 % on every
+degree (200 draws each, tonic and mode correct in 599 of 600) have 5th-percentile
+margins of 0.097 major, 0.081 pentatonic, 0.046 minor.
+
+**The tails overlap, and the gate does not hide it.** One jittered minor melody
+in 200 scored 0.004 — below the chromatic fixture. No threshold separates those
+two. A feature whose honest answer is sometimes "not measured" is the specified
+behaviour rather than a shortfall.
+
+### What didn't work
+
+The three properties above are each stated against an alternative that was tried
+and measured first. Recorded because each rejected design is the one somebody
+reaches for next, and only the measurement argues against it:
+
+- **Correlation as confidence** — the obvious implementation, refuted by the
+  +0.484 and +0.684 above. Height carries no information about whether a key is
+  there; only distance from the next candidate does.
+- **A margin over the next candidate with a *different tonic*** — the
+  natural-looking refinement, refuted by the hum leading the next tonic by 0.173.
+  This is the one that **survived the first mutation run**: every adversarial
+  fixture is stopped by the pitch-class gate before the correlation is reached,
+  so none of them could see how the margin was defined, and the property the
+  module is built on was untested. `AMBIGUOUS_MODE` closes it — a melody singing
+  both thirds, eight pitch classes over 3.8 s, where C minor (0.8197) leads C
+  major (0.7992) by 0.0205 over the next candidate and 0.4094 over the next
+  different tonic. Under the weaker definition that is a confident C minor; under
+  the shipped one it is refused, which is the honest answer for a recording that
+  did not choose a mode.
+- **Confidence as the only gate** — refuted by the arpeggio's 0.309, and the
+  reason two evidence gates exist at all.
+- **Dropping negligible pitch classes from the profile.** They are excluded from
+  the *evidence count* only; every measured frame stays in the shares, because
+  the correlation should see the recording as it was.
+- **Requiring a bare unweighted scale to return `null`.** Specified in 10.7 on a
+  Krumhansl–Kessler measurement where it led by 0.044, level with noise. Under
+  the profile set that shipped it leads by 0.146 — above the gate and below the
+  weighted band, so it is answered, and answered weakly. Reporting a C major
+  scale as C major is also what a listener would do.
+
+### Cost
+
+Folding is the whole expense; the 24 correlations are twelve-element arithmetic
+at any recording length. Measured at the ceiling — 12 931 points, which is 300 s
+at the analyzer's 23.2 ms hop, derived from `max_audio_duration_seconds` and
+`HOP_SECONDS` rather than written down:
+
+| Operation | Cost at the ceiling |
+| --- | --- |
+| `analyse_key` (fold + 24 correlations) | 1.35 ms |
+| `estimate_key` alone, profile pre-folded | 0.18 ms |
+| `summarise_notes`, the same timeline | 2.95 ms |
+
+Those are development-machine timings, best of fifteen runs, and the tests do not
+assert them. What is asserted is written to survive hardware nobody has measured:
+a 5 ms bound about 3.5× the measurement, and three machine-independent ratios.
+
+Key estimation is cheaper than the note breakdown this product has already been
+paying synchronously on every `/notes` request since Step 7I, and peak allocation
+is 7 216 bytes at the ceiling — the fold builds no copy of the timeline. Four
+times the points cost under eight times the work, so raising the accepted
+duration cannot quietly buy a quadratic. **No cache, queue, worker or background
+task is warranted by any of this, and none was added.**
+
+**Nothing here has been validated against human singing**: every fixture is
+synthetic, and this repository holds no annotated corpus to do it with.
 
 ## Pitch accuracy
 
