@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -118,6 +118,22 @@ class Settings(BaseSettings):
     #: than having no limit, because it would look like protection.
     rate_limit_trusted_proxies: int = Field(default=0, ge=0, le=10)
 
+    # --- Where the rate limit counts (Step 10.10) --------------------------
+    #: ``memory`` counts in this process; ``database`` counts in a table every
+    #: worker shares.
+    #:
+    #: The default stays ``memory`` because it is not a compromise for the
+    #: deployment this repository ships: ``docker-compose.yml`` runs a single
+    #: uvicorn worker, and with one worker there is no second counter to
+    #: disagree with. It costs no statement, needs no table and is exactly
+    #: correct there.
+    #:
+    #: ``database`` is what a deployment scaling past one worker turns on, and
+    #: the reason it must is measured rather than asserted: four workers sharing
+    #: a limit of five new identities minted twenty, exactly 4.0x. See
+    #: ``services/limits/limiter.py``.
+    rate_limit_backend: Literal["memory", "database"] = "memory"
+
     # --- Identity retention (Step 10.6) ------------------------------------
     #: How long an identity that owns **nothing** may sit unused before it is
     #: reclaimed.
@@ -163,6 +179,24 @@ class Settings(BaseSettings):
                 return json.loads(text)
             return [origin.strip() for origin in text.split(",") if origin.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _shared_rate_limit_needs_a_database(self) -> "Settings":
+        """A shared counter with nowhere to count is a configuration error.
+
+        Refused at construction, so it fails at startup rather than on the first
+        request that would have been limited. The alternative — falling back to
+        this process's memory — is the silent downgrade this codebase refuses
+        everywhere else: an operator who set ``RATE_LIMIT_BACKEND=database``
+        because they run four workers would get four counters and no indication
+        that the setting did nothing.
+        """
+        if self.rate_limit_backend == "database" and not self.database_url:
+            raise ValueError(
+                "RATE_LIMIT_BACKEND=database requires DATABASE_URL: a shared "
+                "rate-limit counter has nowhere to count without one"
+            )
+        return self
 
     @property
     def identity_retention(self) -> timedelta:

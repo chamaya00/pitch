@@ -46,6 +46,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The DSN itself is never logged. A failure to connect surfaces as a startup
     # error, which is the point of opening eagerly rather than lazily.
     database = Database(settings.database_url) if settings.database_url else None
+    # The limiters were built in ``create_app`` holding a callable that reads
+    # this attribute, so the database backend finds the pool here without
+    # anything being rebuilt. ``Settings`` has already refused the combination
+    # where that callable would keep returning ``None``.
     app.state.database = database
     if database is not None:
         await database.open()
@@ -99,7 +103,18 @@ def create_app() -> FastAPI:
     # process must not share counters and refuse each other's requests. Built
     # here rather than in the lifespan so a test client that never runs the
     # lifespan is still limited exactly as production is.
-    app.state.rate_limits = RateLimits(settings)
+    #
+    # The pool does not exist yet — the lifespan opens it — so the database
+    # backend is handed a callable that reads ``app.state.database`` when a
+    # request is actually being counted, rather than a pool captured as ``None``
+    # at construction and silently never counted against.
+    app.state.database = None
+
+    def current_database() -> Database | None:
+        database: Database | None = app.state.database
+        return database
+
+    app.state.rate_limits = RateLimits(settings, current_database)
 
     register_exception_handlers(app)
 
