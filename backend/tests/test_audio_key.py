@@ -21,12 +21,64 @@ which is what makes them exhaustive rather than representative.
 test in this file may be read as doing so.** Every timeline is synthetic. There
 is no annotated corpus of real singing in this repository, and establishing that
 this works on real voices needs one. See ``docs/phase-8-specification.md``.
+
+The performance ceiling is at the end of the file. What a test cannot state is
+whether it would notice being broken, so that is measured separately, below.
+
+Mutation audit
+--------------
+
+Run by a script kept **outside** the repository — it edits source files in place,
+and a crash mid-run must not leave a mutated tree behind that somebody commits.
+21 mutations across the whole feature, each required to fail a *named* test:
+
+===========================  ======  ==========================================
+invariant                    result  notes
+===========================  ======  ==========================================
+candidate scoring (5)        caught  profiles reversed, runner-up returned,
+                                     rotation inverted, correlation used as
+                                     confidence, margin redefined
+candidate scoring (1)        equiv.  removing the tie-break changes no
+                                     observable behaviour — the list is already
+                                     built in a fixed order and the sort is
+                                     stable. Documented as such in ``key.py``;
+                                     confirmed again here against the whole
+                                     module rather than one named test
+evidence gates (4)           caught  each of the three gates dropped, and the
+                                     negligible-share rule removed
+null semantics (2)           caught  wrong reason reported, evidence dropped
+service integration (4)      caught  frame length charged instead of the hop,
+                                     status guard dropped, a second load of the
+                                     analysis document, a write introduced
+ownership (2)                caught  owner dropped from the scoped read, and
+                                     the refusal made to distinguish "not
+                                     yours" from "does not exist"
+API semantics (3)            caught  wrong 404 code, ``unmeasured_reason``
+                                     dropped, tonic hard-coded in the schema
+===========================  ======  ==========================================
+
+**One mutation survived the first run** and is the reason two tests below exist:
+redefining the confidence margin as the lead over the next candidate with a
+*different tonic* passed everything. Every adversarial fixture in this file was
+refused by the pitch-class gate before the correlation was ever reached, so none
+of them could see how the margin was defined — the property ``key.py`` argues
+for at length was, in fact, untested. ``AMBIGUOUS_MODE`` closes it, and the
+mutation was re-run against it: caught.
+
+There is no frontend counterpart to audit. The musical-key UI is Slice 4 and is
+not in this repository yet.
 """
 
+import math
 import random
+import time
+import tracemalloc
+from collections.abc import Callable
 
 import pytest
 
+from app.core.config import Settings
+from app.services.audio_analysis.analyzer import HOP_SECONDS
 from app.services.audio_analysis.key import (
     DEFAULT_PROFILE_SET,
     KRUMHANSL_KESSLER,
@@ -38,6 +90,7 @@ from app.services.audio_analysis.key import (
     TEMPERLEY,
     KeyProfileSet,
     _correlation,
+    _ranked_candidates,
     analyse_key,
     estimate_key,
     pitch_class_profile,
@@ -48,6 +101,7 @@ from app.services.audio_analysis.models import (
     KeyUnmeasuredReason,
     PitchPoint,
 )
+from app.services.audio_analysis.notes import summarise_notes
 from app.services.audio_analysis.pitch import (
     NOTE_NAMES,
     midi_to_frequency,
@@ -316,6 +370,69 @@ def test_random_pitch_class_weights_are_not_a_key() -> None:
     assert analysis.unmeasured_reason is KeyUnmeasuredReason.AMBIGUOUS
 
 
+#: A melody that sings both thirds and settles neither mode.
+#:
+#: Eight pitch classes over 3.8 s, so both evidence gates pass and the
+#: **confidence gate is the only thing left** — which is what makes this the one
+#: fixture in the file that can see how the margin is defined:
+#:
+#: - best:   C minor, r = 0.8197
+#: - second: C major, r = 0.7992
+#: - margin over the next candidate of any kind: **0.0205** — refused
+#: - margin over the next candidate with a *different tonic*: **0.4094** —
+#:   comfortably confident, and wrong
+#:
+#: Every other adversarial fixture is stopped by the pitch-class gate before the
+#: correlation is reached, so all of them survive the weaker definition. This one
+#: was found by search over profiles that share their top two candidates' tonic,
+#: and it is the only reason the stricter rule is load-bearing rather than
+#: merely stated. See ``key.py`` on why the margin is over *any* candidate.
+AMBIGUOUS_MODE = {0: 32, 2: 20, 3: 16, 4: 18, 5: 21, 7: 27, 8: 11, 11: 18}
+
+
+def test_a_melody_that_settles_neither_mode_is_not_a_key() -> None:
+    """Both thirds sung, near-equally. C major and C minor fit it equally well.
+
+    The honest answer is that the recording did not choose, and the estimator
+    must say so rather than pick the one that led by 0.02.
+    """
+    analysis = analyse(AMBIGUOUS_MODE)
+    assert analysis.key is None
+    assert analysis.unmeasured_reason is KeyUnmeasuredReason.AMBIGUOUS
+    # Refused on confidence alone: neither evidence gate was close to firing.
+    assert analysis.distinct_pitch_classes == 8
+    assert analysis.voiced_seconds > MIN_VOICED_SECONDS
+
+
+def test_the_margin_is_over_the_next_candidate_and_not_the_next_tonic() -> None:
+    """The definition itself, asserted where the two differ.
+
+    ``key.py`` chooses the margin over the next candidate *of any kind* over the
+    natural-looking alternative — the next candidate with a different tonic —
+    and this is the fixture that separates them. Under the weaker definition
+    this profile leads by 0.409 and would be reported as a confident C minor.
+    Under the stricter one it leads by 0.021 and is refused.
+
+    Asserted through :func:`_ranked_candidates` rather than inferred from the
+    verdict, so the numbers a reader is asked to believe are the ones measured.
+    """
+    shares = pitch_class_profile(timeline(AMBIGUOUS_MODE), frame_seconds=HOP)
+    ranked = _ranked_candidates(shares, DEFAULT_PROFILE_SET)
+    best, second = ranked[0], ranked[1]
+
+    # The two definitions disagree only when the runner-up shares the tonic.
+    assert best.tonic == second.tonic
+    assert best.mode is not second.mode
+
+    over_any_candidate = best.correlation - second.correlation
+    next_other_tonic = next(c for c in ranked[1:] if c.tonic != best.tonic)
+    over_other_tonic = best.correlation - next_other_tonic.correlation
+
+    assert over_any_candidate == pytest.approx(0.0205, abs=0.001)
+    assert over_other_tonic == pytest.approx(0.4094, abs=0.001)
+    assert over_any_candidate < MIN_KEY_CONFIDENCE <= over_other_tonic
+
+
 def test_a_recording_too_short_to_hold_five_notes_is_not_a_key() -> None:
     """Five classes and a margin of 0.281 — refused on time alone.
 
@@ -508,3 +625,199 @@ def test_a_partial_profile_is_refused_by_the_model() -> None:
             unmeasured_reason=KeyUnmeasuredReason.AMBIGUOUS,
             pitch_classes=analysis.pitch_classes[:6],
         )
+
+
+# --- The performance ceiling ------------------------------------------------
+#
+# Key estimation is a read-only fold over a timeline that is already in memory.
+# What has to stay true is that it remains one, and these assertions are written
+# so that an algorithmic regression fails them and a slow machine does not.
+#
+# Measured on the development machine at the ceiling below, best of fifteen runs:
+#
+#   analyse_key (fold + 24 correlations)   1.35 ms
+#   estimate_key alone, profile pre-folded 0.18 ms
+#   summarise_notes, the same timeline     2.95 ms
+#
+# The fold dominates, the 24 correlations do not: they are twelve-element
+# arithmetic whatever the recording's length.
+
+
+def _ceiling_points() -> int:
+    """Points in the longest recording this product accepts.
+
+    Derived from configuration and the analyzer's hop rather than written down,
+    so raising ``max_audio_duration_seconds`` moves the benchmark with it
+    instead of leaving it measuring a length that is no longer the maximum.
+    """
+    return math.floor(Settings().max_audio_duration_seconds / HOP_SECONDS)
+
+
+def long_timeline(points: int) -> tuple[PitchPoint, ...]:
+    """A melody-shaped timeline of ``points`` frames, spanning three octaves.
+
+    Not one held note repeated: the fold's work is a modulo and a list index per
+    point either way, but a single pitch class would be refused by the gates and
+    so would never reach the correlation this is timing. The octave spread is
+    what the estimator is for — three octaves of the same seven pitch classes
+    fold to the same seven shares.
+    """
+    order = sorted(MAJOR_MELODY)
+    built: list[PitchPoint] = []
+    timestamp = 0.0
+    index = 0
+    while len(built) < points:
+        pitch_class = order[index % len(order)]
+        octave_offset = 12 * ((index // len(order)) % 3) - 12
+        midi = BASE_MIDI + pitch_class + octave_offset
+        frequency = midi_to_frequency(midi)
+        name = midi_to_note_name(midi)
+        assert frequency is not None and name is not None
+        run = max(1, MAJOR_MELODY[pitch_class] * points // (sum(MAJOR_MELODY.values()) * 8))
+        for _ in range(min(run, points - len(built))):
+            built.append(
+                PitchPoint(
+                    timestamp_seconds=timestamp,
+                    frequency_hz=frequency,
+                    midi_note=midi,
+                    note_name=name,
+                    cents=0.0,
+                    confidence=0.9,
+                )
+            )
+            timestamp += HOP_SECONDS
+        index += 1
+    return tuple(built)
+
+
+def fastest(call: Callable[[], object], runs: int = 9) -> float:
+    """Seconds taken by the quickest of ``runs`` calls, after one warm-up.
+
+    The quickest rather than the mean on purpose. A shared CI machine adds time
+    to a run and never removes it, so the minimum is the closest thing to the
+    work itself; a mean measures the neighbours as much as the code.
+    """
+    call()
+    return min(_timed(call) for _ in range(runs))
+
+
+def _timed(call: Callable[[], object]) -> float:
+    start = time.perf_counter()
+    call()
+    return time.perf_counter() - start
+
+
+def test_the_benchmark_length_is_the_longest_recording_that_can_be_uploaded() -> None:
+    """The ceiling is a consequence of the limits, not a number someone chose.
+
+    300 s at a 23.2 ms hop is 12 931 frames. If either moves, every assertion
+    below moves with it — which is the point of deriving it. The upload limits
+    themselves are asserted in ``test_config.py``; what matters here is that
+    this suite measures *that* length and not another one.
+    """
+    settings = Settings()
+    assert settings.max_audio_duration_seconds == 300
+    assert settings.max_audio_size_mb == 50
+    assert _ceiling_points() == 12931
+
+
+def test_the_benchmark_timeline_is_one_the_estimator_would_actually_answer() -> None:
+    """A benchmark on a refused input would time the gates and nothing else."""
+    points = long_timeline(_ceiling_points())
+    assert len(points) == _ceiling_points()
+
+    analysis = analyse_key(points, frame_seconds=HOP_SECONDS)
+    assert analysis.key is not None
+    assert analysis.key.tonic == "C"
+    assert analysis.key.mode is KeyMode.MAJOR
+    # The whole accepted duration, so the correlation ran over a full-length
+    # profile rather than an early return.
+    assert analysis.voiced_seconds == pytest.approx(300.0, abs=1.0)
+
+
+def test_key_estimation_stays_under_its_budget_at_the_longest_recording() -> None:
+    """The stated ceiling: under 5 ms for a 300-second recording.
+
+    Deliberately about 3.5x the measured 1.35 ms. A tighter bound would fail on
+    a loaded machine, and a bound that only fails on a loaded machine teaches a
+    reader to ignore it. Anything that makes this fail — a per-point
+    correlation, a re-fold per candidate, a sort inside the loop — costs far
+    more than 3.5x.
+    """
+    points = long_timeline(_ceiling_points())
+    assert fastest(lambda: analyse_key(points, frame_seconds=HOP_SECONDS)) < 0.005
+
+
+def test_key_estimation_costs_no_more_than_the_aggregation_beside_it() -> None:
+    """The machine-independent half of the budget above.
+
+    ``summarise_notes`` folds the same timeline and is already served
+    synchronously on every ``/notes`` request, so it is a ceiling this product
+    has been paying in production since Step 7I. Measured at 1.35 ms against
+    2.95 ms — key is under half — and stated as "no more than", which leaves
+    room for machine noise but none for an algorithmic regression.
+
+    A ratio survives being run on hardware nobody has measured, which the 5 ms
+    above does not. Both are kept: this one catches the regression, that one
+    catches the two of them getting slow together.
+    """
+    points = long_timeline(_ceiling_points())
+    key_seconds = fastest(lambda: analyse_key(points, frame_seconds=HOP_SECONDS))
+    notes_seconds = fastest(lambda: summarise_notes(points, frame_seconds=HOP_SECONDS))
+    assert key_seconds <= notes_seconds
+
+
+def test_key_estimation_grows_with_the_timeline_and_not_with_its_square() -> None:
+    """Four times the points must not cost sixteen times the work.
+
+    The ceiling above is a bound on one length. This is the bound on the shape,
+    and it is the assertion that would survive someone raising the accepted
+    duration. Four times the longest accepted recording is measured at about
+    3.7x; the gate is 8x, which linear clears comfortably and quadratic cannot.
+    """
+    at_ceiling = long_timeline(_ceiling_points())
+    at_four_times = long_timeline(_ceiling_points() * 4)
+
+    one = fastest(lambda: analyse_key(at_ceiling, frame_seconds=HOP_SECONDS), runs=5)
+    four = fastest(lambda: analyse_key(at_four_times, frame_seconds=HOP_SECONDS), runs=5)
+    assert four < one * 8
+
+
+def test_key_estimation_never_copies_the_timeline() -> None:
+    """Memory is twelve shares and 24 candidates, whatever the recording's length.
+
+    The bound is what makes that a measurement rather than a claim. A copy of
+    the timeline at four times the ceiling would be 413 KB of pointers alone
+    before any ``PitchPoint`` was rebuilt, so a 64 KiB ceiling cannot be met by
+    anything that keeps a second reference to every point. Measured: 7 216 bytes
+    at the ceiling and 13 856 at four times it — the growth is the interpreter's
+    integer objects for the running counts, not the timeline.
+    """
+    points = long_timeline(_ceiling_points() * 4)
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        analyse_key(points, frame_seconds=HOP_SECONDS)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak - before < 64 * 1024
+
+
+def test_the_correlations_cost_the_same_whatever_the_recording_length() -> None:
+    """24 correlations over twelve values each. The length is folded away first.
+
+    Timed on a pre-folded profile, which is what :func:`estimate_key` receives,
+    so this measures the scoring alone: 0.18 ms at any length. It is the reason
+    the ceiling above is dominated by the fold and the reason no cache is
+    warranted for the scoring half.
+    """
+    short = pitch_class_profile(timeline(MAJOR_MELODY), frame_seconds=HOP)
+    long = pitch_class_profile(long_timeline(_ceiling_points()), frame_seconds=HOP_SECONDS)
+
+    short_seconds = fastest(lambda: estimate_key(short, voiced_seconds=999.0))
+    long_seconds = fastest(lambda: estimate_key(long, voiced_seconds=999.0))
+    assert long_seconds < short_seconds * 4
