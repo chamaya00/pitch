@@ -187,13 +187,36 @@ class AudioAnalysisService:
             ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown or is
                 not this owner's.
         """
-        analysis = await self.current(recording_id, owner_id)
+        return self.key_of(await self.current(recording_id, owner_id))
+
+    @staticmethod
+    def key_of(analysis: AudioAnalysis | None) -> KeyAnalysis | None:
+        """The key of one analysis record, with no repository access.
+
+        The counterpart to :meth:`_notes_of`, and it exists for a measured
+        reason rather than a symmetric one. A caller that has already resolved
+        the record — the endpoint does, because it needs the recording and
+        analysis ids for the response — would otherwise reach :meth:`key` and
+        load the same analysis a second time. The arithmetic is ~1.4 ms at the
+        longest accepted recording; **the document is the cost**, and loading it
+        twice per request doubled the expensive half to save a parameter.
+
+        It also removes a window rather than only a read. Two loads can return
+        two different records if an analysis is re-run between them, which would
+        pair one analysis's ids with another analysis's key. One load cannot.
+
+        ``None`` for anything there is no completed measurement to fold: no
+        record, one still in flight, one that failed, or one with no metrics.
+        The caller must not collapse that with a :class:`KeyAnalysis` whose
+        ``key`` is ``None``, which means the notes settled nothing.
+        """
         if analysis is None or analysis.status is not AudioAnalysisStatus.COMPLETED:
             return None
         if analysis.metrics is None:
             return None
         return analyse_key(
-            analysis.pitch_points, frame_seconds=self._frame_seconds(analysis.metrics)
+            analysis.pitch_points,
+            frame_seconds=AudioAnalysisService._frame_seconds(analysis.metrics),
         )
 
     @staticmethod
@@ -219,10 +242,8 @@ class AudioAnalysisService:
         when the analysis was started, and a background task has no request to
         take an owner from.
 
-        :meth:`key` deliberately has no such counterpart: nothing else in this
-        service needs a key, and a seam with one caller is a seam to maintain
-        for nothing. Audio feedback is not given the key — see
-        ``docs/phase-8-specification.md``.
+        :meth:`key_of` is the same seam for the same reason. Audio feedback is
+        still not given the key — see ``docs/phase-8-specification.md``.
         """
         if analysis.metrics is None:
             return ()

@@ -285,7 +285,11 @@ async def get_musical_key(
 ) -> MusicalKeyResponse:
     """Return the key the analysis's pitch classes best fit, or say there is none."""
     analysis = await _require_analysis(service, recording_id, owner_id)
-    key = await service.key(recording_id, owner_id)
+    # Folded from the record already loaded, not fetched again: the pitch
+    # timeline is the expensive part of this request and a second read would
+    # buy nothing but the chance of pairing one analysis's ids with another
+    # analysis's key.
+    key = service.key_of(analysis)
     if key is None:
         # No *completed* analysis. Deliberately the same answer `/notes` gives,
         # and deliberately not a null key: one means there is nothing to look

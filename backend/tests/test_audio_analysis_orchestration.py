@@ -8,18 +8,23 @@ failure be provoked deliberately rather than by finding a file that breaks numpy
 """
 
 import asyncio
+import math
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
 import anyio
 import pytest
 
+from app.core.config import Settings
 from app.core.errors import ApiError, ErrorCode
 from app.services.ai.mock import MockFeedbackProvider
 from app.services.ai.protocols import AudioFeedbackProvider
 from app.services.audio.storage import RecordingStorage
 from app.services.audio_analysis.analyzer import (
+    HOP_SECONDS,
     AudioAnalysisResult,
     AudioAnalyzer,
     SignalAudioAnalyzer,
@@ -587,15 +592,26 @@ class CountingAnalysisRepository(InMemoryAudioAnalysisRepository):
 
     Subclassed rather than replaced so this cannot drift from the behaviour the
     rest of the suite is written against.
+
+    ``loads`` counts the reads that fetch a whole analysis document. In
+    PostgreSQL that document carries the pitch timeline as JSONB — tens of
+    thousands of points at the accepted maximum — and it is the expensive part
+    of any request that derives something from it, far outweighing the
+    arithmetic. Counting them is how a second one gets noticed.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.writes = 0
+        self.loads = 0
 
     async def create(self, analysis: AudioAnalysis) -> AudioAnalysis:
         self.writes += 1
         return await super().create(analysis)
+
+    async def latest_for_recording(self, recording_id: str) -> AudioAnalysis | None:
+        self.loads += 1
+        return await super().latest_for_recording(recording_id)
 
     async def update(
         self, analysis: AudioAnalysis, *, expect_status: AudioAnalysisStatus
@@ -877,3 +893,231 @@ def test_a_key_is_read_from_the_stored_timeline_and_not_from_the_audio(
 
     assert analysis is not None and analysis.key is not None
     assert analysis.key.tonic == "C"
+
+
+# --- The service under the performance ceiling ------------------------------
+#
+# Layer 1 bounds the arithmetic in ``test_audio_key.py``. What is bounded here
+# is everything the service adds around it: how many times the analysis document
+# is loaded, whether anything is written, and whether the work it does per call
+# is the estimator's or something that grew around it.
+
+
+def _ceiling_points() -> int:
+    """Points in the longest recording this product accepts. See ``test_audio_key``."""
+    return math.floor(Settings().max_audio_duration_seconds / HOP_SECONDS)
+
+
+def _long_melody(points: int) -> tuple[PitchPoint, ...]:
+    """``_timeline`` stretched to exactly ``points`` frames, keeping the melody's shape.
+
+    The remainder is spent on the tonic rather than truncated away, so the
+    timeline is the requested length exactly. The ceiling is the assertion, and
+    a benchmark 151 points short of it is measuring a different recording.
+    """
+    scale = max(1, points // sum(_C_MAJOR_MELODY.values()))
+    stretched = {pitch_class: frames * scale for pitch_class, frames in _C_MAJOR_MELODY.items()}
+    stretched[0] += points - sum(stretched.values())
+    return _timeline(stretched)
+
+
+def test_estimating_a_key_loads_the_analysis_exactly_once(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    recording_id: str,
+) -> None:
+    """One document read per call, and the count is the assertion.
+
+    The document is the cost of this request — the timeline inside it is up to
+    12 931 points of JSONB, against ~1.4 ms of arithmetic to fold it. A second
+    load would roughly double the expensive half of a read-only endpoint, so it
+    is worth a test that says so in numbers rather than a comment that says so
+    in prose.
+    """
+    analyses = CountingAnalysisRepository()
+    _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+    analyses.loads = 0
+    analyses.writes = 0
+
+    assert run(lambda: service.key(recording_id, OWNER_ID)) is not None
+
+    assert analyses.loads == 1
+    assert analyses.writes == 0
+
+
+def test_folding_a_key_from_a_record_already_held_loads_nothing(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    recording_id: str,
+) -> None:
+    """The seam the endpoint uses, and the reason it exists.
+
+    A caller holding the record — the endpoint does, because the response
+    carries the recording and analysis ids — must be able to fold its key
+    without going back to the repository. Zero loads is the whole point of the
+    method, so zero loads is what is asserted.
+    """
+    analyses = CountingAnalysisRepository()
+    stored = _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+    analyses.loads = 0
+    analyses.writes = 0
+
+    folded = service.key_of(stored)
+
+    assert folded is not None and folded.key is not None
+    assert folded.key.tonic == "C"
+    assert analyses.loads == 0
+    assert analyses.writes == 0
+
+
+def test_folding_a_key_from_a_record_agrees_with_looking_one_up(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    analyses: InMemoryAudioAnalysisRepository,
+    recording_id: str,
+) -> None:
+    """The two seams must not be two answers.
+
+    ``key_of`` exists to save a read, not to become a second implementation. If
+    these ever differ, the endpoint and the service method are describing the
+    same recording differently.
+    """
+    stored = _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    looked_up = run(lambda: service.key(recording_id, OWNER_ID))
+    folded = service.key_of(stored)
+
+    assert looked_up is not None and folded is not None
+    assert looked_up.model_dump() == folded.model_dump()
+
+
+def test_folding_a_key_from_nothing_is_the_same_absence_as_looking_one_up(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    analyses: InMemoryAudioAnalysisRepository,
+    recording_id: str,
+) -> None:
+    """``None`` means "no completed measurement", at both seams and for all four causes."""
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    assert service.key_of(None) is None
+
+    for status in (
+        AudioAnalysisStatus.PENDING,
+        AudioAnalysisStatus.ANALYZING,
+        AudioAnalysisStatus.FAILED,
+    ):
+        record = AudioAnalysis(
+            audio_analysis_id=new_audio_analysis_id(),
+            recording_id=recording_id,
+            status=status,
+            error_code=(
+                ErrorCode.AUDIO_ANALYSIS_FAILED if status is AudioAnalysisStatus.FAILED else None
+            ),
+        )
+        assert service.key_of(record) is None
+
+
+def test_a_completed_analysis_cannot_reach_the_fold_without_metrics(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    analyses: InMemoryAudioAnalysisRepository,
+    recording_id: str,
+) -> None:
+    """The fourth cause of ``None`` is unreachable, and that is worth stating.
+
+    ``key_of`` refuses a completed record with no metrics, because without the
+    stored settings there is no hop to fold the timeline by. The model refuses
+    to represent one at all, so the guard cannot fire — it is kept for the same
+    reason ``_correlation``'s zero-variance branch is kept: a function must not
+    misbehave for an input its own signature permits. Asserting the model's
+    refusal here says which of the two is load-bearing.
+    """
+    with pytest.raises(ValueError, match="must have metrics"):
+        AudioAnalysis(
+            audio_analysis_id=new_audio_analysis_id(),
+            recording_id=recording_id,
+            status=AudioAnalysisStatus.COMPLETED,
+            completed_at=utc_now(),
+        )
+
+
+def test_the_service_adds_nothing_measurable_to_the_estimator_at_the_ceiling(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    recording_id: str,
+) -> None:
+    """A full-length recording through the service, against the same fold alone.
+
+    The doubles hold the record in a dictionary, so this deliberately does not
+    measure PostgreSQL — it measures what the *service* contributes. What it
+    must not contain is a second fold, a copy of the timeline, or a
+    re-validation of every point: any of those would put the call well beyond
+    twice the arithmetic it exists to perform.
+
+    The upper bound is stated against the estimator rather than in milliseconds
+    so it survives being run on hardware nobody has measured.
+    """
+    points = _long_melody(_ceiling_points())
+    assert len(points) == _ceiling_points()
+
+    analyses = CountingAnalysisRepository()
+    _store_completed(analyses, recording_id, points)
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    def through_service() -> None:
+        run(lambda: service.key(recording_id, OWNER_ID))
+
+    def estimator_only() -> None:
+        analyse_key(points, frame_seconds=_HOP_SECONDS)
+
+    through_service()
+    estimator_only()
+    service_seconds = min(_seconds(through_service) for _ in range(5))
+    estimator_seconds = min(_seconds(estimator_only) for _ in range(5))
+
+    assert service_seconds < estimator_seconds * 3
+
+
+def test_a_full_length_recording_still_yields_its_key(
+    recordings: InMemoryRecordingRepository,
+    storage: RecordingStorage,
+    analyses: InMemoryAudioAnalysisRepository,
+    recording_id: str,
+) -> None:
+    """The ceiling is a length the feature answers, not merely one it survives.
+
+    A benchmark against an input the estimator refuses would be timing the
+    gates. This asserts the 300-second case is a measured one.
+    """
+    points = _long_melody(_ceiling_points())
+    _store_completed(analyses, recording_id, points)
+    service = build(
+        recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
+    )
+
+    analysis = run(lambda: service.key(recording_id, OWNER_ID))
+
+    assert analysis is not None and analysis.key is not None
+    assert analysis.key.tonic == "C"
+    assert analysis.key.mode is KeyMode.MAJOR
+    assert analysis.voiced_seconds == pytest.approx(300.0, abs=1.0)
+
+
+def _seconds(call: Callable[[], None]) -> float:
+    start = time.perf_counter()
+    call()
+    return time.perf_counter() - start
