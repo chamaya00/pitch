@@ -415,6 +415,16 @@ It is not an objective statement about whether someone can sing a song. Tessitur
 (where a melody sits most of the time), breath demands, register transitions and
 stylistic technique are not captured by range overlap.
 
+**None of it is built.** The Phase 9 audit confirmed from source that there is no
+reference input of any kind — no upload, no catalogue, no provider, no stored
+song metadata — and therefore no overlap, difficulty, suitability or
+transposition calculation anywhere. It is blocked on one product decision: where
+a reference song comes from. See
+[phase-9-specification.md](phase-9-specification.md), including
+[the limitations it would have to ship with](phase-9-specification.md#14-limitations-to-ship-with-it)
+and why a single composite compatibility percentage is treated there as a
+product decision rather than a default.
+
 ## AI vocal feedback
 
 The interpretation of the audio measurements is prose about numbers, and its

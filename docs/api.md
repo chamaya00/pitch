@@ -172,6 +172,73 @@ that the identity is down to one key.
 Revoking the key the request was made with is allowed when others remain. The
 request finishes; that key stops working afterwards.
 
+### `GET /api/v1/config`
+
+The upload limits and accepted formats, so a client can state the real numbers
+instead of hardcoding ones that drift from the server's. Takes no identifier and
+needs no owner header.
+
+**200 OK**
+
+```json
+{
+  "max_audio_size_mb": 50,
+  "max_audio_size_bytes": 52428800,
+  "max_audio_duration_seconds": 300,
+  "supported_extensions": [".mp3", ".wav"]
+}
+```
+
+**Advisory only.** Every one of these is enforced server-side on upload
+regardless of what a client did with them. Nothing here is a secret: provider
+keys and model names are never in this response — see [Errors](#errors).
+
+### `POST /api/v1/recordings`
+
+`multipart/form-data` with a single `file` field. The recording becomes the
+caller's, resolved from the owner header; there is no field that could name a
+different owner.
+
+**Accepted formats:** WAV and MP3, decided by **inspecting the bytes**. The
+extension and the `Content-Type` are not trusted, and an extension that
+disagrees with the contents is refused with `FORMAT_MISMATCH` rather than
+silently believed.
+
+**Limits** come from server configuration and are published by
+`GET /api/v1/config`: `MAX_AUDIO_SIZE_MB` (50 by default) and
+`MAX_AUDIO_DURATION_SECONDS` (300). Duration is read from the container
+headers, never from the file name.
+
+The uploaded name is kept only as display metadata, sanitised. The stored file
+is named from a server-generated identifier, so no client string reaches a
+filesystem path.
+
+**201 Created**
+
+```json
+{
+  "recording_id": "0c07991ba858449e976cb93f933f5dde",
+  "original_filename": "practice-take-1.wav",
+  "format": "wav",
+  "duration_seconds": 2.0,
+  "sample_rate": 22050,
+  "channels": 1,
+  "size_bytes": 88244,
+  "bits_per_sample": 16,
+  "created_at": "2026-08-11T05:12:29.705890Z"
+}
+```
+
+`bits_per_sample` is available for PCM WAV only and is `null` otherwise.
+
+**Errors:** `INVALID_FILENAME`, `FORMAT_MISMATCH`, `UNSUPPORTED_FORMAT`,
+`FILE_TOO_LARGE`, `AUDIO_TOO_LONG`, `CORRUPTED_AUDIO`, `RATE_LIMITED`. Upload is
+one of the *costly* requests, so it is rate-limited per owner — see
+[Errors](#errors).
+
+Uploading is **not** analysing. A stored recording has no measurements until
+`POST …/analysis` or `POST …/audio-analysis` is called for it.
+
 ### `GET /api/v1/recordings`
 
 The caller's own recordings, newest first. Whose they are is decided entirely
@@ -836,55 +903,28 @@ it must never be presented as a real interpretation.
 
 ## Planned
 
-These are the contracts later phases will implement. They are documented here so
-the frontend types and backend schemas are designed against the same shape.
+**Nothing. Every endpoint this API has is documented above, and every path in
+*Implemented* is registered in `app/api/v1/router.py`.**
 
-### `POST /api/v1/audio/upload` — Phase 1
+This section used to carry four Phase 0 sketches — `POST /api/v1/audio/upload`,
+`POST` and `GET /api/v1/analysis/…`, and
+`POST /api/v1/analysis/{analysis_id}/ai-feedback`. All four shipped, at
+different paths and different shapes, and the sketches were left behind. They
+were removed in the Phase 9 audit rather than corrected, because the real
+contracts are documented above in full. What became of each:
 
-`multipart/form-data` with a single `file` field.
+| Phase 0 sketch | Shipped as | Where |
+| --- | --- | --- |
+| `POST /api/v1/audio/upload` | `POST /api/v1/recordings` | Phase 1. Returns the whole recording, not `{recording_id, status}` |
+| `POST /api/v1/analysis/{recording_id}` | `POST /api/v1/recordings/{recording_id}/analysis` | Phase 7. Recording-scoped, so ownership is checked on a path segment |
+| `GET /api/v1/analysis/{analysis_id}` | `GET /api/v1/recordings/{recording_id}/analysis` | Phase 7. Keyed by recording, and the summary it sketched is the *audio* analysis, which became its own endpoint |
+| `POST /api/v1/analysis/{analysis_id}/ai-feedback` | no endpoint — speech feedback is produced in the same background run as the analysis and arrives in its `GET` | Phase 7. The audio half *does* have one: `POST …/audio-analysis/feedback` |
 
-Validation: MIME type and extension (`.mp3`, `.wav`, `.m4a` where feasible),
-size ≤ `MAX_AUDIO_SIZE_MB`, duration ≤ `MAX_AUDIO_DURATION_SECONDS`.
-
-**201 Created**
-
-```json
-{ "recording_id": "…", "status": "uploaded" }
-```
-
-### `POST /api/v1/analysis/{recording_id}` — Phase 2
-
-Starts analysis in the background.
-
-**202 Accepted**
-
-```json
-{ "analysis_id": "…", "status": "processing" }
-```
-
-### `GET /api/v1/analysis/{analysis_id}` — Phase 2
-
-**200 OK**
-
-```json
-{
-  "status": "completed",
-  "summary": {
-    "lowest_note": "G2",
-    "highest_note": "C5",
-    "pitch_accuracy": 82.4,
-    "average_cents_deviation": -17.2,
-    "voiced_ratio": 0.74
-  }
-}
-```
-
-`status` is one of `processing`, `completed`, `failed`.
-
-### `POST /api/v1/analysis/{analysis_id}/ai-feedback` — Phase 6
-
-Generates the LLM interpretation of an existing analysis. Returns the structured
-object documented in [ai.md](ai.md). Requires `ANTHROPIC_API_KEY`.
+Phase 9 — song compatibility, transposition — has **no** endpoint sketch here on
+purpose. Its input contract is an open product decision, and writing a request
+shape before the product has said where a reference song comes from would be
+inventing the requirement. See
+[phase-9-specification.md](phase-9-specification.md).
 
 ---
 
@@ -902,7 +942,9 @@ Handled failures use a stable envelope:
 
 | `error_code` | Meaning |
 | --- | --- |
+| `INVALID_FILENAME` | The upload carried no file name, or nothing usable was left after sanitising |
 | `UNSUPPORTED_FORMAT` | File type not accepted |
+| `FORMAT_MISMATCH` | The extension and the file's actual contents disagree |
 | `FILE_TOO_LARGE` | Exceeds `MAX_AUDIO_SIZE_MB` |
 | `AUDIO_TOO_LONG` | Exceeds `MAX_AUDIO_DURATION_SECONDS` |
 | `CORRUPTED_AUDIO` | File could not be decoded |

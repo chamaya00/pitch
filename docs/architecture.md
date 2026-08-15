@@ -656,3 +656,24 @@ record's key.
 **No model sees the key**, structurally: it is absent from the feedback payload,
 the comparison service and the progress series, none of which gained a field that
 could hold it.
+
+### Not built in Phase 9
+
+All of it. The Phase 9 audit re-verified the whole reference-song surface against
+source and found nothing: no reference upload, no reference storage, no
+catalogue, no external music provider, no vocal separation, no stored song
+metadata, and no code calculating overlap, difficulty, suitability, a target key
+or a semitone shift. The one comparison this system performs —
+`services/comparison/` — places two of *one owner's own* recordings side by side;
+neither side is a reference, and there is nothing in the architecture to compare
+a measurement against.
+
+The architectural point, for whoever picks this up: **the singer's half is
+finished and needs no work.** Detected range, pitch timeline, note histogram and
+key are all built, stored in the `audio_analyses` document and owner-scoped. What
+Phase 9 adds is the other side of the comparison, and its shape — table, storage,
+API, background work, cost, whether anything is stored at all — depends entirely
+on a product decision that has not been taken. The analysis, four input models
+and a draft design are in
+[phase-9-specification.md](phase-9-specification.md); nothing in it is
+implemented.

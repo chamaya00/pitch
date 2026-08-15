@@ -14,7 +14,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
-| 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
+| 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
 ## Phase 0 — delivered
@@ -200,6 +200,47 @@ and `reference` never once means a reference recording.
 **Phase 8 is complete.** Its definition of done is met, and what it deliberately
 does not contain — tempo, beats, melody transcription, note events, a reference
 song, transposition and compatibility — is unchanged and still out of scope.
+
+## Phase 9 — audited, specified, blocked
+
+Phase 9 was audited after Phase 8 closed, in the same way 10.7 audited Phase 8:
+inspect the repository first, and write nothing that the source does not support.
+The result is [phase-9-specification.md](phase-9-specification.md). **No Phase 9
+code was written, and none should be until the decision below is taken.**
+
+What the audit established, from source rather than from prose:
+
+- **None of Phase 9 exists.** No reference upload, no reference storage, no
+  catalogue, no external provider, no reference selection, no vocal stem. No
+  reference metadata of any kind is stored — not a title, a key, a range, a
+  melody, a BPM or a source. No code calculates range overlap, key
+  compatibility, difficulty, suitability, a target key or a semitone shift.
+  `song` still appears in the codebase only as a test upload filename, and
+  `reference` still never means a reference recording.
+- **The singer's half is finished.** Detected range, the pitch timeline, the note
+  histogram and the musical key are all built, stored and owner-scoped. What is
+  missing is the *other* side of the comparison, and only that.
+- **The blocker is a product decision, not an engineering one.** Where a
+  reference song comes from — user upload, an internal catalogue, an external
+  provider, or metadata the user types — changes the storage, the API, the
+  algorithm, the test plan, the cost and the copyright position. Four options are
+  analysed in the specification with pros, cons and unresolved questions.
+  **None is chosen there**, because an engineer choosing would be inventing the
+  requirement.
+- **Two things Phase 9 must not do by default** are flagged in the specification
+  rather than assumed: a single composite compatibility percentage (no
+  measurement anywhere sets its weights, and the codebase has refused composite
+  figures three times already), and any AI-produced number.
+
+The specification also carries what *can* be settled without the decision: the
+concepts kept apart, the required/optional/deferred/unknown input list, the
+compatibility and transposition semantics, a storage and ownership impact
+analysis, a draft API and frontend, a deterministic fixture plan, the performance
+envelope — which needs no Redis, no queue and no new infrastructure — and a
+preliminary definition of done.
+
+**One question stands between Phase 9 and implementation, and it is
+[§16 question 1](phase-9-specification.md#16-unresolved-product-decisions).**
 
 ## Phase 10 — where it stands
 

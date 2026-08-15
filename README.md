@@ -60,7 +60,10 @@ than passing it off as analysis.
 song compatibility, transpose recommendation, tempo and beat tracking, and
 musical transcription. The key estimate above is the key of *what you sang* —
 this product accepts no song, no reference track and no second audio input, so
-there is nothing to compare a recording against. See
+there is nothing to compare a recording against. That gap is the reason song
+compatibility (Phase 9) has not started — where a reference song would come from
+is an open product decision, audited and specified in
+[docs/phase-9-specification.md](docs/phase-9-specification.md). See also
 [docs/roadmap.md](docs/roadmap.md).
 
 Every result is an **audio-based estimate from one recording**. Nothing here has
