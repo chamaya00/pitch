@@ -17,9 +17,13 @@
 import type {
   AudioSummary,
   DetectedRange,
+  KeyEstimate,
+  KeyUnmeasuredReason,
   LoudnessMetrics,
+  MusicalKey,
   NoteBreakdown,
   NoteSummary,
+  PitchClassShare,
   PitchStabilityMetrics,
   SpectralMetrics,
 } from "../types/api";
@@ -222,4 +226,125 @@ export function noteRows(notes: NoteSummary[]): NoteRow[] {
  */
 export function hasNoteBreakdown(breakdown: NoteBreakdown | null): boolean {
   return breakdown !== null && breakdown.notes.length > 0;
+}
+
+/* --- Musical key ----------------------------------------------------------- */
+
+/**
+ * The margin below which an answered key is presented as thin evidence.
+ *
+ * **Presentational, and only presentational.** The backend's own gate is
+ * `MIN_KEY_CONFIDENCE = 0.05`: below that it reports no key at all, and nothing
+ * here can change that. This second, higher line decides only whether an
+ * answered key is shown with its weakness stated in words, and it is set from
+ * the same sweep that set the backend constant (200 jittered draws per melody,
+ * Temperley, hop 0.0232 s):
+ *
+ * | Input                        | Margin |
+ * | ---------------------------- | ------ |
+ * | Sung major melody            | 0.262  |
+ * | Pentatonic melody            | 0.241  |
+ * | Sung minor melody            | 0.205  |
+ * | Bare unweighted major scale  | 0.146  |
+ * | Backend refuses below        | 0.050  |
+ *
+ * 0.19 is the bottom of the band a *weighted* melody reaches, and it puts the
+ * bare unweighted scale — which the specification requires be "answered, and
+ * answered weakly" — on the weak side of the line. Roughly a third to a half of
+ * heavily jittered melodies land below it too, which is the intended reading:
+ * they are the genuinely ambiguous ones.
+ *
+ * It is never a second refusal. A key below this line is still shown, with its
+ * tonic, its runner-up and its evidence.
+ */
+export const WEAK_KEY_CONFIDENCE = 0.19;
+
+/** `G major`. The tonic and mode, and nothing implied about correctness. */
+export function keyLabel(key: KeyEstimate | null): string | null {
+  if (key === null) return null;
+  return `${key.tonic} ${key.mode}`;
+}
+
+/**
+ * Whether an answered key rests on thin evidence.
+ *
+ * `false` for a key that was never answered: "not measured" is its own state,
+ * and calling it weak would imply a key was found.
+ */
+export function isWeakKey(key: KeyEstimate | null): boolean {
+  return key !== null && key.confidence < WEAK_KEY_CONFIDENCE;
+}
+
+/**
+ * Why no key was reported, in words.
+ *
+ * Every one of these describes the *recording*, never a fault. An unrecognised
+ * reason falls back to the same voice rather than to an error.
+ */
+export const KEY_UNMEASURED_MESSAGES: Readonly<Record<KeyUnmeasuredReason, string>> = {
+  TOO_FEW_PITCH_CLASSES:
+    "Too few different notes were sung to tell one key from another. A held note or a short arpeggio fits many keys equally well.",
+  TOO_LITTLE_VOICED_TIME:
+    "There was not enough pitched singing in this recording to fold into a key.",
+  AMBIGUOUS:
+    "No key stood clear of the next-best one. The notes that were sung fit several keys about equally well.",
+};
+
+const KEY_UNMEASURED_FALLBACK =
+  "The notes in this recording did not establish a key.";
+
+export function keyUnmeasuredMessage(
+  reason: KeyUnmeasuredReason | null | undefined,
+): string {
+  if (reason && reason in KEY_UNMEASURED_MESSAGES) {
+    return KEY_UNMEASURED_MESSAGES[reason];
+  }
+  return KEY_UNMEASURED_FALLBACK;
+}
+
+/** One row of the pitch-class table, formatted and ready to render. */
+export interface PitchClassRow {
+  name: string;
+  pitchClass: number;
+  share: string;
+  /** 0–100, for the bar width. The formatted share is `share`. */
+  sharePercent: number;
+  /** Whether this class carried enough time to count towards the evidence. */
+  used: boolean;
+}
+
+/**
+ * The share of pitched time each pitch class carried.
+ *
+ * Order is the server's — pitch-class order, C first — and is deliberately not
+ * re-sorted. Unlike the note table, this one is **not** ranked by size: a key is
+ * decided as much by which classes are absent as by which are present, so the
+ * zeroes are rows too and moving them to the end would hide the shape.
+ *
+ * `used` mirrors the backend's `MIN_PITCH_CLASS_SHARE`: a class below it stays
+ * in the profile and in this table, but does not count towards the
+ * distinct-pitch-class evidence. One stray frame at a note boundary should not
+ * make a two-note hum look like three-note music.
+ */
+export const MIN_PITCH_CLASS_SHARE = 2.0;
+
+export function pitchClassRows(shares: PitchClassShare[]): PitchClassRow[] {
+  return shares.map((share) => ({
+    name: share.name,
+    pitchClass: share.pitch_class,
+    share: `${share.percentage_of_voiced_time.toFixed(1)}%`,
+    sharePercent: share.percentage_of_voiced_time,
+    used: share.percentage_of_voiced_time >= MIN_PITCH_CLASS_SHARE,
+  }));
+}
+
+/**
+ * Whether there is pitch-class evidence worth rendering.
+ *
+ * The server returns twelve entries whenever there was anything pitched to
+ * fold, including the unused ones at zero. An empty list is "nothing was
+ * folded", not twelve measured zeroes, and must not become a table of dashes.
+ */
+export function hasPitchClassEvidence(musicalKey: MusicalKey | null): boolean {
+  return musicalKey !== null && musicalKey.pitch_classes.length > 0;
 }

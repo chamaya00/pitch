@@ -17,6 +17,8 @@
 | 10.8 | Re-audited to resolve the blocking question 10.7 raised. **Two of 10.7's load-bearing claims did not survive re-inspection.** The key-estimation scope is no longer recommended on evidence; it is now a product decision. A second candidate scope was recovered from a deferral 10.7 got wrong. |
 | 10.8 (decision) | Product answered: **Candidate A**, musical key only. Phase 9 confirmed as a blocked product dependency, not something to work around. |
 | 10.8 (Slice 1) | Pure domain built and measured. Thresholds set from a sweep, the profile set chosen on evidence, and **one specification claim corrected by the measurements** — see below. |
+| 10.8 (Slices 2–3) | The service read and the endpoint. Derived on read, no migration, no new error code. |
+| 10.8 (Slice 4) | The card. Every state in §9 built, and each one reached deliberately in a browser against the real stack; §9's open question 3 answered by measurement — see below. |
 
 ### What the Slice 1 sweep settled
 
@@ -789,9 +791,9 @@ updated; this file marked superseded, not deleted.
 | # | Purpose | Files | Tests | Browser | Acceptance | Depends on |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 ✅ | **Delivered.** Pure domain: profile + estimator | `audio_analysis/key.py`, `models.py`, `tests/test_audio_key.py` | 94 tests. Every deterministic and adversarial fixture; both profile sets raced; the threshold sweep run and recorded above | — | Met: 24/24 tonics both modes, transposition invariance to 1e-9, every adversarial fixture `null` with the right reason, thresholds justified by recorded measurements. 14 mutations run — 13 caught, 1 confirmed equivalent and documented as such in the code | — |
-| 2 | `AudioAnalysisService.key()` | `orchestration/audio_analysis.py`, `test_audio_analysis_orchestration.py` | `None` for pending/failed/absent; `RECORDING_NOT_FOUND` for another owner; estimate for a completed one, driven by the existing stub analyzer | — | No new repository method, no new SQL, ownership passes through a substituted resolver | 1 |
-| 3 | The endpoint | `routes/audio_analysis.py`, `schemas/audio_analysis.py`, `test_audio_analysis_api.py`, `test_ownership_api.py`, `docs/api.md` | Both `200` shapes; both `404`s; another owner gets the same `404`; response asserted free of `owner_id`; asserted not to consume costly-request quota | `curl` through the running stack | `docs/api.md` documents the `null` shape and `unmeasured_reason`; no `ErrorCode` member added | 2 |
-| 4 | The UI | `types/api.ts`, `lib/api.ts`, `components/audio-analysis/`, `frontend/tests/` | Presentation logic under `node --test`, including that a `null` key never renders a tonic | All three scenarios, both widths, both schemes, console checked | Every state reached deliberately; no handled failure reaches `app/error.tsx` | 3 |
+| 2 ✅ | **Delivered.** `AudioAnalysisService.key()` | `orchestration/audio_analysis.py`, `test_audio_analysis_orchestration.py` | `None` for pending/failed/absent; `RECORDING_NOT_FOUND` for another owner; estimate for a completed one, driven by the existing stub analyzer | — | No new repository method, no new SQL, ownership passes through a substituted resolver | 1 |
+| 3 ✅ | **Delivered.** The endpoint | `routes/audio_analysis.py`, `schemas/audio_analysis.py`, `test_audio_analysis_api.py`, `test_ownership_api.py`, `docs/api.md` | Both `200` shapes; both `404`s; another owner gets the same `404`; response asserted free of `owner_id`; asserted not to consume costly-request quota | `curl` through the running stack | `docs/api.md` documents the `null` shape and `unmeasured_reason`; no `ErrorCode` member added | 2 |
+| 4 ✅ | **Delivered.** The UI | `types/api.ts`, `lib/api.ts`, `lib/audio-analysis-metrics.ts`, `hooks/use-audio-analysis.ts`, `components/audio-analysis/musical-key-card.tsx`, `tests/audio-analysis.test.ts` | 50 tests (16 new). A `null` key returns no label at all, the weak band is pinned to the measured fixtures, and no key string reads as a grade | Measured, low-confidence and not-measured at 390 px and 1280 px in both schemes — 12 runs, no console output, no horizontal overflow — plus the unavailable/error state forced separately. Loading is the state each run passes through before it settles | Met. Every state reached deliberately; a forced `404` on the key call alone is handled inline and `app/error.tsx` is not reached | 3 |
 | 5 | Performance and mutation | `tests/test_audio_key.py`, a mutation script kept outside the repository | The 12 931-point ceiling; every mutation shown to fail a named test | — | If a mutation passes, the test is strengthened and the mutation re-run before the slice is done | 1–3 |
 | 6 | Documentation | the six files above | — | — | Limitations in the shipped voice; architecture row filled; "has not started" corrected; this file superseded, not deleted | 1–5 |
 
@@ -844,8 +846,15 @@ implementation choice:
 2. **Relative major / minor: pick one, or show both?** The specification returns
    `null` when they cannot be separated. "G major or E minor" is more informative
    and less decisive. Both are defensible; the choice is editorial.
-3. **How is low confidence presented?** Shown with the weakness stated, or
-   withheld below a second, higher bar. §9 assumes the former.
+3. ~~**How is low confidence presented?**~~ **Answered in Slice 4: shown, with
+   the weakness stated in words.** §9 assumed this and the measurements support
+   it. `WEAK_KEY_CONFIDENCE = 0.19` is presentational only — it is the bottom of
+   the band a *weighted* melody reaches (0.205–0.262), and it puts the bare
+   unweighted scale (0.146, measured at 0.147 end to end) on the weak side, which
+   is what this document already required of that fixture. Withholding below a
+   second bar was rejected for the reason the decision gate gives: the feature's
+   value is its honest under-answering, and hiding a thin answer would replace a
+   stated weakness with a silence the reader cannot interrogate.
 4. **Does Phase 9 have a future at all in this product?** It needs a reference
    song's range. Nothing in this repository provides one, nothing plans to, and
    §8 of the Step 10.8 brief forbids inventing one. Until that is answered,

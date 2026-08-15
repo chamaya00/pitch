@@ -13,7 +13,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
-| 8 | Melodic key estimation (scope resolved in 10.8) | Started — domain (1), service (2), API (3). No UI yet. [phase-8-specification.md](phase-8-specification.md) |
+| 8 | Melodic key estimation (scope resolved in 10.8) | Started — domain (1), service (2), API (3), UI (4). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | Planned |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
 
@@ -164,10 +164,20 @@ and `reference` never once means a reference recording.
   pitch-class shares either way; a recording with no *completed* analysis is a
   different thing and answers `404`. No new error code, no schema change, no
   migration.
+- **Slice 4** — the card, below the note breakdown it shares a timeline with.
+  All six states of the specification, the pitch-class evidence shown in every
+  one of them — including the state with no key — and one presentational
+  threshold, `WEAK_KEY_CONFIDENCE = 0.19`, which decides whether an answered key
+  is shown with its weakness stated in words and never whether it is shown at
+  all. Verified end to end through the real stack: a synthesised C major melody
+  reads *C major* at 0.310; a bare unweighted scale reads *C major* at 0.147 with
+  A minor — its own relative minor — as the runner-up, and is labelled as thin
+  evidence; a hum reads *Not measured*, `TOO_FEW_PITCH_CLASSES`, with its one
+  pitch class at 100% shown anyway.
 
-**No UI shows it.** The endpoint exists and answers, and no VocalLens page asks
-it anything — the frontend is Slice 4. Slices 4–6 remain, and the phase is
-**not** complete until its definition of done is met.
+**Slices 5 and 6 remain** — the performance ceiling and the mutation run, then
+the documentation sweep — and the phase is **not** complete until its definition
+of done is met.
 
 ## Phase 10 — where it stands
 

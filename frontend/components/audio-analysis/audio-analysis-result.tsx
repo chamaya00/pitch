@@ -1,6 +1,7 @@
 "use client";
 
 import { AudioFeedbackCard } from "@/components/audio-analysis/audio-feedback-card";
+import { MusicalKeyCard } from "@/components/audio-analysis/musical-key-card";
 import { NoteBreakdown } from "@/components/audio-analysis/note-breakdown";
 import { PitchGraph } from "@/components/audio-analysis/pitch-graph";
 import {
@@ -13,6 +14,7 @@ import {
 } from "@/lib/audio-analysis-metrics";
 import type {
   AudioSummary,
+  MusicalKey,
   NoteBreakdown as NoteBreakdownData,
   PitchPoint,
 } from "@/types/api";
@@ -23,6 +25,8 @@ interface AudioAnalysisResultProps {
   timelineError: string | null;
   breakdown: NoteBreakdownData | null;
   breakdownError: string | null;
+  musicalKey: MusicalKey | null;
+  musicalKeyError: string | null;
   /** The recording the AI card asks about. Measurements never leave this page. */
   recordingId: string;
 }
@@ -45,6 +49,8 @@ export function AudioAnalysisResult({
   timelineError,
   breakdown,
   breakdownError,
+  musicalKey,
+  musicalKeyError,
   recordingId,
 }: AudioAnalysisResultProps) {
   const range = rangeLabel(summary.range);
@@ -100,6 +106,11 @@ export function AudioAnalysisResult({
       </section>
 
       <NoteBreakdown breakdown={breakdown} error={breakdownError} />
+
+      {/* After the note breakdown, deliberately: the key is folded from exactly
+          the table above it with the octaves discarded, so it reads as a
+          consequence of those notes rather than as a separate finding. */}
+      <MusicalKeyCard musicalKey={musicalKey} error={musicalKeyError} />
 
       <MetricGroup
         id="audio-range"
