@@ -841,3 +841,111 @@ def test_the_key_names_the_analysis_it_was_folded_from(client: TestClient, tmp_p
     assert key["audio_analysis_id"] == summary["audio_analysis_id"]
     assert key["audio_analysis_id"] == notes["audio_analysis_id"]
     assert key["recording_id"] == recording_id
+
+
+# --- What a read actually costs --------------------------------------------
+#
+# Every endpoint below resolves the recording's current analysis. In PostgreSQL
+# that is one stored document, and the pitch timeline inside it is almost all of
+# it: 1 596 kB against 1.2 kB for everything else at the longest recording this
+# product accepts, which measured 87 ms and 19 MB of peak allocation per read
+# versus 1.7 ms and 14 kB without the points. These tests count the reads that
+# carry a timeline, so a route that starts paying for one it does not return
+# fails here rather than in production.
+
+
+def _count_timeline_loads(doubles: Doubles, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count reads that fetch a whole analysis document, timeline included."""
+    loads = [0]
+    latest = doubles.audio_analyses.latest_for_recording
+    by_id = doubles.audio_analyses.get
+
+    async def counted_latest(recording_id: str):  # type: ignore[no-untyped-def]
+        loads[0] += 1
+        return await latest(recording_id)
+
+    async def counted_get(audio_analysis_id: str):  # type: ignore[no-untyped-def]
+        loads[0] += 1
+        return await by_id(audio_analysis_id)
+
+    monkeypatch.setattr(doubles.audio_analyses, "latest_for_recording", counted_latest)
+    monkeypatch.setattr(doubles.audio_analyses, "get", counted_get)
+    return loads
+
+
+def test_the_summary_endpoints_never_load_a_pitch_timeline(
+    client: TestClient, doubles: Doubles, recording_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """None of these returns a pitch point, so none of them may load one.
+
+    The first is the read the browser **polls** while a measurement runs, which
+    is what makes it the most expensive habit in the product rather than one
+    slow request.
+    """
+    client.post(audio_url(recording_id))
+    loads = _count_timeline_loads(doubles, monkeypatch)
+
+    assert client.get(audio_url(recording_id)).status_code == 200
+    assert client.get(feedback_url(recording_id)).status_code == 200
+    # A repeated start, which walks every analysis this recording has ever had.
+    assert client.post(audio_url(recording_id)).status_code == 200
+
+    assert loads == [0]
+
+
+def test_reading_the_feedback_state_loads_no_timeline(
+    client: TestClient, doubles: Doubles, recording_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Polling for prose must not re-read the measurements it describes.
+
+    The *claim* is timeline-free too, but a ``POST`` here also runs the
+    background generation inside the test client's request cycle, and that run
+    legitimately loads the points to build its note breakdown. The claim's own
+    cost is asserted against the service in
+    ``test_audio_analysis_orchestration.py``, where the two are separable.
+    """
+    client.post(audio_url(recording_id))
+    client.post(feedback_url(recording_id))
+    loads = _count_timeline_loads(doubles, monkeypatch)
+
+    assert client.get(feedback_url(recording_id)).status_code == 200
+
+    assert loads == [0]
+
+
+def test_reading_the_note_breakdown_loads_the_analysis_once(
+    client: TestClient, doubles: Doubles, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same property Phase 8 slice 5 established for the key.
+
+    This route resolved the record for the ids in its response and then called
+    `service.notes`, which resolved it again — two loads of the document whose
+    timeline is the whole cost of the request. Two loads can also straddle a
+    re-analysis and pair one record's ids with another record's notes.
+    """
+    recording = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording))
+    loads = _count_timeline_loads(doubles, monkeypatch)
+
+    assert client.get(notes_url(recording)).status_code == 200
+
+    assert loads == [1]
+
+
+def test_the_summary_still_says_how_many_points_were_measured(
+    client: TestClient, recording_id: str
+) -> None:
+    """Dropping the timeline from a read must not drop the fact that it exists.
+
+    A summary that reported no points would be indistinguishable from an
+    analysis that measured nothing, which is the failure a stripped document
+    invites and `pitch_point_count` prevents.
+    """
+    client.post(audio_url(recording_id))
+
+    summary = client.get(audio_url(recording_id)).json()
+    timeline = client.get(f"{pitch_url(recording_id)}?max_points=50000").json()
+
+    assert summary["pitch_point_count"] > 10
+    assert summary["pitch_point_count"] == timeline["total_points"]
+    assert timeline["returned_points"] == summary["pitch_point_count"]
