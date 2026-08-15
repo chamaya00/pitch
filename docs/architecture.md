@@ -543,6 +543,7 @@ category errors, and this table exists to make them visible.
 | Backend pitch detection | `services/audio_analysis/detector.py` (NSDF) | Deterministic | Not CREPE, not librosa, not the browser detector |
 | Detected range, stability, loudness, spectrum | `services/audio_analysis/analyzer.py` | Deterministic | Range is *this recording*, never physiological; RMS/peak are not LUFS |
 | Note breakdown | `services/audio_analysis/notes.py` | Deterministic | Share of **voiced** time, not of duration; not musical transcription |
+| Musical key | `services/audio_analysis/key.py` | Deterministic | The key *implied by what was sung*, never a song's key; a label, not a measurement; refuses rather than guesses, and no model ever sees it |
 | Audio feedback | `services/ai/claude.py` via `AudioFeedbackProvider` | Provider | Never invoked on `INSUFFICIENT_PITCH_SIGNAL`; no timbre labels, no score |
 | Live pitch readout | `frontend/lib/pitch-detector.ts` | Browser-local | Never uploaded; never compared with the backend result |
 | Live Vocal Practice | `frontend/lib/live-practice.ts`, `hooks/use-live-stats.ts` | Browser-local | "Not enough yet" ≠ 0%; not a singing-ability score |
@@ -626,11 +627,9 @@ Nothing. The phase is complete. **Phase 8 was not started in Phase 7** — no so
 analysis, key detection, BPM, melody extraction or transposition existed at the
 end of it. Step 10.7 wrote
 [phase-8-specification.md](phase-8-specification.md) without implementing any of
-it, and Step 10.8 re-audited and corrected it. The shape it proposes is worth
-knowing before anything is built, because it deliberately adds no architecture at
-all — the result is derived on read from the pitch timeline `audio_analyses`
-already stores, in the same way `notes.py` is, so there is no new table, no
-migration, no dependency, no provider and no background work.
+it, and Step 10.8 re-audited, corrected it, and then built it. What the
+specification proposed is what shipped: the result is derived on read from the
+pitch timeline `audio_analyses` already stores, in the same way `notes.py` is.
 
 10.8 found that nothing in the product consumes a musical key —
 `limitations.md` defines Phase 9 compatibility as comparing *ranges*, not keys —
@@ -639,9 +638,21 @@ so the scope was a product decision rather than an engineering one. It was taken
 specification; the shortest version is that there is no song in this product to
 analyse, and `song` appears in the codebase only as a test upload filename.
 
-Three slices are built. `audio_analysis/key.py` folds a stored pitch timeline
+**Phase 8 is now built.** `audio_analysis/key.py` folds a stored pitch timeline
 into twelve pitch-class shares and estimates the key those shares fit;
 `AudioAnalysisService.key()` reaches it through the same owner-scoped `current()`
-read `notes()` uses; and `GET …/audio-analysis/key` serves it, adding no error
-code, no query and no persisted field. **No UI shows it** — the endpoint answers
-and no VocalLens page asks it anything yet.
+read `notes()` uses; `GET …/audio-analysis/key` serves it, adding no error code,
+no query and no persisted field; and `musical-key-card.tsx` renders it below the
+note breakdown it shares a timeline with.
+
+It added no architecture, which was the point of specifying it that way. There is
+no new table, no migration, no dependency, no provider, no background work and no
+cache — the key is derived on read, so every analysis ever completed is
+answerable and nothing can go stale. The endpoint folds from the analysis record
+the route already loaded, so the read costs one document rather than two and no
+window exists in which a re-analysis could pair one record's ids with another
+record's key.
+
+**No model sees the key**, structurally: it is absent from the feedback payload,
+the comparison service and the progress series, none of which gained a field that
+could hold it.

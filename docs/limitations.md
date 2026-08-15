@@ -371,10 +371,42 @@ is an estimate and is labelled as such.
 The more basic limit, found by the Step 10.7 audit: **this product has no way to
 receive a song.** The only accepted input is one uploaded recording of one voice
 — there is no reference track, no catalogue and no vocal separation. What Phase 8
-is specified to measure is therefore the key implied by *what was sung*, with its
-own limits written down in
-[phase-8-specification.md](phase-8-specification.md#l-what-phase-8-will-not-solve).
-None of it is implemented.
+measures is therefore the key implied by *what was sung*, and its limits are
+below.
+
+## Musical key
+
+The key card reports the key implied by **what one person sang into one
+microphone**. What that does and does not entitle a reader to conclude:
+
+- **It does not analyse songs.** There is no song. Vocal separation, melody
+  extraction from a mix and any notion of an original recording remain absent.
+- **It cannot hear harmony.** A melody sung over chords in another key is read as
+  the melody's key. Nothing accompanies the voice as far as this measurement is
+  concerned.
+- **It is not a claim that you sang in that key correctly**, or well. It is a
+  description of which pitch classes the recording contained, nothing more.
+- **It cannot always separate relative major from relative minor.** A melody that
+  emphasises neither tonic is genuinely ambiguous, and the answer is "not
+  measured" rather than a guess between the two.
+- **It assumes equal temperament**, like every other pitch measurement here.
+- **It reports one key per recording.** Music that modulates gets an average, and
+  usually gets "not measured".
+- **"Not measured" is a normal outcome, not a failure.** On unaccompanied voice
+  it is frequently the honest answer: a hum, an arpeggio, a two-note phrase and a
+  chromatic wander are all refused by design, each with a stated reason and the
+  twelve pitch-class shares that led there.
+- **It is not validated against real singing.** Every fixture is synthetic, and
+  this repository holds no annotated corpus to validate against.
+- **It gives no tempo, beat, melody transcription, transposition or
+  compatibility judgement.** None of those exist.
+- **It has no opinion.** No model is shown the key, no advice is derived from it,
+  it is absent from comparison and progress, and no field in the response could
+  hold a score.
+
+One threshold is presentational: the UI states in words when an answered key
+rests on thin evidence. It never decides whether a key is shown at all — that is
+the backend's gate, and a refused key is refused with its reason visible.
 
 ## Song compatibility (Phase 9+)
 
