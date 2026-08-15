@@ -21,7 +21,7 @@ What a resolver may not do is as important as what it does:
   same way as an absent one.
 """
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 from app.core.errors import ApiError, ErrorCode
@@ -52,7 +52,12 @@ MintCallback = Callable[[str], None]
 #: It is a **required** collaborator rather than an optional one with a
 #: permissive default. A default that allows is a default that silently removes
 #: the limit the day somebody adds a second construction site.
-MintGuard = Callable[[], None]
+#:
+#: Awaitable since Step 10.10, because the guard may now count in a table shared
+#: by every worker rather than in this process's memory. The resolver still
+#: learns nothing from it: it awaits a refusal it cannot inspect, exactly as it
+#: previously called one.
+MintGuard = Callable[[], Awaitable[None]]
 
 
 class BearerKeyResolver:
@@ -128,7 +133,7 @@ class BearerKeyResolver:
         # Asked before the rows exist, not after: the whole point is that
         # creating an identity is a write, and a refusal that still wrote would
         # be no refusal at all.
-        self._before_mint()
+        await self._before_mint()
 
         owner, minted = new_owner()
         await self._owners.create(owner, minted)
