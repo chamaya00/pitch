@@ -39,21 +39,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
+from app.services.limits.limiter import Decision
+
 #: How many distinct keys one limiter will track. Ten thousand entries of two
 #: small integers is trivial memory; an attacker rotating source addresses past
 #: this number is already past the point where an in-process limiter helps.
 DEFAULT_MAX_KEYS: Final = 10_000
-
-
-@dataclass(frozen=True, slots=True)
-class Decision:
-    """Whether this attempt is allowed, and when to come back if not."""
-
-    allowed: bool
-    #: Seconds until the current window ends. Always at least 1 when refused —
-    #: ``Retry-After: 0`` invites an immediate retry, which is the opposite of
-    #: what a refusal is for.
-    retry_after_seconds: int = 0
 
 
 @dataclass(slots=True)
@@ -148,4 +139,47 @@ class FixedWindowLimiter:
         return len(self._windows)
 
 
-__all__ = ["DEFAULT_MAX_KEYS", "Decision", "FixedWindowLimiter"]
+class InProcessRateLimiter:
+    """:class:`FixedWindowLimiter` as a :class:`~app.services.limits.limiter.RateLimiter`.
+
+    The algorithm above is a dictionary lookup and some arithmetic. It has no
+    I/O to wait for, and it is left synchronous on purpose: that is what makes
+    "``check`` contains no ``await``, so it is atomic with respect to other
+    coroutines" a property of the code rather than a promise. Wrapping it here
+    rather than making it ``async`` keeps that guarantee where it can be read,
+    and keeps the counting testable without a clock, an event loop or a server.
+
+    This is the default limiter, and for the bundled deployment it is also the
+    correct one: ``docker-compose.yml`` runs a single uvicorn worker, so there
+    is no second counter for it to disagree with. See
+    :mod:`app.services.limits.postgres` for what changes when there is.
+    """
+
+    def __init__(
+        self,
+        *,
+        limit: int,
+        window_seconds: int,
+        clock: Callable[[], float] = time.monotonic,
+        max_keys: int = DEFAULT_MAX_KEYS,
+    ) -> None:
+        self._limiter = FixedWindowLimiter(
+            limit=limit, window_seconds=window_seconds, clock=clock, max_keys=max_keys
+        )
+
+    @property
+    def limit(self) -> int:
+        return self._limiter.limit
+
+    async def check(self, key: str) -> Decision:
+        return self._limiter.check(key)
+
+    def tracked_keys(self) -> int:
+        return self._limiter.tracked_keys()
+
+    def reset(self) -> None:
+        """Forget every window. For tests and for nothing else."""
+        self._limiter.reset()
+
+
+__all__ = ["DEFAULT_MAX_KEYS", "Decision", "FixedWindowLimiter", "InProcessRateLimiter"]

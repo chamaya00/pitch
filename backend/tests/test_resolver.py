@@ -56,7 +56,7 @@ class CountingGuard:
         self.allow = allow
         self.calls = 0
 
-    def __call__(self) -> None:
+    async def __call__(self) -> None:
         self.calls += 1
         if not self.allow:
             raise ApiError(ErrorCode.RATE_LIMITED, "no more identities from here")

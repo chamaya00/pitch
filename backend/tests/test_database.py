@@ -197,6 +197,67 @@ def test_every_migration_is_numbered_so_the_order_is_total() -> None:
         assert path.name[:4].isdigit(), f"{path.name} has no ordering prefix"
 
 
+def test_workers_starting_together_against_an_empty_database_all_survive(tmp_path: Any) -> None:
+    """First boot with several workers, which Step 10.10 made a supported shape.
+
+    ``apply_migrations`` created ``schema_migrations`` *before* taking the
+    advisory lock, and ``CREATE TABLE IF NOT EXISTS`` is not atomic against a
+    concurrent create: two transactions both find it missing, both insert a
+    ``pg_type`` row, and the loser dies on ``pg_type_typname_nsp_index``. The
+    docstring claimed concurrent calls were safe; they were not, and the failure
+    was found by running the API under two uvicorn workers rather than by
+    reading. Six workers against a fresh schema failed 25 boots out of 30.
+
+    It only ever bit an **empty** database, which is why no existing test saw
+    it: every other migration test runs against one that is already migrated,
+    where ``IF NOT EXISTS`` short-circuits and the race has nothing to lose.
+
+    Run in a scratch schema so ``public`` — which the rest of this suite needs
+    migrated — is never dropped.
+    """
+    schema = "boot_race_probe"
+    directory = tmp_path / "migrations"
+    directory.mkdir()
+    (directory / "0001_probe.sql").write_text("CREATE TABLE probe (id INT)", encoding="utf-8")
+
+    async def work(database: Database) -> None:
+        async with database.transaction() as connection:
+            await connection.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+            await connection.execute(f"CREATE SCHEMA {schema}")
+        try:
+            failures: list[str] = []
+
+            async def boot() -> None:
+                # Its own connection, as its own process would have. The
+                # bookkeeping table is created inside the scratch schema, so
+                # every one of these starts from "no schema_migrations".
+                try:
+                    async with database.transaction() as connection:
+                        await connection.execute(f"SET LOCAL search_path TO {schema}")
+                        await apply_migrations(connection, directory)
+                except Exception as exc:  # noqa: BLE001 - the failure is the assertion
+                    failures.append(f"{type(exc).__name__}: {exc}")
+
+            async with anyio.create_task_group() as tasks:
+                for _ in range(6):
+                    tasks.start_soon(boot)
+
+            assert failures == [], f"a worker died on first boot: {failures[0]}"
+
+            # And they applied it once between them, not once each.
+            async with database.connection() as connection:
+                rows = await fetch_all(
+                    connection,
+                    f"SELECT name FROM {schema}.schema_migrations",  # noqa: S608
+                )
+            assert [row["name"] for row in rows] == ["0001_probe.sql"]
+        finally:
+            async with database.transaction() as connection:
+                await connection.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+    with_db(work)
+
+
 def test_an_owner_created_before_the_credentials_migration_survives_it(tmp_path: Any) -> None:
     """The one property the credentials migration exists to preserve.
 
@@ -995,7 +1056,17 @@ def test_an_owner_predating_the_activity_column_gets_a_sensible_backfill(tmp_pat
         staged = tmp_path / "staged"
         staged.mkdir()
         files = migration_files()
-        before, rest = files[:-1], files[-1:]
+        # Pinned to 0003 by name, not by position. This used to stage
+        # ``files[:-1]`` and apply ``files[-1:]``, which meant "everything before
+        # the newest migration" — correct only while 0003 *was* the newest. Step
+        # 10.10 added 0004 and the test kept passing while testing nothing: with
+        # 0003 already staged, ``last_seen_at`` existed before the owner was
+        # inserted, so the assertions below were satisfied by the column's
+        # ``DEFAULT now()`` rather than by the backfill they exist to check.
+        activity = next(p for p in files if p.name.startswith("0003_"))
+        split = files.index(activity)
+        before, rest = files[:split], files[split:]
+        assert activity in rest, "the migration under test must be one that is applied"
         for path in before:
             (staged / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
 

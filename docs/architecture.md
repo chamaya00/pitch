@@ -305,14 +305,76 @@ would look like protection. With *n* trusted proxies the client is *n* hops back
 from the right-hand end, which is the only part a proxy you trust actually
 wrote.
 
-**What it is not.** One process's memory. Two API workers have two counters, so
-the effective limit multiplies by worker count — the same honest caveat
-`0001_initial.sql` records about the `asyncio.Lock` the partial unique indexes
-replaced. It is defence in depth beside a real edge limiter, exactly as
+**What it is not.** It is defence in depth beside a real edge limiter, exactly as
 `MaxBodySizeMiddleware` is beside a proxy's body cap, and it is not a defence
-against a distributed attacker. A database-backed counter was rejected for this
-slice: it would add a write to every request in order to bound the cost of
-writes.
+against a distributed attacker with many source addresses. Until 10.10 it was
+also one process's memory; see below.
+
+### Where the count lives (10.10)
+
+10.3 recorded that the limiter was one process's memory and that "two API
+workers have two counters, so the effective limit is multiplied by the worker
+count". 10.10 measured it rather than leaving it as prose, against a real server
+and a real PostgreSQL, at a limit of five new identities per hour:
+
+| Workers | Identities minted, in-process | With the shared counter |
+| --- | --- | --- |
+| 1 | 5 — 1.0× | 5 — 1.0× |
+| 2 | 10 — 2.0× | 5 — 1.0× |
+| 4 | 20 — 4.0× | 5 — 1.0× |
+| 8 | 34 — 6.8× | 5 — 1.0× |
+
+The multiplier is not approximately the worker count; it *is* the worker count,
+until the traffic stops spreading evenly enough to fill every bucket.
+
+**The 10.3 objection did not survive re-inspection.** A database-backed counter
+was rejected then in one sentence — it "would add a write to every request in
+order to bound the cost of writes". Neither guard runs on every request.
+`guard_new_identity` is reached only from `before_mint`, immediately before an
+owner row and a credential row are inserted; the costly guard runs only on
+uploading, starting either analysis, asking for feedback and adding a key.
+Reading is never limited. Every request that reaches the counter was already
+about to write. 10.6 reached the same conclusion from the other side when it
+added `owners.last_seen_at`.
+
+**One statement, which is the whole correctness argument.** Reading the count,
+deciding whether the window expired, resetting or incrementing it and returning
+the result are a single `INSERT ... ON CONFLICT DO UPDATE`. Two workers collide
+on the primary key, and the second waits for the first to commit before applying
+its increment to the row the first one wrote. A read-then-write limiter passes
+every sequential test and fails the concurrent one: measured, it allowed **40 of
+40** attempts against a limit of 5, where the upsert allowed exactly 5.
+
+**Both limiters are `RateLimiter`**, and `api/rate_limit.py` depends on the
+protocol — which is where 10.3 said a shared counter would belong if one were
+ever needed. `tests/test_rate_limit_shared.py` runs one contract against both,
+so a shared counter that quietly disagreed with the one it replaces fails the
+same assertion.
+
+**The default stays in-process**, because for the bundled deployment it is not a
+compromise: `docker-compose.yml` runs a single uvicorn worker, where there is no
+second counter to disagree with, and an in-process check costs 0.001 ms against
+the 0.9 ms a shared one costs. `RATE_LIMIT_BACKEND=database` is what a
+deployment scaling past one worker turns on; selecting it without `DATABASE_URL`
+is refused at startup rather than falling back, because an operator who set it
+because they run four workers would otherwise get four counters and no
+indication the setting did nothing.
+
+**What the shared counter gives up.** It is anchored to the database server's
+`now()`, not to `time.monotonic`: a monotonic clock is meaningless between
+machines, and the only clock the workers share is the server's. A backwards
+wall-clock correction there can extend a window by the size of the correction.
+It also costs one statement — 0.935 ms mean on the contended key, against the
+0.856 ms the owner-and-credential write it rides with costs — so it roughly
+doubles the cost of a request that was already writing.
+
+**A multi-worker first boot was broken, and is fixed.** Making several workers a
+supported shape exposed a bug older than this step: `apply_migrations` created
+`schema_migrations` *before* taking its advisory lock, and `CREATE TABLE IF NOT
+EXISTS` is not atomic against a concurrent create. Six workers starting together
+against a fresh schema failed **25 boots out of 30**; the lock needs no table of
+its own, so it now goes first, and 30 of 30 succeed. It only ever bit an empty
+database, which is why no existing test saw it.
 
 ### Frontend error boundaries (10.4)
 

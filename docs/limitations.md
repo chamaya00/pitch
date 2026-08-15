@@ -282,9 +282,21 @@ many costly requests one identity may make. What that does **not** guarantee:
 - **It is not a defence against a distributed attacker.** The identity limit is
   per address, so somebody with many addresses is bounded per address and not
   in total.
-- **It is one process's memory.** A deployment running several API workers
-  multiplies the effective limit by the number of workers. A shared limit would
-  need a shared counter, which this deliberately does not have.
+- **By default it is one process's memory.** A deployment running several API
+  workers multiplies the effective limit by the number of workers — measured, at
+  a limit of five: two workers allowed ten, four allowed twenty, eight allowed
+  thirty-four. `RATE_LIMIT_BACKEND=database` moves the count into a table every
+  worker shares, and all four worker counts then allow exactly five. The
+  bundled deployment runs one worker, where the default is already exact.
+- **The shared counter trusts the database server's clock.** It has to: a
+  monotonic clock means nothing between machines, so windows are anchored to the
+  server's wall clock instead. If that clock is corrected backwards, a window can
+  be extended by the size of the correction. The in-process limiter is immune to
+  this and cannot be shared; that is the trade.
+- **The shared counter costs a statement.** About 0.9 ms, on requests that were
+  already writing to the same database — creating an identity, uploading,
+  starting an analysis, asking for feedback, adding a key. Reading is still never
+  limited, so no read acquires a write it did not already have.
 - **A shared address shares the newcomer allowance.** An office, a school or a
   phone network arriving for the first time all count against one bucket.
   Anyone who already has a key is unaffected — presenting a recognised key never
@@ -345,9 +357,10 @@ publishes nothing else. What that does **not** give you:
   the bearer key in transit — is an external responsibility, and the proxy
   deliberately advertises no HSTS rather than implying otherwise. **Over plain
   HTTP a key can be read by anyone on the network path.**
-- **The rate limiter is still per process.** Running several API workers
-  multiplies the effective limit by the worker count. The proxy does not add a
-  shared counter and does not rate-limit itself.
+- **The proxy does not rate-limit.** It adds no counter of its own. The API's
+  limiter is per process unless `RATE_LIMIT_BACKEND=database` is set, so a
+  deployment that scales the API past the single worker `docker-compose.yml`
+  runs must set it or accept a limit multiplied by the worker count.
 - **The trust boundary is the network, not a check.** The backend trusts
   `X-Forwarded-For` because only the proxy can reach it. If a deployment
   republishes the backend's port, or runs it on a shared network, that
