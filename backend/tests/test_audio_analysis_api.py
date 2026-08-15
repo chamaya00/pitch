@@ -780,3 +780,64 @@ def test_reading_a_key_is_never_rate_limited(client: TestClient, tmp_path: Path)
 def test_the_key_endpoint_is_published_in_the_schema(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert "/api/v1/recordings/{recording_id}/audio-analysis/key" in paths
+
+
+def test_reading_a_key_loads_the_analysis_once_and_writes_nothing(
+    client: TestClient, doubles: Doubles, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint's cost, counted rather than reasoned about.
+
+    The analysis document carries the pitch timeline — up to 12 931 points of
+    JSONB at the accepted maximum — and loading it dominates this request by an
+    order of magnitude over the ~1.4 ms of arithmetic that folds it. The route
+    needs the record twice over: once for the ids in the response, once for the
+    timeline to fold. It must get both from one load.
+
+    Counting is also what keeps the two halves of the response consistent. Two
+    loads can straddle a re-analysis and pair one record's ids with another
+    record's key; one cannot.
+    """
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    loads = 0
+    original = doubles.audio_analyses.latest_for_recording
+
+    async def counted(rid: str):  # type: ignore[no-untyped-def]
+        nonlocal loads
+        loads += 1
+        return await original(rid)
+
+    monkeypatch.setattr(doubles.audio_analyses, "latest_for_recording", counted)
+    before = {
+        analysis_id: analysis.model_dump()
+        for analysis_id, analysis in doubles.audio_analyses._records.items()
+    }
+
+    assert client.get(key_url(recording_id)).status_code == 200
+
+    assert loads == 1
+    after = {
+        analysis_id: analysis.model_dump()
+        for analysis_id, analysis in doubles.audio_analyses._records.items()
+    }
+    assert after == before
+
+
+def test_the_key_names_the_analysis_it_was_folded_from(client: TestClient, tmp_path: Path) -> None:
+    """``audio_analysis_id`` is the record the timeline came from, not a spare id.
+
+    It is what makes the key reproducible: a reader can fetch that analysis's
+    pitch timeline and fold it themselves. The note breakdown, which is derived
+    from the same timeline on the same terms, must name the same record.
+    """
+    recording_id = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording_id))
+
+    key = client.get(key_url(recording_id)).json()
+    summary = client.get(audio_url(recording_id)).json()
+    notes = client.get(f"{audio_url(recording_id)}/notes").json()
+
+    assert key["audio_analysis_id"] == summary["audio_analysis_id"]
+    assert key["audio_analysis_id"] == notes["audio_analysis_id"]
+    assert key["recording_id"] == recording_id
