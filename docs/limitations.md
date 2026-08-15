@@ -352,14 +352,46 @@ publishes nothing else. What that does **not** give you:
   `X-Forwarded-For` because only the proxy can reach it. If a deployment
   republishes the backend's port, or runs it on a shared network, that
   assumption is void and the per-address limit becomes forgeable.
-- **No Content-Security-Policy.** Adding one that is both useful and compatible
-  with Next.js needs per-request nonces; a speculative one would be bypassable
-  or would break the app.
+- **The Content-Security-Policy covers the web app, not the API.** The app
+  serves a strict, nonce-based policy on every document (see below). Responses
+  from `/api/` carry no policy of their own; they are JSON sent with
+  `X-Content-Type-Options: nosniff`, which is what stops a browser treating one
+  as a document, but that is a narrower guarantee than a policy would be.
 - **The database password has a development default.** The database is not
   reachable from the host, but `POSTGRES_PASSWORD` should be set for anything
   real.
 - **It is not a defence against a distributed attacker.** The proxy adds no
   connection limiting, no WAF and no bot detection.
+
+## What the Content-Security-Policy does and does not stop
+
+Every page is served with a policy built around a nonce minted for that one
+request. Scripts run only if they carry it, or if a script that carried it
+loaded them; everything this product never does — plugins, `<base>`, form
+submission, being framed — is refused outright. What that does **not** cover:
+
+- **Injected CSS still applies.** `style-src` keeps `'unsafe-inline'`, because
+  removing it was measured and it left the last-resort failure page unstyled —
+  `app/global-error.tsx` carries its own `<style>` element precisely so it does
+  not depend on the stylesheet that just failed, and no nonce can reach it.
+  Someone who can already inject HTML into a page can therefore restyle it.
+  They cannot use that CSS to *send* anything anywhere: the classic channel is a
+  `url()` in a selector, and `img-src`, `font-src` and `connect-src` refuse
+  every destination that is not this origin.
+- **A policy is a second line, not the first.** It limits what injected markup
+  can do; it does not stop the injection. Nothing in it replaces escaping, and
+  React's escaping is still what keeps user text out of the markup.
+- **It says nothing about transport.** There is no
+  `upgrade-insecure-requests` and no HSTS, because this deployment speaks HTTP
+  and claiming otherwise would be false as well as broken. Over plain HTTP the
+  policy header itself can be stripped in transit.
+- **Nothing reports violations.** There is no `report-uri` and no collector, so
+  a policy that starts blocking something real in a browser nobody is watching
+  fails silently. What is checked instead is a run through the whole product in
+  Chromium before shipping a change to it.
+- **Older browsers get less.** A browser that does not understand
+  `'strict-dynamic'` falls back to `'self'` for scripts — same-origin only,
+  which is weaker than nonce-gated but is not nothing.
 
 ## Songs and mixed audio (Phase 8+)
 

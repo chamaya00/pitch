@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9) |
 
 ## Phase 0 — delivered
 
@@ -336,6 +336,40 @@ Delivered in 10.6 — *identity retention*:
 - Claim and delete are one transaction under `FOR UPDATE SKIP LOCKED`, so a
   returning user or a second cleanup run cannot lose a race.
 
+Delivered in 10.9 — *a Content-Security-Policy that is real*:
+
+- 10.5 shipped three security headers and deliberately shipped no CSP, writing
+  down why in three places: Next.js emits inline scripts, so a policy worth
+  having needs a nonce minted per request. This step built the nonce.
+  `frontend/proxy.ts` mints 128 bits per request, sets the policy on the
+  *request* so Next.js stamps the nonce onto every script element it renders,
+  and repeats it on the response.
+- The edge still sets none, and that is now a decision rather than a deferral: a
+  browser given two `Content-Security-Policy` headers enforces both, and no
+  policy in the nginx config can know a nonce minted after it was written.
+- `script-src` is nonce-gated with `'strict-dynamic'`, so a `<script src>`
+  injected into the markup is refused even pointing at our own origin.
+  `object-src`, `base-uri`, `form-action` and `frame-ancestors` are `'none'` —
+  four things this product never does. No `upgrade-insecure-requests`, for the
+  same reason the proxy claims no HSTS.
+- **Pages now render per request**, because a prerendered page is HTML built
+  before the nonce existed. Measured with the route left static: Chromium
+  refused all ten of the page's own script elements and the HTML sat there
+  inert. The cost of the fix was measured too — 2.816 ms → 7.068 ms mean per
+  document — and what it gives up is a cached render of an app shell that reads
+  nothing and calls nothing.
+- `style-src` keeps `'unsafe-inline'`, and the alternative was built before it
+  was rejected. Under `style-src 'self' 'nonce-…'` all twenty inline style
+  declarations kept working — React writes them through the CSSOM, which CSP
+  does not reach — and the thing that broke was `app/global-error.tsx`, the
+  last-resort failure page, rendered unstyled.
+- Verified through the real stack in Chromium — upload, speech analysis, audio
+  measurement, the musical key card, the identity panel, and the microphone path
+  separately — with 0 violations, 0 console errors and 0 page errors. Two
+  couplings that fail silently everywhere except a browser (the layout's
+  `force-dynamic`, and setting the policy on the request as well as the
+  response) are asserted from the files that carry them.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -343,11 +377,13 @@ considered and rejected for this slice — adding them while deferring reset,
 verification and rate limiting would make the system *less* safe than 128 random
 bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
 in Phase 10 are TLS termination (still an external responsibility — the proxy
-speaks HTTP and claims no HSTS), a Content-Security-Policy, a shared rate-limit counter for multi-worker
+speaks HTTP and claims no HSTS), a shared rate-limit counter for multi-worker
 deployments, performance work, and every credential feature 10.2 deferred. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
-hold recordings remains unspecified and unbuilt.
+hold recordings remains unspecified and unbuilt. The Content-Security-Policy
+landed in 10.9 and covers the web app; API responses still carry none, for the
+reason recorded in [limitations.md](limitations.md).
 
 The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while
