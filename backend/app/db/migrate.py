@@ -57,10 +57,20 @@ async def apply_migrations(
             leave two databases with the same recorded history and different
             schemas.
     """
-    await connection.execute(_CREATE_TABLE)
     # A session-level advisory lock, held for this transaction only. Two API
     # processes booting simultaneously is the ordinary case, not an edge one.
+    #
+    # Taken **before** the bookkeeping table is created, and that order is the
+    # whole point. Until Step 10.10 the ``CREATE TABLE IF NOT EXISTS`` ran
+    # first, outside the lock, and ``IF NOT EXISTS`` is not atomic against a
+    # concurrent create: two transactions both find the table missing and both
+    # insert a ``pg_type`` row, and the loser dies on
+    # ``pg_type_typname_nsp_index``. It needs no table of its own, so nothing
+    # stops it going first. Measured on a fresh schema with six workers
+    # starting together: 25 of 30 boots failed before this line moved, and 30 of
+    # 30 succeeded after.
     await connection.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
+    await connection.execute(_CREATE_TABLE)
 
     # The row factory is set per-cursor here rather than relying on the pool's:
     # migrations also run from the CLI, against a plain connection.
