@@ -15,8 +15,10 @@ Never present mock data as real analysis.
 - `frontend/` — Next.js 16 (App Router), TypeScript, Tailwind CSS 4
 - `backend/` — FastAPI, Python 3.11
 - `docs/` — architecture, API, audio analysis, speech analysis, AI layer,
-  limitations, roadmap, and `phase-8-specification.md` (a specification for
-  unbuilt work — nothing in it is implemented)
+  limitations, roadmap, plus two phase specifications:
+  `phase-8-specification.md` (**superseded** — Phase 8 shipped; kept as the
+  record of how it was decided) and `phase-9-specification.md` (**unbuilt** —
+  nothing in it is implemented, and it is blocked on a product decision)
 - `scripts/check.sh` — runs every check
 
 See [docs/architecture.md](docs/architecture.md) for conventions.

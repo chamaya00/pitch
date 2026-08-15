@@ -19,7 +19,14 @@ and idempotency behaviour.
 
 Implemented (Step 7E): the HTTP API — see [api.md](api.md).
 
-Not implemented: the analysis UI.
+Implemented (Step 7F): the analysis UI — `components/analysis/`, reached from
+`CapturePanel` after an upload. `AnalysisPanel` owns the state machine and
+renders one state at a time; `AnalysisResult` shows the transcript, the metrics
+and the feedback, and `MockDataBanner` marks a mock result as demo data rather
+than letting it read as analysis.
+
+*(This line said "Not implemented: the analysis UI" until the Phase 9 audit.
+It had been true at Step 7E and was left behind when 7F landed.)*
 
 **No real transcription has been executed.** The adapters exist and are covered
 by tests at the SDK boundary, but this development environment has no provider
