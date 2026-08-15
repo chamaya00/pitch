@@ -154,7 +154,9 @@ the only published port** — open <http://localhost>. The API, the web app and
 the database are reachable only on the internal network, which is what makes the
 backend's trusted-proxy setting safe; see
 [docs/architecture.md](docs/architecture.md). The proxy speaks HTTP: TLS
-termination is an external responsibility.
+termination is an external responsibility. Every page is served with a
+Content-Security-Policy built around a nonce minted for that request, which is
+why pages render per request rather than from the prerender cache.
 PostgreSQL is the source of truth for recordings, analyses, owners and the
 credentials that resolve to them; the backend applies its migrations at startup
 and will not serve the recording endpoints without it.

@@ -264,9 +264,9 @@ anything that reaches it directly — which is what defence in depth means here.
 set at server level with `always`. No `add_header` appears in any `location`:
 nginx's inheritance is replace-not-merge, and an earlier version of the config
 set one header inside the 413 handler and thereby dropped the other two from
-that response. No Content-Security-Policy — Next.js emits inline scripts, so a
-useful one needs per-request nonces, and a speculative one would either be
-bypassable or break the product.
+that response. The Content-Security-Policy is **not** set here and is not
+missing either — it is the web app's, per request, for the reason in
+[Content-Security-Policy (10.9)](#content-security-policy-109) below.
 
 **TLS is not provided and is not implied.** The proxy speaks HTTP and advertises
 no HSTS, because advertising transport security from a plaintext listener would
@@ -348,6 +348,88 @@ recovery is a real navigation rather than a client-side transition through a
 router that may be part of the problem. There are no React providers anywhere
 in this codebase to miss, but the rule is written down so the next person adding
 one knows this file must keep working without it.
+
+### Content-Security-Policy (10.9)
+
+10.5 shipped three security headers at the edge and deliberately shipped no CSP,
+recording the reason in the nginx template, in `architecture.md` and in
+`limitations.md`: Next.js emits inline `<script>` elements, so a policy worth
+having needs a nonce minted per request, and a speculative one would either be
+bypassable or would break the product. 10.9 built the nonce.
+
+**Where it lives, and why not at the edge.** `frontend/proxy.ts` — Next 16's
+name for what used to be `middleware.ts`, and nothing to do with nginx — mints
+128 bits of randomness per request, sets the policy on the *request* headers so
+Next.js stamps the nonce onto every script element it renders, and repeats it on
+the response. The edge sets none, and that is not an omission: a browser handed
+two `Content-Security-Policy` headers enforces **both**, so a resource must
+satisfy each independently, and no policy written in the nginx config can know a
+nonce minted after it was written.
+
+**The policy**, with every source traceable to something in this repository:
+
+| Directive | Sources | Because |
+| --- | --- | --- |
+| `default-src` | `'self'` | the floor |
+| `script-src` | `'self'`, the nonce, `'strict-dynamic'` (`'unsafe-eval'` in development only) | the nonce admits Next's two inline scripts; `'strict-dynamic'` admits the chunks *they* load and the AudioWorklet module, and makes the browser ignore `'self'` for scripts, so a `<script src>` injected into the markup is refused even pointing at our own origin |
+| `style-src` | `'self'`, `'unsafe-inline'` | the one concession; measured, see below |
+| `img-src`, `font-src` | `'self'` | `next/font` self-hosts; the built CSS has no `url(data:…)` and no external origin |
+| `media-src` | `'self'`, `blob:` | a recorded take is built in memory and played from an object URL |
+| `connect-src` | `'self'`, the configured API origin | in development the API answers on another port; behind the bundled proxy this adds nothing |
+| `object-src`, `base-uri`, `form-action`, `frame-ancestors` | `'none'` | four things this product never does |
+
+No `upgrade-insecure-requests`, for the reason the proxy advertises no HSTS: the
+deployment speaks HTTP and a policy claiming otherwise would break it. No
+`report-uri`, because nothing here collects reports.
+
+**Pages render per request, and that is the cost.** A nonce and the full-route
+cache cannot both be had: a prerendered page is HTML built before the nonce
+existed. Measured on this application with the route left static — the policy
+was served correctly, Chromium refused all ten of the page's own script elements
+and the HTML sat there inert. `app/layout.tsx` therefore declares
+`dynamic = "force-dynamic"`, and one build of each was benchmarked against the
+same machine, one server at a time, 400 requests after 20 warm-ups:
+
+| Build | mean | p50 | p95 |
+| --- | --- | --- | --- |
+| Static, prerendered, no policy | 2.816 ms | 2.635 ms | 3.737 ms |
+| Dynamic, nonce per request | 7.068 ms | 6.458 ms | 10.170 ms |
+
+About 4.3 ms per document, and it buys a strict `script-src`. What is given up
+is a cached render of an app shell: every page in this product fetches its
+content in the browser, so the prerender it replaces read nothing, called
+nothing and produced no data.
+
+**`style-src` keeps `'unsafe-inline'`, and the alternative was measured rather
+than assumed.** Built with `style-src 'self' 'nonce-…'` — Next.js's own
+suggestion — the outcome was the opposite of the expected one. All twenty inline
+`style` declarations the analysis screens render **kept working**, because React
+writes them through the CSSOM after hydration and the CSSOM is outside CSP's
+reach. What broke was `app/global-error.tsx`, whose `<style>` element raised a
+`style-src-elem` violation and did not apply: the last-resort failure page,
+unstyled, which is the one page whose entire job is to work when everything else
+has not. The concession is bounded by the rest of the policy — injected CSS
+cannot execute, and the classic CSS exfiltration channel is a `url()` that
+`img-src`, `font-src` and `connect-src` all refuse — so what remains is
+defacement of a page an attacker already had to inject HTML into.
+
+**Verified against the running stack, not only in unit tests.** Chromium, real
+API, real PostgreSQL: upload → speech analysis → audio measurement → the musical
+key card → the identity panel, with 1 canvas, 2 SVGs and 20 inline-styled
+elements rendered — **0 violations, 0 console errors, 0 page errors**. The
+microphone path was exercised separately (worklet loaded, take recorded, blob
+played back) and `audioWorklet.addModule` was called directly to confirm
+`'strict-dynamic'` admits it. `npm run dev` was checked too: without
+`'unsafe-eval'` every module evaluation raised a `script-src` violation and the
+page never hydrated, which is why development relaxes exactly that one source.
+
+**What a CSP does not cover here.** API responses carry no policy of their own.
+The bundled deployment routes only `/api/` to the backend and every response it
+sends is JSON under `X-Content-Type-Options: nosniff`; a blanket
+`default-src 'none'` in the application would also apply to FastAPI's own
+`/docs`, which loads Swagger UI from a CDN and is reachable only by someone
+already inside the internal network. Left undone deliberately, and recorded in
+`limitations.md` rather than left to be discovered.
 
 ### The identity seam
 
