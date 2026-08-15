@@ -97,10 +97,17 @@ server {
     # `always` so they are present on error responses too, including the 413
     # this proxy generates itself.
     #
-    # No Content-Security-Policy. Next.js emits inline scripts and styles, so a
-    # useful CSP needs per-request nonces threaded through the app; a
-    # speculative one would either be trivially bypassable or would break the
-    # product. It is recorded as deferred rather than guessed at.
+    # No Content-Security-Policy, and as of Step 10.9 that is a positive
+    # decision rather than a deferral. The web app sets its own, built around a
+    # nonce minted per request in `frontend/proxy.ts`, because Next.js emits
+    # inline scripts that nothing but a per-request nonce can admit.
+    #
+    # A second policy here would not make that stricter. A browser given two
+    # `Content-Security-Policy` headers enforces *both*, so a resource has to
+    # satisfy each independently — and any policy written here cannot know the
+    # nonce, so it would forbid precisely the scripts the app's policy permits.
+    # Measured, in the equivalent case where the nonce was absent from the HTML:
+    # Chromium refused all ten script elements and the page never hydrated.
     #
     # No Strict-Transport-Security. This proxy speaks HTTP; TLS termination is
     # an external responsibility (see docs/architecture.md), and advertising

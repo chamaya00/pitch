@@ -277,9 +277,34 @@ def test_no_false_transport_security_claim(directives: str) -> None:
     assert "listen 443" not in directives
 
 
-def test_no_speculative_content_security_policy(directives: str) -> None:
-    """Next.js emits inline scripts; a CSP without nonces would break or bluff."""
+def test_the_edge_sets_no_content_security_policy(directives: str) -> None:
+    """The web app owns the policy, and a second one here would fight it.
+
+    A browser handed two ``Content-Security-Policy`` headers enforces both, so a
+    resource must satisfy each independently. The app's policy admits its inline
+    scripts by a nonce minted per request (Step 10.9); nothing written in this
+    file can know that nonce, so any policy set here would forbid exactly those
+    scripts. Measured in the equivalent case — the policy served without the
+    nonce reaching the HTML — Chromium refused all ten script elements and the
+    page never hydrated.
+    """
     assert "Content-Security-Policy" not in directives
+
+
+def test_the_web_app_ships_a_nonce_based_policy() -> None:
+    """The other half of the decision above, asserted so it cannot quietly go.
+
+    If `proxy.ts` were deleted the edge would still be correct, this file's
+    other assertions would still pass, and the deployment would simply serve no
+    policy at all. That is the failure this test exists to catch, from the side
+    that decided not to set one here.
+    """
+    proxy = ROOT / "frontend" / "proxy.ts"
+
+    assert proxy.exists(), "the web app's Content-Security-Policy is gone"
+    source = proxy.read_text(encoding="utf-8")
+    assert "Content-Security-Policy" in source
+    assert "createNonce" in source
 
 
 def test_the_access_log_does_not_record_client_addresses(template: str) -> None:
