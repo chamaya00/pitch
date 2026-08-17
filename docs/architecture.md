@@ -246,6 +246,77 @@ On the client, what is loaded and whether more exists are two separate facts in
 arrangement `analysis-runner.ts` uses for polling. The screen states both and
 invents no total, because nothing counts one.
 
+### What concurrency does to a read (10.14)
+
+Every number in 10.11–10.13 was taken one request at a time, and the roadmap said
+so. Step 10.14 took them again with several requests in flight — against the same
+real server, one worker, 30 five-minute recordings, each a 1 685 kB document of
+12 931 points. Two things came out of it, and only one was a surprise.
+
+**Most reads scale.** The history list, the progress query, the identity panel,
+the speech read and the polled audio summary all hold their throughput as
+concurrency rises: `GET /recordings` serves 113 requests a second at c=1 and 154
+at c=16, and the rest behave the same way. Nothing there needed changing and
+nothing there was changed.
+
+**The three reads built on the pitch timeline do not scale at all.**
+
+| Read (c=1 → c=16) | p50 | p95 at c=16 | requests/second |
+| --- | --- | --- | --- |
+| `GET …/audio-analysis` (polled) | 12.0 ms | 219 ms | 83 → 114 |
+| `GET …/audio-analysis/pitch` | 172.9 ms | 2 279 ms | 7.1 → 8.5 |
+| `GET …/audio-analysis/notes` | 134.7 ms | 2 016 ms | 7.5 → 9.3 |
+| `GET …/audio-analysis/key` | 136.5 ms | 2 088 ms | 7.3 → 8.6 |
+
+Sixteen concurrent readers get sixteen times the latency and the same
+throughput, which is the signature of work that cannot overlap. Profiling one
+read says where it goes: of ~80 ms, **23 ms is SQL and transfer, 20 ms is
+`json.loads`, and 30 ms is pydantic building 12 931 `PitchPoint` models.** The
+folds those points exist for cost 3.3 ms (notes) and 1.4 ms (key). All of it
+runs on the event loop holding the GIL, so it is not one slow request — it is
+every other request in the process waiting.
+
+That is measurable from the outside, and it is what a user would actually feel.
+While one other client had an analysis page open, the poll the browser makes
+while a measurement runs went from **14.2 ms to 301.0 ms**; with three, to
+**965.1 ms**.
+
+**The fix is to stop materialising a timeline nobody asked for.** `/pitch` has
+returned at most `max_points` points since Step 7I — 995 of 12 931 by default —
+and it was building all 12 931 to slice the list. PostgreSQL selects the sample
+now, by ordinality, with the stride computed from the stored `pitch_point_count`
+in the same statement:
+
+| | PostgreSQL | Sent | API process | End to end |
+| --- | --- | --- | --- | --- |
+| whole document, sliced in Python | 21.4 ms | 1 685 kB | ~50 ms | 172.9 ms |
+| every 13th, selected in SQL | 19.1 ms | 133 kB | ~4 ms | 38.6 ms |
+
+**PostgreSQL's half does not get cheaper — that is the point.** It detoasts and
+parses the same document either way. What changes is that the ~50 ms leaves the
+event loop, where it was serialising every other request, and stays in a backend
+process per connection, where two requests can do it at once. Throughput follows:
+7.1 → 25.9 requests a second at c=1, 8.5 → 42.8 at c=16, and p95 at c=16 from
+2 279 ms to 436 ms. The poll during one open dashboard improves from 301.0 ms to
+169.6 ms.
+
+The response is unchanged, point for point — a test asserts the sample equals the
+whole timeline sliced — and so is the type discipline 10.11 established: a
+`DecimatedTimeline` carries an `AudioAnalysisSummary`, so a record holding 995 of
+12 931 points has no path to a write.
+
+**What is left is not waste, and is written down rather than fixed.** `/notes`
+and `/key` fold every point, so they still load every point: ~135 ms and ~7
+requests a second, unchanged by this step. Roughly 25 ms of that is the floor for
+reading a 1 685 kB document at all; the remaining ~50 ms is model construction
+that only a different input type would remove, and moving it to a thread would
+not help, because `json.loads` and pydantic validation both hold the GIL. Two
+options exist — read the two or three fields the folds use as flat arrays
+(measured at 15.4 ms in PostgreSQL, and it changes the signature of two
+measurement functions), or store the derived answers, which 10.8 rejected on
+purpose so that every analysis ever completed stays answerable. Neither is chosen
+here.
+
 ### Concurrency belongs to the database
 
 Until Step 7M both orchestrators guarded their find-or-create decision with a

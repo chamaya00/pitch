@@ -678,6 +678,17 @@ over the same document and so was really paying 5.70 ms. The `/key` and
 `/notes` endpoints still load the points, because they still fold them; nothing
 about the algorithm changed. See [architecture.md](architecture.md).
 
+**Step 10.14 measured what that load costs when more than one person asks at
+once, and it is worse than the single-request figure suggests.** Building 12 931
+`PitchPoint` models is ~50 ms of GIL-held work on the event loop, so the three
+timeline endpoints serve ~7 requests a second between them however many clients
+are waiting, and while one is running every other request in the process —
+including the poll that says whether a measurement has finished — is stopped.
+`/pitch` was fixed by asking PostgreSQL for the sample it returns instead of the
+whole timeline; `/key` and `/notes` fold every point and therefore still load
+every point, unchanged at ~135 ms. That is a property of the read, not of the
+arithmetic: the folds are still 1.35 ms and 2.95 ms.
+
 **Nothing here has been validated against human singing**: every fixture is
 synthetic, and this repository holds no annotated corpus to do it with.
 
