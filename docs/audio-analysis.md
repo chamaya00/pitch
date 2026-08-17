@@ -672,10 +672,11 @@ was not.** Loading the stored analysis at the ceiling costs 83.8 ms and 19 MB of
 peak allocation — 60× the fold it feeds. That is why `key_of` was given the
 record the route already held rather than reading it again (slice 5), why
 `notes_of` was given the same treatment in 10.11, and why the reads that return
-no pitch point stopped loading a timeline at all: 1.8 ms and 15 kB instead. The
-`/key` and `/notes` endpoints still load the points, because they still fold
-them; nothing about the algorithm changed. See
-[architecture.md](architecture.md).
+no pitch point stopped loading a timeline at all: 1.8 ms and 15 kB instead —
+though only since 10.12, which found that 10.11 shipped a second expression
+over the same document and so was really paying 5.70 ms. The `/key` and
+`/notes` endpoints still load the points, because they still fold them; nothing
+about the algorithm changed. See [architecture.md](architecture.md).
 
 **Nothing here has been validated against human singing**: every fixture is
 synthetic, and this repository holds no annotated corpus to do it with.

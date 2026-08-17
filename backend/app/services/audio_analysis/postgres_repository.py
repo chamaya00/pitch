@@ -22,10 +22,9 @@ tested — the same architecture as before, now reading from a different store.
 type.** Each method below comes in two forms: one that returns an
 :class:`AudioAnalysis` with the timeline, and one that returns an
 :class:`AudioAnalysisSummary` without it. The summary form selects
-``document - 'pitch_points'`` and the array's length beside it, so PostgreSQL
-drops the points before the row crosses the socket and the count survives.
-Measured on a completed analysis of the longest accepted recording — 12 931
-points, a 1 596 kB document — through the real driver:
+``document - 'pitch_points'``, so PostgreSQL drops the points before the row
+crosses the socket. Measured on a completed analysis of the longest accepted
+recording — 12 931 points, a 1 596 kB document — through the real driver:
 
 ============================================  ========  ===============
 read                                          time      peak allocation
@@ -43,6 +42,18 @@ because they genuinely return or fold the points.
 The split is not an optimisation a caller may forget to apply: a summary cannot
 be handed to ``update``, because that would re-serialise a document with no
 points in it.
+
+**How many points there are is a column, not an expression.** 10.11 answered
+that question with ``jsonb_array_length(document->'pitch_points')`` selected
+beside the stripped document, believing it read a document PostgreSQL had
+already decompressed for the first expression. Step 10.12 measured it: a
+toasted document is detoasted once *per expression*, so the count cost a second
+full decompression — 5.70 ms and 109 buffers for the pair, against 1.80 ms and
+37 for the strip alone. ``pitch_point_count`` (migration 0005) is written from
+the same object in the same statement as ``status`` and ``feedback_status``, so
+it cannot drift from the timeline it counts, and it answers for documents
+written before 10.11 — which carry no count of their own and were the reason
+the expression existed.
 """
 
 from typing import Any, Protocol, runtime_checkable
@@ -60,12 +71,13 @@ from app.services.audio_analysis.models import (
 #: Everything the record says about itself, minus the timeline, plus its length.
 #:
 #: ``document - 'pitch_points'`` is evaluated in PostgreSQL, so the points are
-#: never sent; ``jsonb_array_length`` reads the same document the server has
-#: already decompressed to build the first expression. ``coalesce`` covers a
-#: pending record, whose document has no ``pitch_points`` key at all.
+#: never sent. It is the **only** expression here that touches the document,
+#: which is the point: each one that did would decompress the whole thing again.
+#: The count is the stored column, written beside the document rather than read
+#: back out of it.
 _SUMMARY_COLUMNS = """
     document - 'pitch_points' AS document,
-    coalesce(jsonb_array_length(document->'pitch_points'), 0) AS pitch_point_count
+    pitch_point_count
 """
 
 
@@ -148,8 +160,8 @@ class PostgresAudioAnalysisRepository:
                     """
                     INSERT INTO audio_analyses
                         (id, recording_id, status, feedback_status, created_at,
-                         error_code, document)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                         error_code, pitch_point_count, document)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         analysis.audio_analysis_id,
@@ -158,6 +170,13 @@ class PostgresAudioAnalysisRepository:
                         analysis.feedback_status.value,
                         analysis.created_at,
                         analysis.error_code.value if analysis.error_code else None,
+                        # Counted from the tuple being serialised on the line
+                        # below, not read off ``pitch_point_count``. The model
+                        # derives that field when a record is *validated*, and
+                        # ``model_copy(update=...)`` skips validators — so a
+                        # record assembled that way carries a stale count and
+                        # a fresh timeline. Counting here cannot be stale.
+                        len(analysis.pitch_points),
                         analysis.model_dump_json(),
                     ),
                 )
@@ -193,13 +212,17 @@ class PostgresAudioAnalysisRepository:
                 connection,
                 """
                 UPDATE audio_analyses
-                   SET status = %s, feedback_status = %s, error_code = %s, document = %s
+                   SET status = %s, feedback_status = %s, error_code = %s,
+                       pitch_point_count = %s, document = %s
                  WHERE id = %s AND status = %s
                 """,
                 (
                     analysis.status.value,
                     analysis.feedback_status.value,
                     analysis.error_code.value if analysis.error_code else None,
+                    # Rewritten with the document, in the same statement: this
+                    # is the write that attaches a timeline to a pending record.
+                    len(analysis.pitch_points),
                     analysis.model_dump_json(),
                     analysis.audio_analysis_id,
                     expect_status.value,

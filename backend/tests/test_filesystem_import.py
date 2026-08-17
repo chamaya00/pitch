@@ -188,7 +188,7 @@ def test_the_imported_owner_can_read_its_history(tmp_path: Path) -> None:
         await import_filesystem(database, tmp_path, owner=owner, token=token)
 
         repository = PostgresRecordingRepository(database)
-        history = await repository.list_history(owner.owner_id, 10)
+        history = (await repository.list_history(owner.owner_id, 10)).entries
 
         assert len(history) == 2
         analysed = [entry for entry in history if entry.speech_status is not None]

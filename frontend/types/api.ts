@@ -426,8 +426,15 @@ export interface RecordingHistoryItem {
 
 export interface RecordingHistory {
   items: RecordingHistoryItem[];
+  /** How many items are on **this page**. Not how many recordings exist. */
   count: number;
   limit: number;
+  /**
+   * Pass back as `cursor` for the page after this one, or `null` when this is
+   * genuinely the last. Opaque — the server issued it and only the server
+   * reads it.
+   */
+  next_cursor: string | null;
 }
 
 /* --- Recording comparison -------------------------------------------------- */

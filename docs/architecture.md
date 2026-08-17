@@ -142,12 +142,12 @@ silently empty timeline. `pitch_point_count` is derived from the points
 themselves and a supplied value is discarded, so a summary can still say how
 much was measured without anyone maintaining a second copy.
 
-In SQL the summary form selects `document - 'pitch_points'` with
-`jsonb_array_length` beside it, so PostgreSQL drops the points before the row
-crosses the socket. Through the real driver: **83.8 ms and 19 151 kB peak
-allocation → 1.8 ms and 15 kB.** End to end over HTTP, `GET /audio-analysis`
-went from 116.7 ms to 8.4 ms and `GET …/feedback` from 120.2 ms to 8.6 ms;
-`/pitch` and `/key` are unchanged, because they genuinely need what they load.
+In SQL the summary form selects `document - 'pitch_points'`, so PostgreSQL drops
+the points before the row crosses the socket. Through the real driver: **83.8 ms
+and 19 151 kB peak allocation → 1.8 ms and 15 kB.** End to end over HTTP,
+`GET /audio-analysis` went from 116.7 ms to 8.4 ms and `GET …/feedback` from
+120.2 ms to 8.6 ms; `/pitch` and `/key` are unchanged, because they genuinely
+need what they load.
 
 `/notes` halved, 189.0 ms → 90.2 ms, for a different reason: it was loading its
 analysis **twice**, once for the ids in its response and once through
@@ -158,6 +158,93 @@ one record's ids with another record's notes.
 What this is *not*: a cache, a denormalisation, or a schema change. Nothing was
 migrated, nothing is stored twice, and every analysis ever written answers the
 new reads.
+
+### A big document is decompressed once per expression (10.12)
+
+The split above left one claim untested, and Step 10.12 tested it. The summary
+form originally selected `jsonb_array_length(document->'pitch_points')` beside
+`document - 'pitch_points'`, on the reasoning that the second expression read a
+document PostgreSQL had already decompressed for the first. It does not. A
+value too big to sit in the row lives in the TOAST table, and PostgreSQL fetches
+and decompresses it **once per expression that references it** — not once per
+row. Measured on the same five-minute recording:
+
+| Selected | Time | Buffers |
+| --- | --- | --- |
+| `document - 'pitch_points'` | 1.80 ms | 37 |
+| `jsonb_array_length(document->'pitch_points')` | 2.31 ms | 37 |
+| both, as 10.11 shipped them | 5.70 ms | 109 |
+
+The buffer count is the mechanism made visible: each reference reads the whole
+toasted value again. This has one consequence per site.
+
+**The summary read gets a column.** `pitch_point_count` (migration 0005) sits
+beside the document, written from the same object in the same statement as
+`status` and `feedback_status`, and backfilled once for the documents written
+before 10.11 — which carry no count of their own and were the reason the
+expression existed at all. `GET /audio-analysis` 11.9 ms → 8.8 ms. This *is* a
+schema change, and it is the narrow kind the layout already uses: a column that
+projects one value out of the authoritative document so a query need not open it.
+
+**The progress query stops multiplying.** It read eleven scalars by path out of
+`a.document`, so a 30-recording window decompressed each document eleven times.
+Projecting `document->'metrics'` inside the lateral pays once and leaves ~600
+bytes for the scalars to come off: **593 ms and 11 834 buffers → 30 ms and
+1 172**, and `GET /recordings/progress?limit=30` **535.1 ms → 39.3 ms** end to
+end, byte for byte the same response. No migration, and no metric denormalised.
+
+Both are pinned by tests that count how many times a statement reads `document`,
+because the cost is invisible in the results: a query that decompresses a
+document eleven times returns exactly what one that decompresses it once returns.
+
+### A page of history says whether it is the whole history (10.13)
+
+Two steps of read-path work asked how *expensive* the answers were. This one
+asked whether they were **complete**, and one of them was not. Measured against a
+real server: an owner with 137 recordings asked for their history, was sent 50,
+and got no field in the response that could say the other 87 existed. The browser
+rendered those 50 under the words "Everything you have uploaded from this
+browser" and announced "50 recordings" to a screen reader. Past `limit=200` — the
+maximum — the older ones were unreachable at any URL. Nothing documented that; it
+was a gap, not a decision.
+
+The response gains `next_cursor` and the endpoint takes a `cursor`.
+
+**Whether more exists is established, not inferred.** The query asks for
+`limit + 1` rows; the extra one is dropped and its arrival is the answer.
+Comparing `count` against `limit` cannot answer the question — an owner with
+exactly 50 recordings and an owner with 500 both return 50 — and that guess is
+what the contract suite's "exactly a page's worth" test exists to catch.
+
+**Keyset, not offset**, for two reasons that were both measured on one owner with
+5 000 recordings:
+
+| Asking for the 81st page of 50 | Time | Rows read |
+| --- | --- | --- |
+| `(created_at, id) < (…)` | 0.127 ms | 51 |
+| `OFFSET 4000` | 2.705 ms | 4 050 |
+
+Offset's work grows with depth; keyset's does not — over HTTP, page 1 is 6.5 ms,
+page 25 is 6.6 ms and page 100 is 5.7 ms. And an upload between two requests
+cannot shift the window, where an offset would push row 50 down to 51 and begin
+page two by repeating it.
+
+**The cursor carries the query's whole ordering**, `created_at` *and* the
+recording id, because `recordings_owner_created_idx` orders by the first and the
+tie-break is the second; a cursor holding only a timestamp loses or repeats every
+recording created in the same instant.
+
+**It is opaque, not secret, and it is not a scope.** Ownership stays in the
+`WHERE` clause, so a cursor from somebody else's history selects a different
+slice of *your* recordings and reaches nothing of theirs. A cursor this server
+did not issue is a `VALIDATION_ERROR` rather than an empty page: answering "you
+have no more recordings" to a damaged bookmark would be the same untruth the step
+removes.
+
+On the client, what is loaded and whether more exists are two separate facts in
+`lib/history.ts`, folded by a pure function and tested without React — the
+arrangement `analysis-runner.ts` uses for polling. The screen states both and
+invents no total, because nothing counts one.
 
 ### Concurrency belongs to the database
 
@@ -727,7 +814,8 @@ category errors, and this table exists to make them visible.
 | Owner identity | `api/owner.py`, `services/owners/` | PostgreSQL | **Not authentication**: bearer keys, no password, no recovery |
 | Ownership enforcement | Every repository read, in SQL | PostgreSQL | Not frontend filtering; not a `403` |
 | Identity portability and deletion | `services/owners/`, `routes/identity.py` | PostgreSQL + browser | Not authentication; the server cannot recover a lost key |
-| Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed |
+| Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed; a page, and it says so |
+| History paging | `services/recordings/cursor.py` | PostgreSQL | Keyset, not offset; opaque, not secret; never an owner scope |
 | Speech transcription | `services/ai/deepgram.py` behind `SpeechToTextProvider` | Provider | Not a measurement; provenance travels with it |
 | Speech metrics | `services/analysis/metrics.py` | Deterministic | Counted from the transcript, never estimated |
 | Speech feedback | `services/ai/claude.py` | Provider | Prose about numbers; never produces a number |
@@ -800,6 +888,13 @@ recording rather than with the number of measurements in it. The query extracts
 each scalar by path. Measured on 200 owners × 50 two-minute recordings, one
 30-recording window: **125 ms and 14 KB** extracting scalars versus **676 ms and
 18 MB** reading the documents. The gap widens with recording length.
+
+**The document is reached once per row, not once per scalar.** Extracting by
+path is only half of it: until Step 10.12 every scalar was read from
+`a.document`, and each of those eleven expressions decompressed the whole
+document again. The lateral now projects `document->'metrics'` and the scalars
+come off that — **593 ms → 30 ms** for a 30-recording window of five-minute
+recordings. See [above](#a-big-document-is-decompressed-once-per-expression-1012).
 
 **SQL selects, filters and orders; the domain defines progress.** What a null
 means, which analyses are eligible, what may be said about a change — all of it

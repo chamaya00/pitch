@@ -9,6 +9,10 @@ controlled.
 
 ``null`` in a status field means **no analysis of that kind exists**. It is not
 "pending", not a failure, and must never be rendered as either.
+
+``next_cursor`` is the same principle applied to the list itself: a page that is
+not the whole history says so, rather than leaving a client to guess from
+whether ``count`` happens to equal ``limit``.
 """
 
 from datetime import datetime
@@ -16,7 +20,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.schemas.recording import RecordingResponse
-from app.services.recordings.history import RecordingHistoryEntry
+from app.services.recordings.history import RecordingHistoryEntry, RecordingHistoryPage
 
 
 class RecordingHistoryItem(BaseModel):
@@ -61,17 +65,37 @@ class RecordingHistoryItem(BaseModel):
 
 
 class RecordingHistoryResponse(BaseModel):
-    """An owner's recordings, newest first."""
+    """One page of an owner's recordings, newest first."""
 
     items: list[RecordingHistoryItem] = Field(
         description="The recordings, newest first. Empty when this owner has none."
     )
-    count: int = Field(description="How many items were returned.")
+    count: int = Field(
+        description=(
+            "How many items were returned **on this page**. It is not how many "
+            "recordings the caller has; when `next_cursor` is set there are more."
+        )
+    )
     limit: int = Field(description="The largest number of items this request could return.")
+    next_cursor: str | None = Field(
+        default=None,
+        description=(
+            "Pass as `cursor` to fetch the page after this one. `null` means "
+            "this page is the last — established by looking for a further "
+            "recording, not by comparing `count` against `limit`. Treat the "
+            "value as opaque: it is this server's bookmark, and its contents "
+            "are not part of the API."
+        ),
+        examples=["MjAyNi0wOC0xN1QxMDoxMTowMCswMDowMHwwYzA3OTkxYmE4NTg0NDllOTc2Y2I5M2Y5MzNmNWRkZQ"],
+    )
 
     @classmethod
     def from_entries(
-        cls, entries: list[RecordingHistoryEntry], *, limit: int
+        cls, entries: list[RecordingHistoryEntry], *, limit: int, next_cursor: str | None = None
     ) -> "RecordingHistoryResponse":
         items = [RecordingHistoryItem.from_entry(entry) for entry in entries]
-        return cls(items=items, count=len(items), limit=limit)
+        return cls(items=items, count=len(items), limit=limit, next_cursor=next_cursor)
+
+    @classmethod
+    def from_page(cls, page: RecordingHistoryPage, *, limit: int) -> "RecordingHistoryResponse":
+        return cls.from_entries(page.entries, limit=limit, next_cursor=page.next_cursor)

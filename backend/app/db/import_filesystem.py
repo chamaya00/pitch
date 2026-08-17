@@ -208,8 +208,9 @@ async def import_filesystem(
                 connection,
                 """
                 INSERT INTO audio_analyses
-                    (id, recording_id, status, feedback_status, created_at, error_code, document)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (id, recording_id, status, feedback_status, created_at, error_code,
+                     pitch_point_count, document)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
                 """,
                 (
@@ -219,6 +220,8 @@ async def import_filesystem(
                     measured.feedback_status.value,
                     measured.created_at,
                     measured.error_code.value if measured.error_code else None,
+                    # Counted from the imported timeline, like every other write.
+                    len(measured.pitch_points),
                     measured.model_dump_json(),
                 ),
             )

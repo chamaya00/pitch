@@ -24,10 +24,31 @@ selecting the analysis documents instead      676 ms     18 MB
 ===========================================  =========  ================
 
 5× faster and three orders of magnitude less data, and the gap widens with
-recording length. Most of the remaining 125 ms is PostgreSQL decompressing the
-documents to reach the paths; removing that would mean denormalising the metrics
-into columns, which is a schema change worth making when a measurement demands
-it and not before.
+recording length.
+
+**The metrics object is reached once per row, not once per scalar.** That is the
+second decision, and it was missing until Step 10.12 measured what "most of the
+remaining 125 ms is PostgreSQL decompressing the documents" actually meant. A
+document this size lives in the TOAST table, and PostgreSQL detoasts it *per
+expression* — so eleven scalars read by path from ``a.document`` fetched and
+decompressed the same 253 kB eleven times. Projecting ``document->'metrics'``
+inside the lateral pays for that once and leaves a ~600-byte object for the
+scalars to be read from. Measured on 50 five-minute recordings (11 083 points,
+1 446 kB raw and 253 kB stored per document), one 30-recording window:
+
+==========================================  =========  =========
+approach                                    time       TOAST reads
+==========================================  =========  =========
+scalars read from ``a.document`` (before)     593 ms      11 834
+scalars read from ``a.metrics`` (this query)   30 ms       1 172
+==========================================  =========  =========
+
+20×, and the buffer count is the proof of the mechanism rather than a side
+effect: it falls by a factor of ten because ten of the eleven detoasts are gone.
+What remains is one unavoidable decompression per row, which is the cost of
+keeping the metrics in the same document as the timeline. Denormalising them
+into columns would remove that too, and is still a schema change worth making
+only when a measurement demands it — this one did not.
 
 The extraction is *selection*, not interpretation: what a null means, which
 states are eligible and how a series is assembled all live in ``series.py``.
@@ -49,6 +70,12 @@ from typing import Any, Protocol, runtime_checkable
 #:
 #: ``recordings_owner_created_idx (owner_id, created_at DESC)`` covers the inner
 #: query exactly, which is why no new index was added.
+#:
+#: ``a.metrics`` is ``document->'metrics'``, projected inside the lateral so the
+#: document is detoasted once for the row rather than once for each scalar read
+#: out of it. It is ``NULL`` for a recording with no completed analysis, exactly
+#: as ``a.document`` was, so every scalar below stays ``NULL`` in that case and
+#: nothing downstream changes.
 PROGRESS_SQL = """
 SELECT * FROM (
     SELECT r.id                AS recording_id,
@@ -57,21 +84,21 @@ SELECT * FROM (
            r.duration_seconds  AS recording_duration_seconds,
            r.audio_format      AS audio_format,
            a.status            AS analysis_status,
-           (a.document->'metrics'->>'duration_seconds')::float8            AS duration_seconds,
-           (a.document->'metrics'->'stability'->>'in_tune_ratio')::float8  AS in_tune_ratio,
-           (a.document->'metrics'->'stability'->>'mean_abs_cents_deviation')::float8
+           (a.metrics->>'duration_seconds')::float8            AS duration_seconds,
+           (a.metrics->'stability'->>'in_tune_ratio')::float8  AS in_tune_ratio,
+           (a.metrics->'stability'->>'mean_abs_cents_deviation')::float8
                AS mean_abs_cents_deviation,
-           (a.document->'metrics'->'stability'->>'cents_std')::float8      AS cents_std,
-           (a.document->'metrics'->'stability'->>'voiced_ratio')::float8   AS voiced_ratio,
-           (a.document->'metrics'->'stability'->>'voiced_frames')::int     AS voiced_frames,
-           (a.document->'metrics'->'settings'->>'hop_length_samples')::int AS hop_length_samples,
-           (a.document->'metrics'->'settings'->>'sample_rate_hz')::int     AS sample_rate_hz,
-           (a.document->'metrics'->'pitch'->>'semitone_span')::int         AS semitone_span,
-           a.document->'metrics'->'pitch'->>'lowest_note'                  AS lowest_note,
-           a.document->'metrics'->'pitch'->>'highest_note'                 AS highest_note
+           (a.metrics->'stability'->>'cents_std')::float8      AS cents_std,
+           (a.metrics->'stability'->>'voiced_ratio')::float8   AS voiced_ratio,
+           (a.metrics->'stability'->>'voiced_frames')::int     AS voiced_frames,
+           (a.metrics->'settings'->>'hop_length_samples')::int AS hop_length_samples,
+           (a.metrics->'settings'->>'sample_rate_hz')::int     AS sample_rate_hz,
+           (a.metrics->'pitch'->>'semitone_span')::int         AS semitone_span,
+           a.metrics->'pitch'->>'lowest_note'                  AS lowest_note,
+           a.metrics->'pitch'->>'highest_note'                 AS highest_note
       FROM recordings r
       LEFT JOIN LATERAL (
-          SELECT status, document FROM audio_analyses
+          SELECT status, document->'metrics' AS metrics FROM audio_analyses
            WHERE recording_id = r.id AND status = 'completed'
            ORDER BY created_at DESC, id DESC
            LIMIT 1

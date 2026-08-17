@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13) |
 
 ## Phase 0 — delivered
 
@@ -445,6 +445,97 @@ Delivered in 10.11 — *the read path stops paying for the pitch timeline*:
   against **both** repository implementations, so a double that quietly kept the
   points fails the same assertion the database passes.
 
+Delivered in 10.12 — *one expression, one decompression*:
+
+- 10.11 fixed the audio-analysis read path and left three things unmeasured. All
+  three were measured here, against a real server holding 50 five-minute
+  recordings: the history list is **8.7 ms**, the speech read **11.6 ms**, and
+  the frontend serves **772 kB** of JavaScript for its one route. None of them is
+  the problem. The one nobody had looked at is: `GET /recordings/progress` cost
+  **535 ms**, the slowest read in the product by a factor of five, and it is on
+  the home page.
+- The cause is a property of PostgreSQL that 10.11 assumed the other way round.
+  A value too big for its row lives in the TOAST table and is decompressed **once
+  per expression that references it**, not once per row. The progress query read
+  eleven scalars by path out of `a.document`, so a 30-recording window fetched
+  and decompressed the same 253 kB document eleven times. The buffer counts say
+  it plainly: 11 834 for eleven scalars, 1 135 for one.
+- The fix is which side of the lateral the document is read on. Projecting
+  `document->'metrics'` leaves ~600 bytes for the scalars to come off:
+  **593 ms → 30 ms** in SQL, **535.1 ms → 39.3 ms** end to end over HTTP, byte
+  for byte the same response. No migration, and no metric denormalised — the
+  module's own note had concluded that denormalising was the only way out, and
+  it was the multiplier that was expensive, not the decompression.
+- **The same mistake was in the read the browser polls.** 10.11's summary form
+  selected `jsonb_array_length(document->'pitch_points')` beside
+  `document - 'pitch_points'` and wrote down that the second reused what the
+  first had decompressed. Measured: 1.80 ms for the strip alone, 2.31 ms for the
+  count alone, **5.70 ms for the pair** — the count cost more than the read it
+  rode on.
+- `pitch_point_count` is a column now (migration 0005), written from the same
+  object in the same statement as `status` and `feedback_status`. That is a
+  schema change, and it earns itself twice: `GET /audio-analysis` 11.9 → 8.8 ms,
+  and the documents written before 10.11 — which carry no count and were the
+  whole reason the expression existed — are answered by a one-time backfill
+  instead of by a decompression on every read.
+- A defect was found by the test written for it rather than in production: the
+  repository first wrote `analysis.pitch_point_count`, which the model derives
+  during *validation*, and `model_copy(update=...)` skips validators. A record
+  assembled that way carries a stale count beside a fresh timeline. It counts the
+  tuple it is serialising instead, which cannot be stale however the record was
+  built.
+- Four tests, against a real database. Two count how many times each statement
+  reads `document`, because the cost is invisible in the results — a query that
+  decompresses a document eleven times returns exactly what one that decompresses
+  it once returns. One seeds an analysis through the pre-0005 schema and checks
+  the backfill counts its timeline. One follows the column through the write that
+  attaches a timeline to a pending record.
+
+Delivered in 10.13 — *a page of history says whether it is the whole history*:
+
+- 10.11 and 10.12 asked how expensive the reads were. This step asked whether
+  they were **complete**, starting from the surface 10.12 had sized but never
+  profiled — the frontend. In Chromium the home page is healthy: 180 kB of
+  JavaScript over the wire, first contentful paint at 88 ms, no console errors.
+  Nothing there needed fixing, and nothing there was changed.
+- What the browser did reveal was a defect nobody had looked for. With **137
+  recordings in the account the list rendered 50**, described them as "Everything
+  you have uploaded from this browser, newest first", and announced "50
+  recordings" to a screen reader. The API was no better: `count` and `limit`, and
+  no field that could say the other 87 existed. Past `limit=200` — the maximum —
+  they were unreachable at any URL. No document anywhere recorded that as a
+  decision, because it was not one.
+- This is the same rule the rest of the product is built on, applied to a list
+  instead of a measurement: **do not state what the data does not support.** A
+  truncated history presented as complete is the same kind of untruth as a
+  measurement that was never taken rendered as a zero.
+- `GET /recordings` takes a `cursor` and returns `next_cursor`. Whether more
+  exists is *established* — the query asks for one row more than the caller
+  wanted, and the extra row's arrival is the answer — rather than inferred from
+  `count == limit`, which cannot distinguish an owner with exactly 50 recordings
+  from one with 500.
+- **Keyset, not offset**, and both reasons were measured on one owner with 5 000
+  recordings. Cost: the 81st page of 50 is 0.127 ms reading 51 rows by keyset
+  against 2.705 ms reading 4 050 by offset, and over HTTP page 100 (5.7 ms) costs
+  what page 1 does (6.5 ms). Correctness: an upload between two requests cannot
+  shift the window, where an offset would begin page two by repeating page one's
+  last row.
+- The cursor carries `created_at` **and** the recording id, because the tie-break
+  is the id and a timestamp-only cursor loses or repeats everything created in
+  the same instant. It is opaque but not secret, and it is not a scope: ownership
+  stays in the `WHERE` clause, so somebody else's cursor selects a slice of *your*
+  recordings and reaches nothing of theirs. A cursor this server did not issue is
+  a `VALIDATION_ERROR`, never an empty page.
+- The browser says what it is showing — "50 recordings shown. More can be
+  loaded.", then "137 recordings." once complete — and **invents no total**,
+  because nothing counts one. Paging is a pure fold in `lib/history.ts`, tested
+  without React, the arrangement `analysis-runner.ts` already uses for polling.
+  A failed "show older" reports beside the loaded list rather than replacing it.
+- Verified end to end in Chromium against the real stack: 50 rows on load, 100
+  after one click, 137 after two, the button gone, 137 unique filenames, no
+  console errors. Nine backend tests, eight frontend ones, and the in-memory
+  double pages identically so the contract suite holds both to it.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -453,9 +544,15 @@ verification and rate limiting would make the system *less* safe than 128 random
 bits, not more. 10.3 added rate limiting but **not** the rest: still outstanding
 in Phase 10 are TLS termination (still an external responsibility — the proxy
 speaks HTTP and claims no HSTS) and every credential feature 10.2 deferred.
-Performance work **started** in 10.11 and is not finished: that step addressed
-the audio-analysis read path, and the speech pipeline, the history list and the
-frontend bundle have not been measured at all. The shared rate-limit counter
+Performance work **started** in 10.11 and continued in 10.12, which measured the
+three things 10.11 left alone — the speech read (11.6 ms), the history list
+(8.7 ms) and the frontend bundle (772 kB of JavaScript for one route) — and found
+the cost somewhere else, in the progress query. 10.13 profiled the frontend in a
+browser (180 kB over the wire, first contentful paint 88 ms, no console errors)
+and found nothing worth changing, and measured the history read at 5 000
+recordings, where paging is flat with depth. What is still unmeasured: the speech
+pipeline and the progress query at a hundred times the data, and every read under
+concurrent load — every number in 10.11–10.13 was taken one request at a time. The shared rate-limit counter
 landed in 10.10. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that

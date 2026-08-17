@@ -17,6 +17,11 @@ from app.core.errors import ApiError, ErrorCode
 from app.schemas.history import RecordingHistoryResponse
 from app.schemas.recording import RecordingResponse
 from app.services.audio.upload import process_upload
+from app.services.recordings.cursor import (
+    CURSOR_PATTERN,
+    InvalidCursorError,
+    decode_cursor,
+)
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
@@ -112,12 +117,21 @@ RecordingIdPath = Annotated[
     response_model=RecordingHistoryResponse,
     summary="List your recordings",
     description=(
-        "Every recording belonging to the caller, newest first.\n\n"
+        "One page of the recordings belonging to the caller, newest first.\n\n"
         "**Ownership is resolved from the `X-VocalLens-Owner` header and "
         "enforced in the database.** A caller with no header is issued a new "
         "identity and sees an empty history — never somebody else's. A caller "
         "cannot ask for another owner's recordings, because there is no "
-        "parameter that would let them name one.\n\n"
+        "parameter that would let them name one — including `cursor`, which is "
+        "a position in a result set that is already scoped to the caller.\n\n"
+        "**A page says whether it is the last.** `next_cursor` is `null` only "
+        "when there is genuinely nothing older; otherwise pass it back as "
+        "`cursor` for the next page. Do not infer completeness from `count`: an "
+        "owner with exactly `limit` recordings and one with a thousand return "
+        "the same count.\n\n"
+        "**Paging is by position, not by offset.** Uploading a recording "
+        "between two requests cannot shift the window, so nothing is skipped or "
+        "repeated.\n\n"
         "**Statuses, not results.** Each item says how far its analyses got; "
         "the measurements themselves come from the per-recording endpoints. A "
         "`null` status means that analysis has never been run, which is not the "
@@ -132,10 +146,35 @@ async def list_recordings(
         int,
         Query(ge=1, le=MAX_HISTORY_LIMIT, description="Largest number of recordings to return."),
     ] = DEFAULT_HISTORY_LIMIT,
+    cursor: Annotated[
+        str | None,
+        Query(
+            # The shape of what base64url produces. A value that is not even
+            # that is refused here, before anything tries to decode it.
+            pattern=CURSOR_PATTERN,
+            description=(
+                "A `next_cursor` from a previous page. Omit for the newest "
+                "recordings. Opaque: this server issued it and only this server "
+                "reads it."
+            ),
+        ),
+    ] = None,
 ) -> RecordingHistoryResponse:
-    """Return this owner's recordings with the state of each one's analyses."""
-    entries = await repository.list_history(owner_id, limit)
-    return RecordingHistoryResponse.from_entries(entries, limit=limit)
+    """Return one page of this owner's recordings with the state of each one's analyses."""
+    try:
+        position = None if cursor is None else decode_cursor(cursor)
+    except InvalidCursorError as exc:
+        # A cursor nobody issued is a bad request, not a server fault and not an
+        # empty history: answering "you have no more recordings" to a damaged
+        # bookmark would be the same untruth this endpoint exists to stop
+        # telling.
+        raise ApiError(
+            ErrorCode.VALIDATION_ERROR,
+            "That page marker is not one this server issued. Start from the newest recordings.",
+        ) from exc
+
+    page = await repository.list_history(owner_id, limit, position)
+    return RecordingHistoryResponse.from_page(page, limit=limit)
 
 
 @router.get(

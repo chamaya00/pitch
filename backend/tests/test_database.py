@@ -11,7 +11,9 @@ quietly in CI: a run with no database says so in the skip reason.
 """
 
 import inspect
+import json
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -33,9 +35,11 @@ from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
     AudioFeedbackStatus,
+    PitchPoint,
     new_audio_analysis_id,
 )
 from app.services.audio_analysis.postgres_repository import (
+    _SUMMARY_COLUMNS,
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
     PostgresAudioAnalysisRepository,
@@ -48,6 +52,7 @@ from app.services.owners.credentials import (
 )
 from app.services.owners.models import Owner, hash_token, new_owner, new_owner_token
 from app.services.owners.repository import PostgresOwnerRepository
+from app.services.progress.sources import PROGRESS_SQL
 from app.services.recordings.models import Recording
 from app.services.recordings.postgres_repository import (
     PostgresRecordingRepository,
@@ -132,6 +137,17 @@ def recording(recording_id: str | None = None, **overrides: Any) -> Recording:
     }
     base.update(overrides)
     return Recording(**base)
+
+
+def audio_metrics() -> Any:
+    """The metrics block a completed audio analysis must carry.
+
+    Imported where it is used, as the feedback-claim test above does, so this
+    module keeps its own import list to the things it is testing.
+    """
+    from tests.test_audio_feedback import metrics
+
+    return metrics()
 
 
 # --- Schema and migrations -------------------------------------------------
@@ -859,6 +875,224 @@ def test_a_claim_is_refused_unless_the_analysis_completed() -> None:
         )
         await analyses.create(pending)
         assert await analyses.claim_feedback(pending.audio_analysis_id) is None
+
+    with_db(work)
+
+
+# --- What a read is allowed to decompress ----------------------------------
+#
+# A stored analysis is large enough to live in the TOAST table, and PostgreSQL
+# detoasts it once per *expression* that references it — not once per row. That
+# is the mechanism behind Step 10.12, and it is invisible in any test that only
+# checks the values that come back: a query that decompresses a 253 kB document
+# eleven times returns exactly what a query that decompresses it once returns.
+# So the shape of the SQL is asserted here, from the modules that carry it.
+
+
+def _document_reads(sql: str) -> int:
+    """How many times a statement *reads* ``document``.
+
+    ``AS document`` names a result column and reads nothing, so it does not
+    count; every other occurrence is an expression PostgreSQL will detoast for.
+    """
+    return len(re.findall(r"(?<!AS )\bdocument\b", sql))
+
+
+def test_the_summary_read_touches_the_document_once() -> None:
+    """The regression 10.12 fixed, pinned where it happened.
+
+    10.11 selected ``document - 'pitch_points'`` *and*
+    ``jsonb_array_length(document->'pitch_points')`` together, believing the
+    second reused what the first had decompressed. It did not: measured on a
+    five-minute recording, the pair cost 5.70 ms and 109 buffers against 1.80 ms
+    and 37 for the strip alone. A second reference is therefore a second full
+    decompression, and this asserts there is not one.
+    """
+    reads = _document_reads(_SUMMARY_COLUMNS)
+    assert reads == 1, f"the summary read decompresses the document {reads} times"
+    assert "pitch_point_count" in _SUMMARY_COLUMNS, "the count must still be selected"
+    assert "jsonb_array_length" not in _SUMMARY_COLUMNS
+
+
+def test_the_progress_query_reaches_the_metrics_once_per_row() -> None:
+    """Eleven scalars, one decompression.
+
+    Reading each scalar from ``a.document`` detoasted the same document eleven
+    times: 593 ms and 11 834 buffers for a 30-recording window, against 30 ms and
+    1 172 once the lateral projects ``document->'metrics'`` and the scalars come
+    off that. The property is which side of the lateral the document is read on.
+    """
+    assert "document->'metrics' AS metrics" in PROGRESS_SQL
+    # Once, inside the lateral. Every scalar above it reads `a.metrics`.
+    reads = _document_reads(PROGRESS_SQL)
+    assert reads == 1, f"the progress query decompresses each document {reads} times"
+    assert "a.document" not in PROGRESS_SQL
+
+
+def test_an_audio_analysis_predating_the_count_column_is_counted_by_the_migration(
+    tmp_path: Any,
+) -> None:
+    """Migration 0005, applied to a database seeded through the old schema.
+
+    The rows that made the ``jsonb_array_length`` expression necessary are the
+    ones written before 10.11, whose documents carry no ``pitch_point_count`` at
+    all. Reading the count out of such a document reports zero — "measured
+    nothing" for an analysis that measured plenty — so the migration has to
+    supply it. This seeds exactly that row and checks the summary read answers
+    from the column.
+    """
+
+    async def work(database: Database) -> None:
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        files = migration_files()
+        # Pinned by name rather than by position, for the reason recorded on
+        # the 0003 backfill test: staging "everything but the last" tests
+        # nothing as soon as another migration lands after it.
+        counted = next(p for p in files if p.name.startswith("0005_"))
+        split = files.index(counted)
+        before, rest = files[:split], files[split:]
+        assert counted in rest, "the migration under test must be one that is applied"
+        for path in before:
+            (staged / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        owner_id = uuid.uuid4()
+        recording_id = uuid.uuid4().hex
+        analysis_id = uuid.uuid4().hex
+        # A document in the shape 10.11 predates: a timeline, and no count.
+        old_document = {
+            "audio_analysis_id": analysis_id,
+            "recording_id": recording_id,
+            "status": "completed",
+            "created_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:00:01Z",
+            "feedback_status": "not_requested",
+            "metrics": audio_metrics().model_dump(mode="json"),
+            "pitch_points": [
+                {
+                    "timestamp_seconds": round(index * 0.023, 3),
+                    "frequency_hz": 440.0,
+                    "midi_note": 69,
+                    "note_name": "A4",
+                    "cents": 0.0,
+                    "confidence": 0.95,
+                }
+                for index in range(6)
+            ],
+        }
+        assert "pitch_point_count" not in old_document
+
+        try:
+            async with database.transaction() as connection:
+                await connection.execute("CREATE SCHEMA point_count_probe")
+                await connection.execute("SET LOCAL search_path TO point_count_probe")
+                await apply_migrations(connection, staged)
+
+            async with database.transaction() as connection:
+                await connection.execute("SET LOCAL search_path TO point_count_probe")
+                await connection.execute(
+                    "INSERT INTO owners (id, created_at) VALUES (%s, now())", (owner_id,)
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO recordings (id, owner_id, original_filename, audio_format,
+                                            duration_seconds, sample_rate, channels, size_bytes,
+                                            created_at, document)
+                    VALUES (%s, %s, 't.wav', 'wav', 2.0, 22050, 1, 1024, now(), '{}'::jsonb)
+                    """,
+                    (recording_id, owner_id),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO audio_analyses (id, recording_id, status, feedback_status,
+                                                created_at, document)
+                    VALUES (%s, %s, 'completed', 'not_requested', now(), %s)
+                    """,
+                    (analysis_id, recording_id, json.dumps(old_document)),
+                )
+
+            async with database.transaction() as connection:
+                await connection.execute("SET LOCAL search_path TO point_count_probe")
+                assert await apply_migrations(connection, MIGRATIONS_DIR) == [p.name for p in rest]
+
+            async with database.connection() as connection:
+                await connection.execute("SET search_path TO point_count_probe")
+                row = await fetch_one(
+                    connection,
+                    "SELECT pitch_point_count FROM audio_analyses WHERE id = %s",
+                    (analysis_id,),
+                )
+                assert row is not None
+                assert row["pitch_point_count"] == 6, "the backfill did not count the timeline"
+        finally:
+            async with database.transaction() as connection:
+                await connection.execute("DROP SCHEMA IF EXISTS point_count_probe CASCADE")
+
+    with_db(work)
+
+
+def test_the_point_count_column_follows_the_timeline_through_a_write() -> None:
+    """The column is a projection of the points, like ``status`` is of the status.
+
+    A pending record has no timeline; the write that completes it attaches one.
+    If the column were written once at insert and left alone, every analysis in
+    the database would report zero frames measured.
+    """
+
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        stored = recording()
+        await PostgresRecordingRepository(database).create(stored, owner.owner_id)
+        analyses = PostgresAudioAnalysisRepository(database)
+
+        pending = AudioAnalysis(
+            audio_analysis_id=new_audio_analysis_id(), recording_id=stored.recording_id
+        )
+        await analyses.create(pending)
+
+        async def stored_count() -> int:
+            async with database.connection() as connection:
+                row = await fetch_one(
+                    connection,
+                    "SELECT pitch_point_count FROM audio_analyses WHERE id = %s",
+                    (pending.audio_analysis_id,),
+                )
+            assert row is not None
+            return int(row["pitch_point_count"])
+
+        assert await stored_count() == 0
+
+        points = tuple(
+            PitchPoint(
+                timestamp_seconds=round(index * 0.023, 3),
+                frequency_hz=440.0,
+                midi_note=69,
+                note_name="A4",
+                cents=0.0,
+                confidence=0.95,
+            )
+            for index in range(9)
+        )
+        await analyses.update(
+            pending.model_copy(
+                update={
+                    "status": AudioAnalysisStatus.COMPLETED,
+                    "metrics": audio_metrics(),
+                    "pitch_points": points,
+                }
+            ),
+            expect_status=AudioAnalysisStatus.PENDING,
+        )
+
+        assert await stored_count() == 9
+        summary = await analyses.summary(pending.audio_analysis_id)
+        assert summary is not None
+        assert summary.pitch_point_count == 9
+
+        whole = await analyses.get(pending.audio_analysis_id)
+        assert whole is not None
+        # The column and the timeline it counts, from the same record.
+        assert len(whole.pitch_points) == summary.pitch_point_count
 
     with_db(work)
 

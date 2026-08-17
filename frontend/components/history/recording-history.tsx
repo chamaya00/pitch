@@ -5,6 +5,7 @@ import { ComparisonPanel } from "@/components/comparison/comparison-panel";
 import { HistoryRow } from "@/components/history/history-row";
 import { Button } from "@/components/ui/button";
 import { useRecordingHistory } from "@/hooks/use-recording-history";
+import { historyAnnouncement } from "@/lib/history";
 
 /** Two recordings, no more: a comparison of three is a table nobody can read. */
 const COMPARE_LIMIT = 2;
@@ -22,9 +23,16 @@ const COMPARE_LIMIT = 2;
  * Four states, all rendered distinctly. "Loading", "you have none" and "we
  * could not fetch them" are three different things, and only the last is
  * something the reader can do anything about.
+ *
+ * **What is on screen is not necessarily everything.** This section used to say
+ * "Everything you have uploaded from this browser" while rendering one page of
+ * it; measured with 137 recordings, it showed 50 and announced "50 recordings".
+ * The list now says how much of the history it is showing, and the rest is one
+ * button away — see Step 10.13.
  */
 export function RecordingHistory() {
-  const { state, reload } = useRecordingHistory();
+  const { state, reload, loadMore, loadingMore, moreError } =
+    useRecordingHistory();
   /** The recordings ticked for comparison, in the order they were ticked. */
   const [selected, setSelected] = useState<string[]>([]);
   /** The pair actually being compared. Separate from `selected` so changing a
@@ -54,11 +62,11 @@ export function RecordingHistory() {
             Your recordings
           </h2>
           <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted">
-            Everything you have uploaded from this browser, newest first. Open
-            one to see its transcript and measurements.
+            What you have uploaded from this browser, newest first. Open one to
+            see its transcript and measurements.
           </p>
         </div>
-        {state.status === "ready" && state.history.count > 0 && (
+        {state.status === "ready" && state.history.items.length > 0 && (
           <Button variant="secondary" onClick={reload}>
             Refresh
           </Button>
@@ -66,7 +74,7 @@ export function RecordingHistory() {
       </div>
 
       <p aria-live="polite" className="sr-only">
-        {announcement(state)}
+        {announcement(state, loadingMore)}
       </p>
 
       {state.status === "loading" && (
@@ -155,6 +163,29 @@ export function RecordingHistory() {
         </ul>
       )}
 
+      {state.status === "ready" && state.history.nextCursor !== null && (
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          <Button
+            variant="secondary"
+            onClick={loadMore}
+            disabled={loadingMore}
+            aria-describedby="history-more-note"
+          >
+            {loadingMore ? "Loading…" : "Show older recordings"}
+          </Button>
+          <p id="history-more-note" className="text-xs text-muted">
+            {state.history.items.length} shown so far — there are older ones.
+          </p>
+        </div>
+      )}
+
+      {/* A failed "show older" must not take the loaded list away with it. */}
+      {moreError !== null && (
+        <p role="alert" className="mt-3 text-xs text-danger">
+          Older recordings couldn&apos;t be loaded. {moreError}
+        </p>
+      )}
+
       <p className="mt-6 max-w-prose text-xs leading-relaxed text-muted">
         Your recordings are linked to an anonymous identifier stored in this
         browser — not to an account. There is no password and no way to recover
@@ -167,6 +198,7 @@ export function RecordingHistory() {
 
 function announcement(
   state: ReturnType<typeof useRecordingHistory>["state"],
+  loadingMore: boolean,
 ): string {
   switch (state.status) {
     case "loading":
@@ -174,8 +206,8 @@ function announcement(
     case "error":
       return `Your recordings could not be loaded. ${state.message}`;
     case "ready":
-      return state.history.count === 0
-        ? "You have no recordings yet."
-        : `${state.history.count} recording${state.history.count === 1 ? "" : "s"}.`;
+      return loadingMore
+        ? "Loading older recordings."
+        : historyAnnouncement(state.history);
   }
 }

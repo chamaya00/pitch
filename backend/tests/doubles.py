@@ -54,7 +54,8 @@ from app.services.owners.credentials import (
 from app.services.owners.identity import OwnerDataSummary
 from app.services.owners.models import Owner, new_owner
 from app.services.progress.sources import ProgressRow
-from app.services.recordings.history import RecordingHistoryEntry
+from app.services.recordings.cursor import HistoryCursor, encode_cursor
+from app.services.recordings.history import RecordingHistoryEntry, RecordingHistoryPage
 from app.services.recordings.models import Recording, utc_now
 from app.services.recordings.postgres_repository import RecordingAlreadyExistsError
 
@@ -319,9 +320,28 @@ class InMemoryRecordingRepository:
         owned.sort(key=lambda record: (record.created_at, record.recording_id), reverse=True)
         return owned[:limit]
 
-    async def list_history(self, owner_id: uuid.UUID, limit: int) -> list[RecordingHistoryEntry]:
+    async def list_history(
+        self, owner_id: uuid.UUID, limit: int, cursor: HistoryCursor | None = None
+    ) -> RecordingHistoryPage:
+        owned = [record for owner, record in self._records.values() if owner == owner_id]
+        owned.sort(key=lambda record: (record.created_at, record.recording_id), reverse=True)
+        if cursor is not None:
+            # The same row-wise comparison the SQL makes: strictly older, or the
+            # same instant and a lower id.
+            owned = [
+                record
+                for record in owned
+                if (record.created_at, record.recording_id)
+                < (cursor.created_at, cursor.recording_id)
+            ]
+        # One more than asked for, so the page can say whether another follows —
+        # exactly what the query's `LIMIT limit + 1` is for.
+        window = owned[: limit + 1]
+        has_more = len(window) > limit
+        visible = window[:limit]
+
         entries = []
-        for recording in await self.list_for_owner(owner_id, limit):
+        for recording in visible:
             speech = (
                 await self._analyses.latest_for_recording(recording.recording_id)
                 if self._analyses is not None
@@ -342,7 +362,14 @@ class InMemoryRecordingRepository:
                     last_analysed_at=max(stamps) if stamps else None,
                 )
             )
-        return entries
+        return RecordingHistoryPage(
+            entries=entries,
+            next_cursor=(
+                encode_cursor(visible[-1].created_at, visible[-1].recording_id)
+                if has_more and visible
+                else None
+            ),
+        )
 
     async def comparison_sources(
         self, owner_id: uuid.UUID, recording_ids: list[str]

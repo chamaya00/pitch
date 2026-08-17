@@ -380,9 +380,15 @@ export function getAudioFeedback(
  */
 export function getRecordingHistory(
   limit?: number,
+  cursor?: string | null,
   signal?: AbortSignal,
 ): Promise<RecordingHistory> {
-  const query = limit === undefined ? "" : `?limit=${limit}`;
+  const parameters = new URLSearchParams();
+  if (limit !== undefined) parameters.set("limit", String(limit));
+  // A cursor is opaque and may contain `-` and `_`; URLSearchParams encodes it
+  // rather than this file guessing which characters need it.
+  if (cursor) parameters.set("cursor", cursor);
+  const query = parameters.size === 0 ? "" : `?${parameters}`;
   return apiFetch<RecordingHistory>(`/recordings${query}`, {
     signal,
     cache: "no-store",
