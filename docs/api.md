@@ -241,14 +241,17 @@ Uploading is **not** analysing. A stored recording has no measurements until
 
 ### `GET /api/v1/recordings`
 
-The caller's own recordings, newest first. Whose they are is decided entirely
-from the owner header; there is no parameter that could name a different owner.
+One page of the caller's own recordings, newest first. Whose they are is decided
+entirely from the owner header; there is no parameter that could name a
+different owner — including `cursor`, which is a position in a result set that
+is already scoped to the caller.
 
 **Query parameters**
 
 | Name | Default | Range | Meaning |
 | --- | --- | --- | --- |
-| `limit` | `50` | 1–200 | Largest number of recordings to return |
+| `limit` | `50` | 1–200 | Largest number of recordings to return on this page |
+| `cursor` | — | a `next_cursor` | Resume after the page that returned it |
 
 **200 OK**
 
@@ -274,9 +277,36 @@ from the owner header; there is no parameter that could name a different owner.
     }
   ],
   "count": 1,
-  "limit": 50
+  "limit": 50,
+  "next_cursor": null
 }
 ```
+
+**`count` is this page, not your history.** It is how many items came back, and
+before Step 10.13 it was the only number here — which is why an owner with 137
+recordings was shown 50 and told nothing. Never read completeness out of it: an
+owner with exactly `limit` recordings and one with a thousand return the same
+count.
+
+**`next_cursor` answers "is that all?"** `null` means there is genuinely nothing
+older; anything else is the value to send back as `cursor` for the next page.
+The server establishes it by looking for a further recording, not by arithmetic
+on the count. Loop until it is `null` and you have the whole history:
+
+```
+GET /api/v1/recordings?limit=50
+GET /api/v1/recordings?limit=50&cursor=MjAyNi0wOC0xN1QxMDoxMTowMCswMDowMHww…
+```
+
+**Treat the cursor as opaque.** It is this server's bookmark; its contents are
+not part of this API and may change. A cursor this server did not issue is a
+`VALIDATION_ERROR`, not an empty page — replying "you have no more recordings"
+to a damaged bookmark would be a wrong answer dressed as a right one.
+
+**Paging is by position, not by offset.** Uploading a recording between two
+requests cannot shift the window, so no recording is skipped or returned twice.
+It is also flat in cost: measured on one owner with 5 000 recordings, page 1 was
+6.5 ms, page 25 was 6.6 ms and page 100 was 5.7 ms.
 
 **Statuses, not results.** Each item says how far its analyses got; the
 measurements come from the per-recording endpoints. Embedding them here would

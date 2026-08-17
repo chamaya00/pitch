@@ -270,9 +270,20 @@ to an account:
   but the guarantee is the entropy — not an access-control system.
 - **A take that is recorded but never submitted is never listed**, because it
   was never uploaded. It exists only in the browser tab.
+- **The list on screen is a page of your history, not all of it.** It loads the
+  newest 50 and says so, and "Show older recordings" fetches the next 50. Until
+  Step 10.13 it did not: an owner with 137 recordings was shown 50, told
+  "Everything you have uploaded from this browser", and had no way to reach the
+  other 87 — beyond 200 they were unreachable at any URL. What is still true is
+  that the screen never states a total, because nothing counts one; it says how
+  many are loaded and whether more exist.
+- **There is no search, no filter and no sort.** The only order is newest first,
+  so finding an old take means loading the pages in front of it.
 
 What it *does* guarantee is that one visitor never sees another's recordings.
-That check happens on the server, in the database query, on every route.
+That check happens on the server, in the database query, on every route — and a
+paging cursor does not change it, because ownership is in the `WHERE` clause and
+no cursor reaches it.
 
 ### Rate limits
 

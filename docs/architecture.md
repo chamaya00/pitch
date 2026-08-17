@@ -197,6 +197,55 @@ Both are pinned by tests that count how many times a statement reads `document`,
 because the cost is invisible in the results: a query that decompresses a
 document eleven times returns exactly what one that decompresses it once returns.
 
+### A page of history says whether it is the whole history (10.13)
+
+Two steps of read-path work asked how *expensive* the answers were. This one
+asked whether they were **complete**, and one of them was not. Measured against a
+real server: an owner with 137 recordings asked for their history, was sent 50,
+and got no field in the response that could say the other 87 existed. The browser
+rendered those 50 under the words "Everything you have uploaded from this
+browser" and announced "50 recordings" to a screen reader. Past `limit=200` — the
+maximum — the older ones were unreachable at any URL. Nothing documented that; it
+was a gap, not a decision.
+
+The response gains `next_cursor` and the endpoint takes a `cursor`.
+
+**Whether more exists is established, not inferred.** The query asks for
+`limit + 1` rows; the extra one is dropped and its arrival is the answer.
+Comparing `count` against `limit` cannot answer the question — an owner with
+exactly 50 recordings and an owner with 500 both return 50 — and that guess is
+what the contract suite's "exactly a page's worth" test exists to catch.
+
+**Keyset, not offset**, for two reasons that were both measured on one owner with
+5 000 recordings:
+
+| Asking for the 81st page of 50 | Time | Rows read |
+| --- | --- | --- |
+| `(created_at, id) < (…)` | 0.127 ms | 51 |
+| `OFFSET 4000` | 2.705 ms | 4 050 |
+
+Offset's work grows with depth; keyset's does not — over HTTP, page 1 is 6.5 ms,
+page 25 is 6.6 ms and page 100 is 5.7 ms. And an upload between two requests
+cannot shift the window, where an offset would push row 50 down to 51 and begin
+page two by repeating it.
+
+**The cursor carries the query's whole ordering**, `created_at` *and* the
+recording id, because `recordings_owner_created_idx` orders by the first and the
+tie-break is the second; a cursor holding only a timestamp loses or repeats every
+recording created in the same instant.
+
+**It is opaque, not secret, and it is not a scope.** Ownership stays in the
+`WHERE` clause, so a cursor from somebody else's history selects a different
+slice of *your* recordings and reaches nothing of theirs. A cursor this server
+did not issue is a `VALIDATION_ERROR` rather than an empty page: answering "you
+have no more recordings" to a damaged bookmark would be the same untruth the step
+removes.
+
+On the client, what is loaded and whether more exists are two separate facts in
+`lib/history.ts`, folded by a pure function and tested without React — the
+arrangement `analysis-runner.ts` uses for polling. The screen states both and
+invents no total, because nothing counts one.
+
 ### Concurrency belongs to the database
 
 Until Step 7M both orchestrators guarded their find-or-create decision with a
@@ -765,7 +814,8 @@ category errors, and this table exists to make them visible.
 | Owner identity | `api/owner.py`, `services/owners/` | PostgreSQL | **Not authentication**: bearer keys, no password, no recovery |
 | Ownership enforcement | Every repository read, in SQL | PostgreSQL | Not frontend filtering; not a `403` |
 | Identity portability and deletion | `services/owners/`, `routes/identity.py` | PostgreSQL + browser | Not authentication; the server cannot recover a lost key |
-| Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed |
+| Recording history | `routes/recordings.py`, `services/recordings/history.py` | PostgreSQL | Statuses only, never results; `null` ≠ pending ≠ failed; a page, and it says so |
+| History paging | `services/recordings/cursor.py` | PostgreSQL | Keyset, not offset; opaque, not secret; never an owner scope |
 | Speech transcription | `services/ai/deepgram.py` behind `SpeechToTextProvider` | Provider | Not a measurement; provenance travels with it |
 | Speech metrics | `services/analysis/metrics.py` | Deterministic | Counted from the transcript, never estimated |
 | Speech feedback | `services/ai/claude.py` | Provider | Prose about numbers; never produces a number |
