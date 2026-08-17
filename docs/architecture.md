@@ -142,12 +142,12 @@ silently empty timeline. `pitch_point_count` is derived from the points
 themselves and a supplied value is discarded, so a summary can still say how
 much was measured without anyone maintaining a second copy.
 
-In SQL the summary form selects `document - 'pitch_points'` with
-`jsonb_array_length` beside it, so PostgreSQL drops the points before the row
-crosses the socket. Through the real driver: **83.8 ms and 19 151 kB peak
-allocation → 1.8 ms and 15 kB.** End to end over HTTP, `GET /audio-analysis`
-went from 116.7 ms to 8.4 ms and `GET …/feedback` from 120.2 ms to 8.6 ms;
-`/pitch` and `/key` are unchanged, because they genuinely need what they load.
+In SQL the summary form selects `document - 'pitch_points'`, so PostgreSQL drops
+the points before the row crosses the socket. Through the real driver: **83.8 ms
+and 19 151 kB peak allocation → 1.8 ms and 15 kB.** End to end over HTTP,
+`GET /audio-analysis` went from 116.7 ms to 8.4 ms and `GET …/feedback` from
+120.2 ms to 8.6 ms; `/pitch` and `/key` are unchanged, because they genuinely
+need what they load.
 
 `/notes` halved, 189.0 ms → 90.2 ms, for a different reason: it was loading its
 analysis **twice**, once for the ids in its response and once through
@@ -158,6 +158,44 @@ one record's ids with another record's notes.
 What this is *not*: a cache, a denormalisation, or a schema change. Nothing was
 migrated, nothing is stored twice, and every analysis ever written answers the
 new reads.
+
+### A big document is decompressed once per expression (10.12)
+
+The split above left one claim untested, and Step 10.12 tested it. The summary
+form originally selected `jsonb_array_length(document->'pitch_points')` beside
+`document - 'pitch_points'`, on the reasoning that the second expression read a
+document PostgreSQL had already decompressed for the first. It does not. A
+value too big to sit in the row lives in the TOAST table, and PostgreSQL fetches
+and decompresses it **once per expression that references it** — not once per
+row. Measured on the same five-minute recording:
+
+| Selected | Time | Buffers |
+| --- | --- | --- |
+| `document - 'pitch_points'` | 1.80 ms | 37 |
+| `jsonb_array_length(document->'pitch_points')` | 2.31 ms | 37 |
+| both, as 10.11 shipped them | 5.70 ms | 109 |
+
+The buffer count is the mechanism made visible: each reference reads the whole
+toasted value again. This has one consequence per site.
+
+**The summary read gets a column.** `pitch_point_count` (migration 0005) sits
+beside the document, written from the same object in the same statement as
+`status` and `feedback_status`, and backfilled once for the documents written
+before 10.11 — which carry no count of their own and were the reason the
+expression existed at all. `GET /audio-analysis` 11.9 ms → 8.8 ms. This *is* a
+schema change, and it is the narrow kind the layout already uses: a column that
+projects one value out of the authoritative document so a query need not open it.
+
+**The progress query stops multiplying.** It read eleven scalars by path out of
+`a.document`, so a 30-recording window decompressed each document eleven times.
+Projecting `document->'metrics'` inside the lateral pays once and leaves ~600
+bytes for the scalars to come off: **593 ms and 11 834 buffers → 30 ms and
+1 172**, and `GET /recordings/progress?limit=30` **535.1 ms → 39.3 ms** end to
+end, byte for byte the same response. No migration, and no metric denormalised.
+
+Both are pinned by tests that count how many times a statement reads `document`,
+because the cost is invisible in the results: a query that decompresses a
+document eleven times returns exactly what one that decompresses it once returns.
 
 ### Concurrency belongs to the database
 
@@ -800,6 +838,13 @@ recording rather than with the number of measurements in it. The query extracts
 each scalar by path. Measured on 200 owners × 50 two-minute recordings, one
 30-recording window: **125 ms and 14 KB** extracting scalars versus **676 ms and
 18 MB** reading the documents. The gap widens with recording length.
+
+**The document is reached once per row, not once per scalar.** Extracting by
+path is only half of it: until Step 10.12 every scalar was read from
+`a.document`, and each of those eleven expressions decompressed the whole
+document again. The lateral now projects `document->'metrics'` and the scalars
+come off that — **593 ms → 30 ms** for a 30-recording window of five-minute
+recordings. See [above](#a-big-document-is-decompressed-once-per-expression-1012).
 
 **SQL selects, filters and orders; the domain defines progress.** What a null
 means, which analyses are eligible, what may be said about a change — all of it
