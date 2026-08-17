@@ -785,6 +785,208 @@ def test_the_latest_summary_is_the_latest_analysis(backend: Any) -> None:
     backend(work)
 
 
+# --- Audio analyses, read as a sample of their timeline --------------------
+#
+# The third form of the read, added in Step 10.14. The pitch graph has returned
+# at most ``max_points`` points since Step 7I, and until 10.14 it built every
+# stored point in order to throw most of them away: 1 685 kB across the socket
+# and ~50 ms of parsing and validation per request, on the event loop, to return
+# 995 of 12 931 points. PostgreSQL selects the sample now, with
+# ``WITH ORDINALITY``; the double slices the tuple. These assert the two pick the
+# *same* points, because "every n-th" is only a well-defined answer if both
+# start at the same one.
+
+
+def test_a_decimated_read_takes_every_nth_stored_point(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id, pitch_points=_points(100)))
+
+        sampled = await prepared.audio.latest_decimated_for_recording(
+            stored.recording_id, max_points=10
+        )
+
+        assert sampled is not None
+        assert sampled.decimation == 10
+        assert len(sampled.points) == 10
+        # Indices 0, 10, 20 … — the first point of the recording is always in,
+        # so a graph starts where the audio does.
+        assert [point.timestamp_seconds for point in sampled.points] == [
+            round(index * 0.023, 3) for index in range(0, 100, 10)
+        ]
+
+    backend(work)
+
+
+def test_a_decimated_read_is_the_whole_timeline_sliced(backend: Any) -> None:
+    """The sample must be exactly what slicing the stored timeline would give.
+
+    This is the assertion that makes the two implementations interchangeable:
+    the double slices a tuple in Python and PostgreSQL filters on ordinality,
+    and a stride that started at a different index — or a sort that lost the
+    recording's order — would return a plausible-looking graph of the wrong
+    frames.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id, pitch_points=_points(57)))
+
+        sampled = await prepared.audio.latest_decimated_for_recording(
+            stored.recording_id, max_points=8
+        )
+        whole = await prepared.audio.latest_for_recording(stored.recording_id)
+
+        assert sampled is not None
+        assert whole is not None
+        assert sampled.analysis.audio_analysis_id == whole.audio_analysis_id
+        assert sampled.points == whole.pitch_points[:: sampled.decimation]
+        # 57 points at a stride of 8 is 8 of them: ceil(57 / 8).
+        assert sampled.decimation == 8
+        assert len(sampled.points) == 8
+
+    backend(work)
+
+
+def test_a_decimated_read_says_how_long_the_timeline_really_is(backend: Any) -> None:
+    """A sample that reported its own size as the measurement would be a lie.
+
+    The same rule the summary read follows: ``pitch_point_count`` is the stored
+    timeline, so "12 931 frames were measured, here are 995 of them" stays
+    distinguishable from "995 frames were measured".
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id, pitch_points=_points(100)))
+
+        sampled = await prepared.audio.latest_decimated_for_recording(
+            stored.recording_id, max_points=10
+        )
+
+        assert sampled is not None
+        assert sampled.analysis.pitch_point_count == 100
+        assert len(sampled.points) == 10
+
+    backend(work)
+
+
+def test_a_timeline_that_fits_is_returned_whole(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id, pitch_points=_points(7)))
+
+        sampled = await prepared.audio.latest_decimated_for_recording(
+            stored.recording_id, max_points=1000
+        )
+        whole = await prepared.audio.latest_for_recording(stored.recording_id)
+
+        assert sampled is not None
+        assert whole is not None
+        assert sampled.decimation == 1
+        assert sampled.points == whole.pitch_points
+
+    backend(work)
+
+
+def test_a_decimated_read_of_a_record_with_no_timeline_is_empty_not_missing(
+    backend: Any,
+) -> None:
+    """A pending analysis exists and has measured nothing yet.
+
+    Empty points and a live record, never ``None`` — which is reserved for "no
+    analysis of this recording exists", a different answer the route turns into
+    a 404.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(make_audio(stored.recording_id))
+
+        sampled = await prepared.audio.latest_decimated_for_recording(
+            stored.recording_id, max_points=1000
+        )
+
+        assert sampled is not None
+        assert sampled.points == ()
+        assert sampled.decimation == 1
+        assert sampled.analysis.pitch_point_count == 0
+        assert sampled.analysis.status is AudioAnalysisStatus.PENDING
+
+    backend(work)
+
+
+def test_a_decimated_read_of_an_unknown_recording_is_none(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        assert (
+            await prepared.audio.latest_decimated_for_recording(uuid.uuid4().hex, max_points=1000)
+        ) is None
+
+    backend(work)
+
+
+def test_a_decimated_read_refuses_to_return_fewer_than_one_point(backend: Any) -> None:
+    """``max_points`` is a size, and a stride derived from zero is a crash.
+
+    The route constrains it to ``1..50000`` before a service is reached, so this
+    is the guard behind that guard: a caller that bypasses HTTP validation is
+    refused here rather than dividing by zero inside SQL.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id, pitch_points=_points(4)))
+
+        for refused in (0, -1):
+            with pytest.raises(ValueError):
+                await prepared.audio.latest_decimated_for_recording(
+                    stored.recording_id, max_points=refused
+                )
+
+    backend(work)
+
+
+def test_a_decimated_read_selects_the_newest_analysis(backend: Any) -> None:
+    """The same row every other read of this recording selects.
+
+    A re-analysed recording has more than one record, and a graph drawn from the
+    older one beside a summary read from the newer would describe two different
+    measurements as though they were one.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            make_audio(
+                stored.recording_id,
+                status=AudioAnalysisStatus.FAILED,
+                error_code="INSUFFICIENT_PITCH_SIGNAL",
+            )
+        )
+        newest = await prepared.audio.create(
+            completed_audio(stored.recording_id, pitch_points=_points(9))
+        )
+
+        sampled = await prepared.audio.latest_decimated_for_recording(
+            stored.recording_id, max_points=3
+        )
+        summary = await prepared.audio.latest_summary_for_recording(stored.recording_id)
+
+        assert sampled is not None
+        assert summary is not None
+        assert sampled.analysis.audio_analysis_id == newest.audio_analysis_id
+        assert sampled.analysis.audio_analysis_id == summary.audio_analysis_id
+
+    backend(work)
+
+
 def test_summaries_are_listed_newest_first(backend: Any) -> None:
     """``_existing_for`` walks this list to decide which analysis to hand back.
 

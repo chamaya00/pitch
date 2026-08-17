@@ -932,6 +932,61 @@ def test_reading_the_note_breakdown_loads_the_analysis_once(
     assert loads == [1]
 
 
+def test_the_pitch_graph_reads_a_sample_and_never_the_whole_timeline(
+    client: TestClient, doubles: Doubles, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read this route makes must be the size of its response, not of the store.
+
+    ``max_points`` has capped this response since Step 7I, and the route used to
+    honour it by materialising every stored point and slicing the list. At the
+    longest recording this product accepts that is 12 931 points built to return
+    995 — 1 685 kB across the socket and ~50 ms of parsing and validation, on the
+    event loop, where it stalls every other request in the process. Step 10.14
+    measured that: while one client held a dashboard open, the poll the browser
+    makes while a measurement runs went from 14.2 ms to 301.0 ms.
+
+    So the sample is selected in the store, and this asserts the route asks for
+    one. Counting is the only way to see it — a graph drawn from a sliced
+    timeline and a graph drawn from a sampled read return the same bytes.
+    """
+    recording = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording))
+
+    whole_loads = _count_timeline_loads(doubles, monkeypatch)
+    sampled_loads = [0]
+    decimated = doubles.audio_analyses.latest_decimated_for_recording
+
+    async def counted(recording_id: str, *, max_points: int):  # type: ignore[no-untyped-def]
+        sampled_loads[0] += 1
+        return await decimated(recording_id, max_points=max_points)
+
+    monkeypatch.setattr(doubles.audio_analyses, "latest_decimated_for_recording", counted)
+
+    assert client.get(pitch_url(recording), params={"max_points": 10}).status_code == 200
+
+    assert whole_loads == [0]
+    assert sampled_loads == [1]
+
+
+def test_the_graph_is_the_same_frames_it_always_was(client: TestClient, tmp_path: Path) -> None:
+    """Where the decimation happens must not change which points come back.
+
+    The store selects the sample now instead of Python slicing a list. That is a
+    performance change and nothing else: the response must be point for point
+    what asking for every point and taking every n-th of them gives.
+    """
+    recording = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording))
+
+    everything = client.get(pitch_url(recording), params={"max_points": 50000}).json()
+    sampled = client.get(pitch_url(recording), params={"max_points": 5}).json()
+
+    stride = sampled["decimation"]
+    assert stride > 1, "the fixture must be long enough to be worth decimating"
+    assert sampled["total_points"] == everything["total_points"]
+    assert sampled["points"] == everything["points"][::stride]
+
+
 def test_the_summary_still_says_how_many_points_were_measured(
     client: TestClient, recording_id: str
 ) -> None:

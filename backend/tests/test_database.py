@@ -39,6 +39,7 @@ from app.services.audio_analysis.models import (
     new_audio_analysis_id,
 )
 from app.services.audio_analysis.postgres_repository import (
+    _DECIMATED_SQL,
     _SUMMARY_COLUMNS,
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
@@ -912,6 +913,25 @@ def test_the_summary_read_touches_the_document_once() -> None:
     assert reads == 1, f"the summary read decompresses the document {reads} times"
     assert "pitch_point_count" in _SUMMARY_COLUMNS, "the count must still be selected"
     assert "jsonb_array_length" not in _SUMMARY_COLUMNS
+
+
+def test_the_decimated_read_touches_the_document_twice_and_no_more() -> None:
+    """Two expressions, and both of them earn their decompression.
+
+    The strip produces the record without its timeline; the expansion produces
+    the sample. Neither can be derived from the other, so this read pays for two
+    detoasts where the summary read pays for one — and a third would be the 10.12
+    regression again, in a new statement.
+
+    The stride is asserted with them because it is what makes the read a sample
+    rather than a slice: it is computed from the stored count in the same
+    statement, so nothing here needs a second read to find out how long the
+    timeline is.
+    """
+    reads = _document_reads(_DECIMATED_SQL)
+    assert reads == 2, f"the decimated read decompresses the document {reads} times"
+    assert "WITH ORDINALITY" in _DECIMATED_SQL
+    assert "pitch_point_count::numeric" in _DECIMATED_SQL, "the stride comes from the column"
 
 
 def test_the_progress_query_reaches_the_metrics_once_per_row() -> None:
