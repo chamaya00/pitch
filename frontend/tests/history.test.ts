@@ -12,12 +12,15 @@ import { test } from "node:test";
 
 import {
   NOT_RUN,
+  appendPage,
   audioLabel,
+  firstPage,
   formatWhen,
   hasBeenAnalysed,
+  historyAnnouncement,
   speechLabel,
 } from "../lib/history.ts";
-import type { RecordingHistoryItem } from "../types/api.ts";
+import type { RecordingHistory, RecordingHistoryItem } from "../types/api.ts";
 
 function item(overrides: Partial<RecordingHistoryItem> = {}): RecordingHistoryItem {
   return {
@@ -111,4 +114,82 @@ test("a timestamp renders as something, and not as the raw string", () => {
 test("an unparseable date says so rather than rendering NaN", () => {
   assert.equal(formatWhen("not a date"), "Unknown date");
   assert.equal(formatWhen(""), "Unknown date");
+});
+
+
+// --- Paging (10.13) --------------------------------------------------------
+//
+// What this replaced: the list rendered one page and called it "everything you
+// have uploaded from this browser". With 137 recordings it showed 50 and
+// announced "50 recordings", and nothing on screen or in the response could
+// have said otherwise.
+
+function page(
+  ids: string[],
+  nextCursor: string | null,
+): RecordingHistory {
+  const items = ids.map((id) =>
+    item({ recording: { ...item().recording, recording_id: id.padEnd(32, "0") } }),
+  );
+  return { items, count: items.length, limit: 2, next_cursor: nextCursor };
+}
+
+test("a first page carries the server's answer about what follows", () => {
+  assert.equal(firstPage(page(["a", "b"], "cursor-1")).nextCursor, "cursor-1");
+  assert.equal(firstPage(page(["a", "b"], null)).nextCursor, null);
+});
+
+test("a full page is not treated as evidence that more exists", () => {
+  // Two items at a limit of two, and the server says that is all there is.
+  const loaded = firstPage(page(["a", "b"], null));
+
+  assert.equal(loaded.nextCursor, null);
+  assert.equal(historyAnnouncement(loaded), "2 recordings.");
+});
+
+test("appending a page keeps the order and advances the cursor", () => {
+  const loaded = appendPage(firstPage(page(["a", "b"], "c1")), page(["c", "d"], "c2"));
+
+  assert.deepEqual(
+    loaded.items.map((entry) => entry.recording.recording_id[0]),
+    ["a", "b", "c", "d"],
+  );
+  assert.equal(loaded.nextCursor, "c2");
+});
+
+test("the same page appended twice does not duplicate a recording", () => {
+  const first = firstPage(page(["a", "b"], "c1"));
+  const once = appendPage(first, page(["c", "d"], "c2"));
+  const twice = appendPage(once, page(["c", "d"], "c2"));
+
+  assert.equal(twice.items.length, 4);
+  const ids = twice.items.map((entry) => entry.recording.recording_id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("the last page ends the list", () => {
+  const loaded = appendPage(firstPage(page(["a", "b"], "c1")), page(["c"], null));
+
+  assert.equal(loaded.nextCursor, null);
+  assert.equal(historyAnnouncement(loaded), "3 recordings.");
+});
+
+test("a partial list says it is partial, and never states a total it does not know", () => {
+  const loaded = firstPage(page(["a", "b"], "c1"));
+
+  assert.equal(historyAnnouncement(loaded), "2 recordings shown. More can be loaded.");
+  // No invented total: the server was never asked how many there are.
+  assert.doesNotMatch(historyAnnouncement(loaded), /of \d+/);
+});
+
+test("an empty history reads as empty, not as a failure", () => {
+  assert.equal(historyAnnouncement(firstPage(page([], null))), "You have no recordings yet.");
+});
+
+test("one recording is singular", () => {
+  assert.equal(historyAnnouncement(firstPage(page(["a"], null))), "1 recording.");
+  assert.equal(
+    historyAnnouncement(firstPage(page(["a"], "c1"))),
+    "1 recording shown. More can be loaded.",
+  );
 });

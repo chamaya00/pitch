@@ -1,13 +1,77 @@
-import type { RecordingHistoryItem } from "@/types/api";
+import type { RecordingHistory, RecordingHistoryItem } from "@/types/api";
 
 /**
- * Turning history statuses into words.
+ * Turning history statuses into words, and stitching pages of them together.
  *
- * Kept out of the components and free of React so the one rule that matters
- * here can be tested directly: **`null` is not `pending` and not a failure.**
- * A recording nobody has analysed reads "Not analysed", which is a statement
- * about what was asked for, not about how it went.
+ * Kept out of the components and free of React so the two rules that matter
+ * here can be tested directly:
+ *
+ * **`null` is not `pending` and not a failure.** A recording nobody has
+ * analysed reads "Not analysed", which is a statement about what was asked for,
+ * not about how it went.
+ *
+ * **A page is not the history.** Until Step 10.13 the list rendered one page and
+ * called it "everything you have uploaded from this browser" — with 137
+ * recordings it showed 50 and said nothing about the other 87. What is loaded
+ * and whether more exists are now two separate facts, and the screen states
+ * both.
  */
+
+/**
+ * Every page loaded so far, and where the next one starts.
+ *
+ * `nextCursor === null` means the list on screen is the whole history. That is
+ * the server's answer, carried through unchanged — it is never inferred from
+ * how many items came back.
+ */
+export interface LoadedHistory {
+  readonly items: readonly RecordingHistoryItem[];
+  readonly nextCursor: string | null;
+}
+
+export function firstPage(page: RecordingHistory): LoadedHistory {
+  return { items: page.items, nextCursor: page.next_cursor };
+}
+
+/**
+ * Add a page to what is already on screen.
+ *
+ * Recordings already loaded are dropped rather than repeated. Keyset paging
+ * cannot serve the same row twice, so this is not a workaround for the server;
+ * it is protection against *this* code asking for the same page twice — two
+ * clicks on "Show older recordings" before the first answer arrives — which
+ * would otherwise render duplicate React keys and a list that lies about how
+ * much there is.
+ */
+export function appendPage(
+  loaded: LoadedHistory,
+  page: RecordingHistory,
+): LoadedHistory {
+  const known = new Set(loaded.items.map((item) => item.recording.recording_id));
+  const fresh = page.items.filter(
+    (item) => !known.has(item.recording.recording_id),
+  );
+  return {
+    items: [...loaded.items, ...fresh],
+    nextCursor: page.next_cursor,
+  };
+}
+
+/**
+ * What to tell a screen reader about the list.
+ *
+ * Deliberately two clauses when the list is partial. "50 recordings" is what
+ * this used to announce with 137 in the account, and a count that is really a
+ * page size is the same untruth as a measurement that was never taken.
+ */
+export function historyAnnouncement(loaded: LoadedHistory): string {
+  const count = loaded.items.length;
+  if (count === 0) return "You have no recordings yet.";
+  const noun = count === 1 ? "recording" : "recordings";
+  return loaded.nextCursor === null
+    ? `${count} ${noun}.`
+    : `${count} ${noun} shown. More can be loaded.`;
+}
 
 /** What a status chip says and how it reads. */
 export interface StatusLabel {
