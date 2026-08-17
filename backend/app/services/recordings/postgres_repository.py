@@ -32,10 +32,13 @@ from app.services.progress.sources import (
     ProgressRow,
     row_from_record,
 )
+from app.services.recordings.cursor import HistoryCursor
 from app.services.recordings.history import (
+    HISTORY_AFTER_SQL,
     HISTORY_SQL,
-    RecordingHistoryEntry,
-    entry_from_row,
+    RecordingHistoryPage,
+    cursor_parameters,
+    page_of,
 )
 from app.services.recordings.models import Recording
 
@@ -63,8 +66,15 @@ class OwnedRecordingRepository(Protocol):
     async def list_for_owner(self, owner_id: uuid.UUID, limit: int) -> list[Recording]:
         """An owner's recordings, newest first."""
 
-    async def list_history(self, owner_id: uuid.UUID, limit: int) -> list[RecordingHistoryEntry]:
-        """An owner's recordings with each one's analysis state, newest first."""
+    async def list_history(
+        self, owner_id: uuid.UUID, limit: int, cursor: HistoryCursor | None = None
+    ) -> RecordingHistoryPage:
+        """One page of an owner's recordings, newest first, with analysis state.
+
+        ``cursor`` resumes after the row a previous page ended on. The returned
+        page carries the next cursor, or ``None`` when it is genuinely the last
+        — see ``history.py`` for why that is not inferred from the count.
+        """
 
     async def comparison_sources(
         self, owner_id: uuid.UUID, recording_ids: list[str]
@@ -150,10 +160,15 @@ class PostgresRecordingRepository:
             )
         return [_to_recording(row) for row in rows]
 
-    async def list_history(self, owner_id: uuid.UUID, limit: int) -> list[RecordingHistoryEntry]:
+    async def list_history(
+        self, owner_id: uuid.UUID, limit: int, cursor: HistoryCursor | None = None
+    ) -> RecordingHistoryPage:
+        statement = HISTORY_SQL if cursor is None else HISTORY_AFTER_SQL
         async with self._db.connection() as connection:
-            rows = await fetch_all(connection, HISTORY_SQL, (owner_id, limit))
-        return [entry_from_row(row) for row in rows]
+            rows = await fetch_all(
+                connection, statement, cursor_parameters(owner_id, cursor, limit)
+            )
+        return page_of(rows, limit=limit)
 
     async def progress_rows(self, owner_id: uuid.UUID, limit: int) -> list[ProgressRow]:
         async with self._db.connection() as connection:
