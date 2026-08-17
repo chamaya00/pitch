@@ -26,7 +26,6 @@ from app.schemas.analysis import ProvenanceResponse
 from app.services.audio_analysis.models import (
     IN_TUNE_CENTS,
     AnalysisSettings,
-    AudioAnalysis,
     AudioAnalysisSummary,
     AudioFeedback,
     AudioMetrics,
@@ -572,8 +571,15 @@ class PitchTimelineResponse(BaseModel):
 
     @classmethod
     def from_domain(
-        cls, analysis: AudioAnalysis, *, points: list[PitchPoint], decimation: int
+        cls, analysis: AudioAnalysisSummary, *, points: list[PitchPoint], decimation: int
     ) -> "PitchTimelineResponse":
+        """Build the response from a record and the points it is returning.
+
+        Takes a summary rather than an :class:`AudioAnalysis`: the points come
+        in beside it, sampled from the stored timeline, and ``total_points``
+        comes from the count the record carries — never from ``len(points)``,
+        which is the size of the sample and not of the measurement.
+        """
         return cls(
             recording_id=analysis.recording_id,
             audio_analysis_id=analysis.audio_analysis_id,

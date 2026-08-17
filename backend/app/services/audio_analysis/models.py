@@ -618,3 +618,45 @@ class AudioAnalysis(AudioAnalysisSummary):
             points = data.get("pitch_points") or ()
             return {**data, "pitch_point_count": len(points)}
         return data
+
+
+class DecimatedTimeline(BaseModel):
+    """Every ``decimation``-th point of a stored timeline, and the record it came from.
+
+    The third form of an audio-analysis read, and the reason it is a separate
+    type rather than an :class:`AudioAnalysis` with fewer points: these points
+    are a *sample* of the stored timeline, so a record carrying them must never
+    be written back. :class:`AudioAnalysisSummary` cannot be handed to
+    ``update`` — that is the rule 10.11 established — and a summary is what this
+    carries, so the same rule holds here without a second argument.
+
+    ``analysis.pitch_point_count`` is the length of the **stored** timeline, not
+    of ``points``. A reader can therefore always tell "12 931 frames were
+    measured, you are looking at 995 of them" from "995 frames were measured",
+    which is the distinction the count exists to keep.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    analysis: AudioAnalysisSummary
+    #: Points at stored indices ``0, decimation, 2·decimation, …``, in order.
+    points: tuple[PitchPoint, ...] = ()
+    #: 1 when nothing was dropped; ``n`` when every ``n``-th point was taken.
+    decimation: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def _check_the_sample_matches_the_stride(self) -> Self:
+        """The number of points is a consequence of the count and the stride.
+
+        Taking every ``n``-th of ``c`` points yields ``ceil(c / n)`` of them, so
+        a query that dropped or repeated one is arithmetic that no longer adds
+        up rather than a response that merely looks plausible. It is checked
+        here, once, instead of in each of the two repositories that build one.
+        """
+        expected = -(-self.analysis.pitch_point_count // self.decimation)
+        if len(self.points) != expected:
+            raise ValueError(
+                f"a stride of {self.decimation} over {self.analysis.pitch_point_count} points "
+                f"is {expected} points, not {len(self.points)}"
+            )
+        return self

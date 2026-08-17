@@ -38,6 +38,7 @@ from app.services.audio_analysis.models import (
     AudioAnalysisStatus,
     AudioAnalysisSummary,
     AudioFeedbackStatus,
+    DecimatedTimeline,
 )
 from app.services.audio_analysis.postgres_repository import (
     ActiveAudioAnalysisExistsError,
@@ -572,6 +573,32 @@ class InMemoryAudioAnalysisRepository:
         for analysis in await self.list_summaries_for_recording(recording_id):
             return analysis
         return None
+
+    async def latest_decimated_for_recording(
+        self, recording_id: str, *, max_points: int
+    ) -> DecimatedTimeline | None:
+        """Every ``n``-th point, where the SQL selects them with ``WITH ORDINALITY``.
+
+        The stride is derived the same way and the slice starts at the same
+        index, so the double and the database return the same points for the
+        same stored timeline — which the contract suite asserts rather than
+        assumes.
+        """
+        if max_points < 1:
+            raise ValueError("max_points must be at least 1")
+        # Deliberately not via ``latest_for_recording``: in PostgreSQL this is
+        # its own statement, and the suites that count which read a route asked
+        # for patch that method. Going through it here would report the graph as
+        # loading a whole timeline when the only thing loading one is the double.
+        stored = next(iter(await self.list_for_recording(recording_id)), None)
+        if stored is None:
+            return None
+        decimation = max(1, -(-len(stored.pitch_points) // max_points))
+        return DecimatedTimeline(
+            analysis=_summary_of(stored),
+            points=stored.pitch_points[::decimation],
+            decimation=decimation,
+        )
 
     async def list_for_recording(self, recording_id: str) -> list[AudioAnalysis]:
         matches = [
