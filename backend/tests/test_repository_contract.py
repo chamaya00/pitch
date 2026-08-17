@@ -63,6 +63,7 @@ from app.services.owners.credentials import (
 )
 from app.services.owners.models import Owner, new_owner
 from app.services.owners.repository import PostgresOwnerRepository
+from app.services.recordings.cursor import decode_cursor
 from app.services.recordings.models import Recording
 from app.services.recordings.postgres_repository import PostgresRecordingRepository
 from tests.doubles import (
@@ -313,6 +314,157 @@ def test_history_respects_its_limit(backend: Any) -> None:
     backend(work)
 
 
+# --- Paging through a history ----------------------------------------------
+#
+# Step 10.13's whole subject: a page that is not the whole history has to say
+# so, and the rest of it has to be reachable. The double and the SQL are held to
+# the same behaviour here, because a double that inferred "more" from
+# `count == limit` — or that paged with an offset — would let the browser depend
+# on something the database does not do.
+
+
+def _dated(offset_minutes: int) -> Recording:
+    """A recording created a fixed number of minutes after a shared epoch."""
+    return make_recording(
+        created_at=datetime(2026, 8, 17, 9, 0, tzinfo=UTC) + timedelta(minutes=offset_minutes)
+    )
+
+
+async def _walk(prepared: Backend, owner_id: uuid.UUID, page_size: int) -> list[str]:
+    """Every recording id an owner can reach, by following the cursors."""
+    seen: list[str] = []
+    cursor = None
+    for _ in range(50):  # a bound, so a cursor that never advances fails loudly
+        page = await prepared.recordings.list_history(owner_id, page_size, cursor)
+        seen.extend(entry.recording.recording_id for entry in page.entries)
+        if page.next_cursor is None:
+            return seen
+        cursor = decode_cursor(page.next_cursor)
+    raise AssertionError("paging did not terminate")
+
+
+def test_a_full_history_is_reachable_one_page_at_a_time(backend: Any) -> None:
+    """Seven recordings, three at a time: all seven, in order, exactly once."""
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        created = [
+            await prepared.recordings.create(_dated(index), owner.owner_id) for index in range(7)
+        ]
+        newest_first = [record.recording_id for record in reversed(created)]
+
+        assert await _walk(prepared, owner.owner_id, 3) == newest_first
+
+    backend(work)
+
+
+def test_the_last_page_says_it_is_the_last(backend: Any) -> None:
+    """`next_cursor` is `None` from evidence, not from arithmetic on the count.
+
+    The case that catches a guess: exactly as many recordings as fit on a page.
+    An implementation that reports "there is more" whenever `count == limit`
+    offers a next page here, and that page is empty.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        for index in range(3):
+            await prepared.recordings.create(_dated(index), owner.owner_id)
+
+        exact = await prepared.recordings.list_history(owner.owner_id, 3)
+        assert len(exact.entries) == 3
+        assert exact.next_cursor is None, "a full page is not evidence of another one"
+
+        short = await prepared.recordings.list_history(owner.owner_id, 10)
+        assert len(short.entries) == 3
+        assert short.next_cursor is None
+
+    backend(work)
+
+
+def test_recordings_created_in_the_same_instant_still_page(backend: Any) -> None:
+    """The tie-break is why the cursor carries an id and not just a timestamp.
+
+    Five recordings sharing one `created_at`: paged on the timestamp alone, the
+    second page would either repeat all five or skip all five.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        for _ in range(5):
+            await prepared.recordings.create(_dated(0), owner.owner_id)
+
+        walked = await _walk(prepared, owner.owner_id, 2)
+
+        assert len(walked) == 5, "a shared timestamp lost or repeated rows"
+        assert len(set(walked)) == 5
+
+    backend(work)
+
+
+def test_a_recording_uploaded_between_pages_does_not_shift_the_window(backend: Any) -> None:
+    """Why this is keyset paging and not `OFFSET`.
+
+    With an offset, a new newest recording pushes everything down one, and the
+    second page begins by repeating the row the first page ended on.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        for index in range(6):
+            await prepared.recordings.create(_dated(index), owner.owner_id)
+
+        first = await prepared.recordings.list_history(owner.owner_id, 3)
+        assert first.next_cursor is not None
+
+        # Somebody uploads while the reader is looking at page one.
+        await prepared.recordings.create(_dated(99), owner.owner_id)
+
+        second = await prepared.recordings.list_history(
+            owner.owner_id, 3, decode_cursor(first.next_cursor)
+        )
+
+        page_one = {entry.recording.recording_id for entry in first.entries}
+        page_two = {entry.recording.recording_id for entry in second.entries}
+        assert page_one.isdisjoint(page_two), "the window shifted under the reader"
+        assert len(page_two) == 3
+
+    backend(work)
+
+
+def test_a_cursor_cannot_reach_another_owners_recordings(backend: Any) -> None:
+    """A cursor is a position, not a capability.
+
+    Ownership stays in the `WHERE` clause, so somebody else's cursor selects a
+    slice of *your* recordings — never theirs.
+    """
+
+    async def work(prepared: Backend) -> None:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        for index in range(4):
+            await prepared.recordings.create(_dated(index), mine.owner_id)
+        for index in range(4):
+            await prepared.recordings.create(_dated(index), theirs.owner_id)
+
+        their_page = await prepared.recordings.list_history(theirs.owner_id, 2)
+        assert their_page.next_cursor is not None
+
+        # My history, resumed from their bookmark.
+        mine_resumed = await prepared.recordings.list_history(
+            mine.owner_id, 10, decode_cursor(their_page.next_cursor)
+        )
+
+        theirs_all = {
+            entry.recording.recording_id
+            for entry in (await prepared.recordings.list_history(theirs.owner_id, 10)).entries
+        }
+        returned = {entry.recording.recording_id for entry in mine_resumed.entries}
+        assert returned.isdisjoint(theirs_all)
+
+    backend(work)
+
+
 def test_history_reports_analysis_state_without_results(backend: Any) -> None:
     async def work(prepared: Backend) -> None:
         owner = await prepared.owner()
@@ -322,7 +474,7 @@ def test_history_reports_analysis_state_without_results(backend: Any) -> None:
 
         entries = {
             entry.recording.recording_id: entry
-            for entry in await prepared.recordings.list_history(owner.owner_id, 10)
+            for entry in (await prepared.recordings.list_history(owner.owner_id, 10)).entries
         }
 
         # A recording nobody has analysed reports null, not "pending".
@@ -340,7 +492,9 @@ def test_history_never_includes_another_owners_recording(backend: Any) -> None:
         theirs = await prepared.owner()
         await prepared.recordings.create(make_recording(), theirs.owner_id)
 
-        assert await prepared.recordings.list_history(mine.owner_id, 10) == []
+        page = await prepared.recordings.list_history(mine.owner_id, 10)
+        assert page.entries == []
+        assert page.next_cursor is None
 
     backend(work)
 

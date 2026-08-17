@@ -294,6 +294,106 @@ def test_an_out_of_range_limit_is_refused(client: TestClient, bad: int) -> None:
     assert response.json()["error_code"] == "VALIDATION_ERROR"
 
 
+# --- Paging (10.13) --------------------------------------------------------
+#
+# What this endpoint used to do, measured before it was changed: an owner with
+# 137 recordings was sent 50 and given no field that could say the other 87
+# existed, and beyond a `limit` of 200 they were unreachable at any URL.
+
+
+def test_a_truncated_history_says_it_is_truncated(client: TestClient, tmp_path: Path) -> None:
+    for index in range(3):
+        upload(client, tmp_path, f"take-{index}.wav")
+
+    body = client.get(RECORDINGS_URL, params={"limit": 2}).json()
+
+    assert body["count"] == 2
+    assert body["next_cursor"] is not None, "a truncated page must say so"
+
+
+def test_a_complete_history_offers_no_next_page(client: TestClient, tmp_path: Path) -> None:
+    """Including the case that catches a guess: exactly a page's worth."""
+    for index in range(2):
+        upload(client, tmp_path, f"take-{index}.wav")
+
+    exact = client.get(RECORDINGS_URL, params={"limit": 2}).json()
+    roomy = client.get(RECORDINGS_URL, params={"limit": 50}).json()
+
+    assert exact["count"] == 2
+    assert exact["next_cursor"] is None
+    assert roomy["next_cursor"] is None
+
+
+def test_every_recording_is_reachable_by_following_the_cursor(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """The defect this step exists for: recordings that no URL could return."""
+    uploaded = [upload(client, tmp_path, f"take-{index}.wav") for index in range(7)]
+
+    seen: list[str] = []
+    params: dict[str, Any] = {"limit": 2}
+    for _ in range(10):
+        body = client.get(RECORDINGS_URL, params=params).json()
+        seen.extend(item["recording"]["recording_id"] for item in body["items"])
+        if body["next_cursor"] is None:
+            break
+        params = {"limit": 2, "cursor": body["next_cursor"]}
+
+    assert sorted(seen) == sorted(uploaded)
+    assert len(seen) == len(set(seen)), "a recording was returned on two pages"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-a-cursor",  # decodes to nothing meaningful
+        "YWJj",  # base64 of "abc": no separator
+        "MjAyNi0wMS0wMVQwMDowMDowMFowMHwx",  # a timestamp and a bad id
+    ],
+)
+def test_a_cursor_this_server_did_not_issue_is_refused(client: TestClient, bad: str) -> None:
+    """Never "you have no more recordings" — that is the untruth being removed."""
+    response = client.get(RECORDINGS_URL, params={"limit": 2, "cursor": bad})
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
+def test_a_cursor_outside_the_allowed_shape_never_reaches_a_decoder(client: TestClient) -> None:
+    """Refused by the route's pattern, before anything tries to interpret it."""
+    response = client.get(RECORDINGS_URL, params={"cursor": "../../etc/passwd"})
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
+def test_another_owners_cursor_reads_only_your_own_recordings(
+    client: TestClient, app_and_doubles: tuple[Any, Doubles], tmp_path: Path
+) -> None:
+    """A cursor is a position in a result set that is already scoped to you."""
+    _, doubles = app_and_doubles
+    mine = [upload(client, tmp_path, f"mine-{index}.wav") for index in range(3)]
+
+    stranger, token = new_owner()
+    anyio.run(lambda: doubles.owners.create(stranger, token))
+    theirs = client.get(RECORDINGS_URL, params={"limit": 1}, headers={OWNER_HEADER: token}).json()
+    assert theirs["items"] == []
+    assert theirs["next_cursor"] is None
+
+    # Their history is empty, so build a cursor from one of *my* pages and
+    # present it as them: it must still return nothing of mine.
+    page = client.get(RECORDINGS_URL, params={"limit": 1}).json()
+    borrowed = client.get(
+        RECORDINGS_URL,
+        params={"limit": 50, "cursor": page["next_cursor"]},
+        headers={OWNER_HEADER: token},
+    ).json()
+
+    assert borrowed["items"] == []
+    returned = {item["recording"]["recording_id"] for item in borrowed["items"]}
+    assert returned.isdisjoint(mine)
+
+
 def test_history_never_leaks_internals(client: TestClient, tmp_path: Path) -> None:
     upload(client, tmp_path)
 
