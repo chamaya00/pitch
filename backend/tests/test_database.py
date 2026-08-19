@@ -42,10 +42,12 @@ from app.services.audio_analysis.postgres_repository import (
     _DECIMATED_SQL,
     _FIELDS_SQL,
     _SUMMARY_COLUMNS,
+    PITCH_FIELD_AGGREGATES,
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
     PostgresAudioAnalysisRepository,
 )
+from app.services.comparison.sources import COMPARISON_SOURCES_SQL
 from app.services.owners.credential_repository import PostgresCredentialRepository
 from app.services.owners.credentials import (
     CredentialExistsError,
@@ -958,6 +960,42 @@ def test_the_fields_read_touches_the_document_twice_and_no_more() -> None:
     # as one.
     assert "::int ORDER BY" in _FIELDS_SQL
     assert "::float8 ORDER BY" in _FIELDS_SQL
+
+
+def test_the_comparison_read_touches_each_document_twice_and_no_more() -> None:
+    """The 10.12 rule in the statement that reads two recordings at once.
+
+    Same two expressions as the fields read — the strip and the expansion — but
+    a comparison pays for them twice, once per side, so a third reference costs
+    two extra full detoasts rather than one. Until 10.16 this statement selected
+    ``a.document`` whole and the API process built 25 862 ``PitchPoint`` models
+    from it, which is what made this the slowest read in the product.
+
+    The recording's own document is read once and is not the same kind of thing:
+    it is metadata, a few hundred bytes, and it is never toasted.
+    """
+    analysis_reads = len(re.findall(r"\banalysis\.document\b", COMPARISON_SOURCES_SQL))
+    assert analysis_reads == 2, f"the comparison decompresses each analysis {analysis_reads} times"
+    assert "analysis.document - 'pitch_points'" in COMPARISON_SOURCES_SQL, "the strip"
+    assert _document_reads(COMPARISON_SOURCES_SQL) == analysis_reads + 1, "and the recording's"
+    assert COMPARISON_SOURCES_SQL.count("jsonb_array_elements") == 1, "one walk, not one per field"
+    assert "pitch_point_count" in COMPARISON_SOURCES_SQL, "the count comes from the column"
+    assert "jsonb_array_length" not in COMPARISON_SOURCES_SQL
+
+
+def test_both_field_projections_are_the_same_aggregates() -> None:
+    """One definition of how a stored timeline becomes the two arrays a fold reads.
+
+    ``/notes`` projects them for one recording and the comparison for two. Were
+    they written twice, the copies could order their aggregates differently —
+    and a breakdown built from ``cents`` belonging to other notes looks entirely
+    reasonable, so nothing downstream would catch it. They are one constant, and
+    this is the assertion that they stay one.
+    """
+    for statement in (_FIELDS_SQL, COMPARISON_SOURCES_SQL):
+        assert PITCH_FIELD_AGGREGATES in statement
+        assert statement.count("array_agg") == 2, "both fields, and only those two"
+        assert statement.count("ORDER BY frame.ordinality") == 2, "both in the same order"
 
 
 def test_the_progress_query_reaches_the_metrics_once_per_row() -> None:
