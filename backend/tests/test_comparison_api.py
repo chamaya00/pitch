@@ -349,6 +349,38 @@ def test_note_breakdowns_are_aligned_through_the_service(doubles: Doubles) -> No
     assert result.notes[0].right is None
 
 
+def test_a_side_breaks_down_exactly_as_the_single_recording_read_does(
+    client: TestClient, doubles: Doubles
+) -> None:
+    """One note aggregation in this system, now reached by two different reads.
+
+    ``GET …/audio-analysis/notes`` reads one recording's fields and the
+    comparison reads two, and since 10.16 those are separate statements. The
+    breakdown a client sees must not depend on which of them asked — so the two
+    are compared field by field here, over a timeline whose notes and deviations
+    both vary, rather than trusted to agree because they call the same function.
+    """
+    timeline = points((0.1, 69, "A4"), (0.2, 60, "C4"), (0.3, 69, "A4"), (0.4, 64, "E4"))
+    left = seed(doubles, doubles.owner.owner_id, timeline=timeline)
+    right = seed(doubles, doubles.owner.owner_id)
+
+    compared = client.get(COMPARE_URL, params={"left_id": left, "right_id": right}).json()
+    directly = client.get(f"{RECORDINGS_URL}/{left}/audio-analysis/notes").json()
+
+    assert compared["comparable"] is True, compared
+    breakdown = {row["midi_note"]: row["left"] for row in compared["notes"] if row["left"]}
+    single = {row["midi_note"]: row for row in directly["notes"]}
+
+    assert set(breakdown) == set(single) == {60, 64, 69}
+    for note, side in breakdown.items():
+        # A subset because the two responses carry the note's identity in
+        # different places — the comparison row names the note once, above the
+        # two sides. Every measurement the comparison reports about it has to be
+        # the measurement the single read reports.
+        assert side.items() <= single[note].items(), f"the two reads disagree about {note}"
+    assert single[69]["frame_count"] == 2, "the note sung twice is folded, not listed twice"
+
+
 def test_the_comparison_is_deterministic_through_the_service(doubles: Doubles) -> None:
     owner = doubles.owner.owner_id
     left = seed(doubles, owner)

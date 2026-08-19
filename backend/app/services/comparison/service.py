@@ -14,8 +14,8 @@ all, so there is no half-comparison for a client to render as if it were whole.
 
 Nothing here computes a measurement. The note breakdown is built by
 ``audio_analysis/notes.py``, the same function the single-recording endpoint
-uses, from the same stored timeline. There is one note aggregation in this
-system.
+uses, over the same two fields of the same stored timeline. There is one note
+aggregation in this system.
 """
 
 import uuid
@@ -23,11 +23,10 @@ import uuid
 from app.core.errors import ApiError, ErrorCode
 from app.core.logging import get_logger
 from app.services.audio_analysis.models import (
-    AudioAnalysis,
     AudioAnalysisStatus,
+    AudioAnalysisSummary,
     AudioMetrics,
     NoteSummary,
-    PitchFields,
 )
 from app.services.audio_analysis.notes import frame_duration_seconds, summarise_notes
 from app.services.comparison.compare import compare_metrics, compare_notes, detect_caveats
@@ -108,23 +107,22 @@ class ComparisonService:
 def _metrics_of(source: ComparisonSource | None) -> AudioMetrics | None:
     if source is None or source.audio_analysis is None:
         return None
-    return source.audio_analysis.metrics
+    return source.audio_analysis.analysis.metrics
 
 
 def _notes_of(source: ComparisonSource) -> tuple[NoteSummary, ...]:
-    """The stored timeline aggregated by note, via the one function that does it."""
-    analysis = source.audio_analysis
-    if analysis is None or analysis.metrics is None:
+    """The stored timeline aggregated by note, via the one function that does it.
+
+    The fields arrive as the two arrays the fold reads, projected by the same
+    statement that loaded the metrics beside them (Step 10.16). Nothing here
+    builds a frame, and nothing here can ask for one.
+    """
+    timeline = source.audio_analysis
+    if timeline is None or timeline.analysis.metrics is None:
         return ()
-    settings = analysis.metrics.settings
+    settings = timeline.analysis.metrics.settings
     return summarise_notes(
-        # This side already holds the whole record: a comparison reads two
-        # documents for their metrics as well as their timelines, in one
-        # statement, and takes the fields out of frames it has rather than
-        # asking for them again. What that read costs is measured in
-        # ``docs/architecture.md``; Step 10.15 changed the shape of this call
-        # and not the read behind it.
-        PitchFields.of_points(analysis.pitch_points),
+        timeline.fields,
         frame_seconds=frame_duration_seconds(settings.hop_length_samples, settings.sample_rate_hz),
     )
 
@@ -149,9 +147,10 @@ def _side(recording_id: str, source: ComparisonSource | None) -> ComparisonSide:
         "audio_format": recording.audio_format.value,
     }
 
-    analysis = source.audio_analysis
-    if analysis is None:
+    timeline = source.audio_analysis
+    if timeline is None:
         return ComparisonSide(**identity, status=SideStatus.ANALYSIS_MISSING)
+    analysis = timeline.analysis
 
     if analysis.status is AudioAnalysisStatus.FAILED:
         return ComparisonSide(
@@ -174,7 +173,7 @@ def _side(recording_id: str, source: ComparisonSource | None) -> ComparisonSide:
     )
 
 
-def _failure_status(analysis: AudioAnalysis) -> SideStatus:
+def _failure_status(analysis: AudioAnalysisSummary) -> SideStatus:
     """Separate "no reliable pitch" from every other failure.
 
     A whisper, a noisy room or an instrumental recording is a normal outcome and

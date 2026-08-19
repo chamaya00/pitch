@@ -51,6 +51,7 @@ from app.services.audio_analysis.models import (
     PitchFields,
     new_audio_analysis_id,
 )
+from app.services.audio_analysis.pitch import note_name_for_midi
 from app.services.audio_analysis.postgres_repository import (
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
@@ -212,6 +213,26 @@ def _points(count: int) -> list[dict[str, Any]]:
             "confidence": 0.95,
         }
         for index in range(count)
+    ]
+
+
+def _points_at(*frames: tuple[int, float]) -> list[dict[str, Any]]:
+    """A timeline of the given ``(midi_note, cents)`` frames, in that order.
+
+    The other four fields are filled in plausibly and never read by a fold — the
+    point of these fixtures is that the two the fold does read vary per frame, so
+    an aggregation that lost their order fails rather than passes.
+    """
+    return [
+        {
+            "timestamp_seconds": round(index * 0.023, 3),
+            "frequency_hz": round(440.0 * 2 ** ((note - 69) / 12), 3),
+            "midi_note": note,
+            "note_name": note_name_for_midi(note),
+            "cents": cents,
+            "confidence": 0.95,
+        }
+        for index, (note, cents) in enumerate(frames)
     ]
 
 
@@ -1266,10 +1287,57 @@ def test_comparison_sources_take_the_most_recent_analysis(backend: Any) -> None:
         loaded = sources[stored.recording_id].audio_analysis
 
         assert loaded is not None
-        assert loaded.audio_analysis_id in {first.audio_analysis_id, second.audio_analysis_id}
+        assert loaded.analysis.audio_analysis_id in {
+            first.audio_analysis_id,
+            second.audio_analysis_id,
+        }
         latest = await prepared.audio.latest_for_recording(stored.recording_id)
         assert latest is not None
-        assert loaded.audio_analysis_id == latest.audio_analysis_id
+        assert loaded.analysis.audio_analysis_id == latest.audio_analysis_id
+
+    backend(work)
+
+
+def test_comparison_sources_fold_the_latest_analysis_timeline(backend: Any) -> None:
+    """The record and the frames come from the same analysis, not from two.
+
+    The statement picks the latest analysis by id and expands *that* row's
+    timeline, rather than expanding every analysis the recording has and
+    discarding all but one. Choosing the row and choosing the timeline are two
+    steps, so a recording measured twice is where they could disagree — and a
+    comparison folding an older take's frames under a newer take's id would
+    produce a breakdown of neither.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+
+        await prepared.audio.create(
+            completed_audio(
+                stored.recording_id,
+                created_at=datetime(2026, 8, 1, tzinfo=UTC),
+                pitch_points=_points_at((60, 0.0), (60, 0.0), (60, 0.0)),
+            )
+        )
+        newest = await prepared.audio.create(
+            completed_audio(
+                stored.recording_id,
+                created_at=datetime(2026, 8, 2, tzinfo=UTC),
+                pitch_points=_points_at((71, 4.0), (73, -6.0)),
+            )
+        )
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [stored.recording_id]
+        )
+        loaded = sources[stored.recording_id].audio_analysis
+
+        assert loaded is not None
+        assert loaded.analysis.audio_analysis_id == newest.audio_analysis_id
+        assert loaded.fields.midi_notes == (71, 73)
+        assert loaded.fields.cents == (4.0, -6.0)
+        assert loaded.analysis.pitch_point_count == 2
 
     backend(work)
 
@@ -1283,26 +1351,24 @@ def test_comparison_sources_of_nothing_is_empty(backend: Any) -> None:
     backend(work)
 
 
-def test_comparison_sources_preserve_the_stored_pitch_timeline(backend: Any) -> None:
-    """The note breakdown is derived from these points, so they have to survive."""
+def test_comparison_sources_carry_the_fields_of_every_stored_frame(backend: Any) -> None:
+    """The note breakdown is folded from these two arrays, so they have to be right.
+
+    Right means three things, and only the first survives if the arrays are
+    merely *present*: every stored frame is here (a breakdown of some of them is
+    a breakdown of a different recording), the values are the stored ones, and
+    ``cents[i]`` is the deviation of ``midi_notes[i]``. The third is why the
+    frames below carry deviations that differ per note — two aggregates that
+    disagreed about order would still return the right multiset and attribute it
+    to the wrong notes.
+    """
 
     async def work(prepared: Backend) -> None:
         owner = await prepared.owner()
         stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        frames = ((69, 3.0), (60, -12.5), (72, 0.0), (60, 44.0), (69, -1.25))
         await prepared.audio.create(
-            completed_audio(
-                stored.recording_id,
-                pitch_points=[
-                    {
-                        "timestamp_seconds": 0.1,
-                        "frequency_hz": 440.0,
-                        "midi_note": 69,
-                        "note_name": "A4",
-                        "cents": 3.0,
-                        "confidence": 0.95,
-                    }
-                ],
-            )
+            completed_audio(stored.recording_id, pitch_points=_points_at(*frames))
         )
 
         sources = await prepared.recordings.comparison_sources(
@@ -1311,8 +1377,72 @@ def test_comparison_sources_preserve_the_stored_pitch_timeline(backend: Any) -> 
         analysis = sources[stored.recording_id].audio_analysis
 
         assert analysis is not None
-        assert len(analysis.pitch_points) == 1
-        assert analysis.pitch_points[0].note_name == "A4"
+        assert analysis.fields.midi_notes == tuple(note for note, _ in frames)
+        assert analysis.fields.cents == tuple(cents for _, cents in frames)
+        assert analysis.analysis.pitch_point_count == len(frames)
+
+    backend(work)
+
+
+def test_comparison_sources_and_the_fields_read_agree(backend: Any) -> None:
+    """Two statements now project the fields a note breakdown folds.
+
+    ``/notes`` reads one recording's fields and the comparison reads two, and
+    since 10.16 those are different SQL statements producing the same shape. A
+    note breakdown that depended on which endpoint asked for it would be the
+    same defect as two note aggregations, one statement further down.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            completed_audio(
+                stored.recording_id,
+                pitch_points=_points_at((64, 10.0), (65, -20.0), (64, 0.5)),
+            )
+        )
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [stored.recording_id]
+        )
+        compared = sources[stored.recording_id].audio_analysis
+        directly = await prepared.audio.latest_fields_for_recording(stored.recording_id)
+
+        assert compared is not None and directly is not None
+        assert compared.fields == directly.fields
+        assert compared.analysis.pitch_point_count == directly.analysis.pitch_point_count
+
+    backend(work)
+
+
+def test_comparison_sources_carry_an_unmeasured_analysis_as_an_empty_timeline(
+    backend: Any,
+) -> None:
+    """An analysis with no timeline yet comes back as itself, not as nothing.
+
+    A pending record has no ``pitch_points`` key at all, so the expansion it is
+    joined to produces no rows. An aggregate over no rows is one row of nulls
+    rather than no row, and the comparison needs that: *still running* is one of
+    the four things a refusal has to be able to say, and it can only say it if
+    the record arrives.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        pending = await prepared.audio.create(make_audio(stored.recording_id))
+
+        sources = await prepared.recordings.comparison_sources(
+            owner.owner_id, [stored.recording_id]
+        )
+        analysis = sources[stored.recording_id].audio_analysis
+
+        assert analysis is not None
+        assert analysis.analysis.audio_analysis_id == pending.audio_analysis_id
+        assert analysis.analysis.status is AudioAnalysisStatus.PENDING
+        assert analysis.fields.midi_notes == ()
+        assert analysis.fields.cents == ()
 
     backend(work)
 

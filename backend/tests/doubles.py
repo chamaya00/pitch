@@ -384,8 +384,13 @@ class InMemoryRecordingRepository:
             # exactly as the SQL leaves it unselected — not present-but-flagged.
             if recording is None:
                 continue
+            # The fields the comparison folds, not the frames — the statement
+            # projects them for both sides at once, and this asks the read that
+            # produces the same shape. Going through ``latest_for_recording``
+            # would report the comparison as loading two whole timelines when
+            # the only thing loading one is the double.
             analysis = (
-                await self._audio_analyses.latest_for_recording(recording_id)
+                await self._audio_analyses.latest_fields_for_recording(recording_id)
                 if self._audio_analyses is not None
                 else None
             )

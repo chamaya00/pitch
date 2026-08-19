@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16) |
 
 ## Phase 0 — delivered
 
@@ -640,6 +640,60 @@ Delivered in 10.15 — *what a fold actually reads*:
   note breakdowns from whole frames. Same defect, same fix, one statement away;
   it is recorded rather than done here.
 
+Delivered in 10.16 — *the same fix, on the read that does it twice*:
+
+- 10.15 named its own successor rather than doing it: `GET /recordings/compare`
+  was the last read building pitch frames nobody reads, and it built **two**
+  recordings' worth. This step is that fix and nothing else — the type, the
+  projection and the rule about how often a statement may touch a document all
+  come from 10.11 through 10.15. What is new is that the statement reading two
+  recordings at once now obeys them.
+- A comparison needs each side's identity, its analysis record and its note
+  breakdown. Only the breakdown involves the timeline, and it is the read that
+  may **not** be given a sample — of every thirteenth frame is a breakdown of a
+  different recording — so both sides are still read whole. Whole, as fields:
+  the semitone and the deviation from it, two arrays per side.
+- At the repository, on two five-minute recordings of 12 931 points each: what
+  crosses the socket goes 2 916 kB → **209 kB** and the read 122.1 ms →
+  **21.7 ms**, of which SQL and transfer is 44.3 → 18.7 ms. The ~78 ms in
+  between is 25 862 `PitchPoint` models no longer built on the event loop to
+  read two fields off each. Both statements were timed in one process against
+  the same rows.
+- End to end, the previous build running beside this one on the same database:
+  **137.5 → 36.0 ms** at one client and **2 160.3 → 239.9 ms p50** at sixteen,
+  p95 2 577.3 → 304.1 ms, and throughput **7.3 → 63.1 requests a second at
+  c=16**. Flat throughput under rising concurrency was the signature of work
+  that cannot overlap; it now scales. `/notes` and `GET /audio-analysis` were
+  measured on both builds as controls and did not move.
+- What a user would feel is somebody else's comparison: with three clients
+  holding one open, the poll the browser makes while a measurement runs went
+  from **303.6 ms to 35.9 ms**.
+- **The response is identical, and that was checked rather than reasoned
+  about**: both builds were asked for the same comparison and returned the same
+  14 478 bytes — 24 notes, 7 metrics — byte for byte.
+- The two aggregates are **shared with the `/notes` read rather than copied**. A
+  second copy could order its arrays differently, and a breakdown built from
+  deviations belonging to other notes looks entirely reasonable. There is one
+  `PITCH_FIELD_AGGREGATES` and a test that both statements use it.
+- The latest analysis is **chosen before its timeline is expanded**. Written the
+  natural way — the aggregate inside the subquery that orders and limits — a
+  re-analysed recording would have had every one of its timelines walked so that
+  all but one could be discarded.
+- Nine new tests, six of them three contract tests run against both stores,
+  because "the fields of a comparison" is only well defined if the arrays
+  PostgreSQL aggregates for two recordings are the values the stored points
+  hold. With them: the SQL-shape test 10.12's precedent asks for (the analysis
+  document read exactly twice, the recording's once), a test that both
+  projections are the same aggregates, and one asserting a side of a comparison
+  breaks down exactly as the single-recording read does. Both were checked by
+  mutation: aggregating the two arrays in different orders, and taking the
+  oldest analysis instead of the latest, each fail tests that pass now.
+- **What is left was measured, not assumed.** No read stands out any more: the
+  four timeline-derived reads sit between 21.5 and 29.8 ms at one client and 64
+  to 109 requests a second at sixteen, and the three that never touch a timeline
+  are ~6 ms and ~210 to 250. The slowest of the four is now `/pitch`, and what it
+  spends its time on is the sample it genuinely returns.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -663,9 +717,11 @@ hundred times the data, and everything under concurrency has been measured on
 supported landed in 10.10, but no read has been measured across them. 10.15 took the first of the two
 options 10.14 left open for `/notes` and `/key` — the fields a fold reads rather
 than the frames — which took them from ~135 ms to ~38 ms and from ~8 to ~65
-requests a second at c=16, and found the read that is now slowest:
-`GET /recordings/compare`, at 253.5 ms and 3.15 s p50 under load, which folds two
-whole timelines and is untouched. The shared rate-limit counter
+requests a second at c=16, and found the read that was then slowest:
+`GET /recordings/compare`, which folded two whole timelines. 10.16 gave that read
+the same fix, taking it from 137.5 to 36.0 ms and from 7.3 to 63.1 requests a
+second at c=16, after which no read stands out: the four built on a timeline sit
+within one band and the three that are not are ~6 ms. The shared rate-limit counter
 landed in 10.10. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
