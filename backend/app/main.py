@@ -45,7 +45,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     #
     # The DSN itself is never logged. A failure to connect surfaces as a startup
     # error, which is the point of opening eagerly rather than lazily.
-    database = Database(settings.database_url) if settings.database_url else None
+    database = (
+        Database(
+            settings.database_url,
+            min_size=settings.db_pool_min_size,
+            max_size=settings.db_pool_max_size,
+        )
+        if settings.database_url
+        else None
+    )
     # The limiters were built in ``create_app`` holding a callable that reads
     # this attribute, so the database backend finds the pool here without
     # anything being rebuilt. ``Settings`` has already refused the combination
