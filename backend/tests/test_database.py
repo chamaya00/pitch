@@ -21,10 +21,20 @@ from typing import Any
 
 import anyio
 import pytest
+from fastapi.testclient import TestClient
 
+from app.core.config import get_settings
 from app.core.errors import ErrorCode
+from app.db import cleanup_identities, import_filesystem
 from app.db.migrate import MIGRATIONS_DIR, apply_migrations, migration_files
-from app.db.pool import Database, fetch_all, fetch_one
+from app.db.pool import (
+    APPLICATION_NAME,
+    MAINTENANCE_POOL_SIZE,
+    Database,
+    fetch_all,
+    fetch_one,
+)
+from app.main import create_app
 from app.services.analysis.models import Analysis, AnalysisStatus, new_analysis_id
 from app.services.analysis.postgres_repository import (
     ActiveAnalysisExistsError,
@@ -75,9 +85,19 @@ def run(factory: Any) -> Any:
     return anyio.run(factory)
 
 
+#: Bigger than the deployed default, and stated rather than inherited.
+#:
+#: Several tests below hold connections open *simultaneously* on purpose — a
+#: race between two claims is not a race if the second one waits for the
+#: first's connection. Step 10.17 sized the shipped pool for a worker sharing a
+#: server; this suite is one process deliberately provoking contention, which
+#: is a different requirement and now says so.
+_SUITE_POOL_SIZE = 10
+
+
 async def _fresh_database() -> Database:
     """A migrated, empty database. Truncating owners cascades to everything."""
-    database = Database(DATABASE_URL)
+    database = Database(DATABASE_URL, max_size=_SUITE_POOL_SIZE)
     await database.open()
     async with database.transaction() as connection:
         await apply_migrations(connection)
@@ -1445,3 +1465,167 @@ def test_an_owner_predating_the_activity_column_gets_a_sensible_backfill(tmp_pat
                 await connection.execute("DROP SCHEMA IF EXISTS retention_probe CASCADE")
 
     with_db(work)
+
+
+# --- The connection budget, which is per server and spent per process -------
+#
+# Step 10.17's finding, and the only place it can be checked: how many
+# connections a pool holds, and how many a server will give, are both
+# properties of a real PostgreSQL. A double would answer whatever it was
+# written to answer.
+
+
+def test_a_pool_holds_no_more_connections_than_it_was_given() -> None:
+    """The ceiling the whole step rests on, counted rather than assumed.
+
+    Twelve callers at once against a pool of three: the pool queues them, and
+    the server sees three backends belonging to it. If this were not exact,
+    ``workers x max_size`` would not be the arithmetic an operator needs.
+    """
+
+    async def work(database: Database) -> None:
+        name = f"budget-probe-{uuid.uuid4().hex[:8]}"
+        probe = Database(DATABASE_URL, min_size=1, max_size=3, application_name=name)
+        await probe.open()
+        try:
+            held: list[int] = []
+
+            async def query(release: anyio.Event) -> None:
+                async with probe.connection() as connection:
+                    await connection.execute("SELECT 1")
+                    async with database.connection() as observer:
+                        rows = await fetch_all(
+                            observer,
+                            "SELECT pid FROM pg_stat_activity WHERE application_name = %s",
+                            (name,),
+                        )
+                    held.append(len(rows))
+                    await release.wait()
+
+            release = anyio.Event()
+            async with anyio.create_task_group() as group:
+                for _ in range(12):
+                    group.start_soon(query, release)
+                await anyio.sleep(0.5)
+                release.set()
+
+            # Exactly three, not at most three: twelve callers must fill a
+            # pool of three, and "at most" would also pass if the query had
+            # counted nothing at all.
+            assert held, "no caller reached the pool"
+            assert max(held) == 3, f"the pool held {max(held)} connections, not 3"
+        finally:
+            await probe.close()
+
+    with_db(work)
+
+
+def test_the_budget_is_read_from_the_server_rather_than_assumed() -> None:
+    """``max_connections`` is the server's, and a deployment may have raised it."""
+
+    async def work(database: Database) -> None:
+        async with database.connection() as connection:
+            row = await fetch_one(
+                connection,
+                """
+                SELECT current_setting('max_connections')::int AS limit_,
+                       current_setting('superuser_reserved_connections')::int AS reserved
+                """,
+            )
+        assert row is not None
+
+        budget = await database.budget()
+        assert budget.max_connections == row["limit_"]
+        assert budget.reserved == row["reserved"]
+        assert budget.available == row["limit_"] - row["reserved"]
+        assert budget.pool_max_size == database.max_size
+        assert budget.processes == budget.available // database.max_size
+
+    with_db(work)
+
+
+def test_a_pool_too_large_for_the_server_is_refused_at_startup() -> None:
+    """Impossible, not merely ambitious: such a pool can never fill.
+
+    Refused the way Step 10.10 refused ``RATE_LIMIT_BACKEND=database`` with no
+    ``DATABASE_URL`` — at startup, with the setting named, rather than by
+    limping along in a state nobody chose.
+    """
+
+    async def work(database: Database) -> None:
+        budget = await database.budget()
+        name = f"oversized-probe-{uuid.uuid4().hex[:8]}"
+        oversized = Database(
+            DATABASE_URL, min_size=1, max_size=budget.available + 1, application_name=name
+        )
+        with pytest.raises(RuntimeError, match="DB_POOL_MAX_SIZE"):
+            await oversized.open()
+
+        # And it let go of what it had opened: a refusal that leaked
+        # connections would be a worse version of the problem it exists for.
+        async with database.connection() as connection:
+            rows = await fetch_all(
+                connection,
+                "SELECT pid FROM pg_stat_activity WHERE application_name = %s",
+                (oversized.application_name,),
+            )
+        assert rows == []
+
+    with_db(work)
+
+
+def test_a_pool_cannot_keep_more_connections_open_than_it_may_hold() -> None:
+    """Refused where it is written, not only where it is configured."""
+    with pytest.raises(ValueError, match="cannot keep more"):
+        Database(DATABASE_URL, min_size=4, max_size=2)
+
+
+def test_connections_say_which_pool_they_belong_to() -> None:
+    """What an operator has to have when a server has run out.
+
+    Without a name, ``pg_stat_activity`` on an exhausted server is a list of
+    anonymous rows. With one, the API's workers and a maintenance job are
+    telling them apart for free.
+    """
+
+    async def work(database: Database) -> None:
+        async with database.connection() as connection:
+            row = await fetch_one(connection, "SELECT current_setting('application_name') AS name")
+        assert row is not None
+        assert row["name"] == database.application_name == APPLICATION_NAME
+
+    with_db(work)
+
+
+def test_a_maintenance_job_asks_for_one_connection_and_names_itself() -> None:
+    """The job that matters most when the API is holding everything else.
+
+    ``cleanup_identities`` and ``import_filesystem`` run *beside* a serving API
+    against the same server. A four-connection pool would be four the workers
+    cannot have, and — measured in Step 10.17 — the moment these jobs are
+    needed is the moment there may be none left.
+    """
+    for module in (cleanup_identities, import_filesystem):
+        source = inspect.getsource(module)
+        assert "MAINTENANCE_POOL_SIZE" in source, f"{module.__name__} sizes its own pool"
+        assert "MAINTENANCE_APPLICATION_NAME" in source, f"{module.__name__} names its own pool"
+    assert MAINTENANCE_POOL_SIZE == 1
+
+
+def test_the_api_opens_the_pool_the_settings_describe(monkeypatch: Any) -> None:
+    """A coupling that fails silently: the wrong pool serves requests fine.
+
+    ``DB_POOL_MAX_SIZE`` is only worth having if startup reads it, and nothing
+    about a request would look wrong if it did not — the pool would simply be
+    the wrong size, which is the whole failure this step is about. Driven
+    through the environment, because that is how a deployment sets it.
+    """
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL)
+    monkeypatch.setenv("DB_POOL_MAX_SIZE", "3")
+    get_settings.cache_clear()
+
+    app = create_app()
+    with TestClient(app):
+        assert app.state.database is not None
+        assert app.state.database.max_size == 3
+        assert app.state.database.application_name == APPLICATION_NAME
