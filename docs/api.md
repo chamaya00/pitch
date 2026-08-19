@@ -754,7 +754,11 @@ interpolate across it. The share of the recording that was voiced is
 
 `max_points` (default 1000, max 50000) caps the response by taking every n-th
 point; `decimation` reports the factor used. A five-minute recording produces
-around 13 000 voiced frames, which no graph can draw.
+around 13 000 voiced frames, which no graph can draw. `total_points` is always
+the length of the stored timeline, never of this response — `returned_points`
+is that. The sample starts at the first measured frame, so the graph begins
+where the audio does, and since Step 10.14 it is selected in the database
+rather than after loading every point.
 
 Available only once the analysis has completed; otherwise `404`
 `AUDIO_ANALYSIS_NOT_FOUND`.

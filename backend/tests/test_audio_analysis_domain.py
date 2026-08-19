@@ -21,6 +21,7 @@ from app.services.audio_analysis.models import (
     AudioAnalysisStatus,
     AudioAnalysisSummary,
     AudioMetrics,
+    DecimatedTimeline,
     Loudness,
     PitchPoint,
     PitchStability,
@@ -217,6 +218,57 @@ def test_a_summary_keeps_every_invariant_the_record_has() -> None:
             recording_id=RECORDING_ID,
             pitch_point_count=5,
         )
+
+
+def test_a_sample_of_a_timeline_must_add_up() -> None:
+    """Taking every ``n``-th of ``c`` points is ``ceil(c / n)`` points, or a bug.
+
+    The check exists because the two implementations select the sample in
+    different languages — a slice in Python, ``WITH ORDINALITY`` in SQL — and a
+    stride applied wrongly returns a graph that looks entirely reasonable. A
+    count that does not follow from the record is refused at the boundary
+    instead.
+    """
+    stored = analysis(
+        status=AudioAnalysisStatus.COMPLETED, metrics=metrics(), pitch_points=_points(10)
+    )
+    summary = AudioAnalysisSummary.model_validate(stored.model_dump(exclude={"pitch_points"}))
+
+    whole = DecimatedTimeline(analysis=summary, points=stored.pitch_points, decimation=1)
+    assert len(whole.points) == 10
+
+    sampled = DecimatedTimeline(analysis=summary, points=stored.pitch_points[::4], decimation=4)
+    assert len(sampled.points) == 3  # ceil(10 / 4)
+
+    with pytest.raises(ValidationError):
+        # Four of ten at a stride of four: one point too many for the stride it
+        # claims, which is what a wrong offset or a lost filter looks like.
+        DecimatedTimeline(analysis=summary, points=stored.pitch_points[:4], decimation=4)
+    with pytest.raises(ValidationError):
+        # A sample that claims to be the whole timeline while dropping most of it.
+        DecimatedTimeline(analysis=summary, points=stored.pitch_points[::4], decimation=1)
+    with pytest.raises(ValidationError):
+        DecimatedTimeline(analysis=summary, points=stored.pitch_points, decimation=0)
+
+
+def test_a_sampled_timeline_cannot_be_written_back() -> None:
+    """It carries a summary, and a summary is not a record ``update`` accepts.
+
+    The type is the guard: a :class:`DecimatedTimeline` holding 995 of 12 931
+    points has no way to reach a write, so the timeline cannot be replaced by a
+    sample of itself.
+    """
+    stored = analysis(
+        status=AudioAnalysisStatus.COMPLETED, metrics=metrics(), pitch_points=_points(10)
+    )
+    summary = AudioAnalysisSummary.model_validate(stored.model_dump(exclude={"pitch_points"}))
+
+    sampled = DecimatedTimeline(analysis=summary, points=stored.pitch_points[::4], decimation=4)
+
+    assert not isinstance(sampled.analysis, AudioAnalysis)
+    assert not hasattr(sampled.analysis, "pitch_points")
+    # And the record still says how much was measured, not how much was returned.
+    assert sampled.analysis.pitch_point_count == 10
 
 
 def test_completed_at_belongs_only_to_a_finished_analysis() -> None:

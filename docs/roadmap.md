@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14) |
 
 ## Phase 0 — delivered
 
@@ -536,6 +536,60 @@ Delivered in 10.13 — *a page of history says whether it is the whole history*:
   console errors. Nine backend tests, eight frontend ones, and the in-memory
   double pages identically so the contract suite holds both to it.
 
+Delivered in 10.14 — *what concurrency does to a read*:
+
+- Every number in 10.11–10.13 was taken one request at a time, and that was
+  written down as the gap. This step took them again with several requests in
+  flight, against the same real server: one worker, 30 five-minute recordings,
+  each a 1 685 kB document of 12 931 points.
+- **Most reads scale, and nothing about them was changed.** The history list, the
+  progress query, the identity panel, the speech read and the polled audio
+  summary all hold their throughput as concurrency rises — `GET /recordings`
+  serves 113 requests a second at c=1 and 154 at c=16.
+- **The three reads built on the pitch timeline do not scale at all**: ~7
+  requests a second whether one client is asking or sixteen, and p95 at c=16 of
+  2.0–2.3 seconds. Sixteen times the latency for the same throughput is the
+  signature of work that cannot overlap.
+- Profiling one read says where it goes: of ~80 ms, 23 ms is SQL and transfer,
+  20 ms is `json.loads`, and **30 ms is pydantic building 12 931 `PitchPoint`
+  models**. The folds those points exist for cost 3.3 ms and 1.4 ms. All of it
+  runs on the event loop holding the GIL, so it is not one slow request — it is
+  every other request in the process waiting.
+- That is visible from outside, and it is what a user would feel. While one other
+  client had an analysis page open, the poll the browser makes while a
+  measurement runs went from **14.2 ms to 301.0 ms**; with three, to **965.1 ms**.
+- **`/pitch` was building 12 931 points to return 995.** It has capped its
+  response at `max_points` since Step 7I and honoured that by slicing a list.
+  PostgreSQL selects the sample now — by ordinality, with the stride computed
+  from the stored `pitch_point_count` in the same statement, so the sample and
+  the total it is a sample of come from one row.
+- PostgreSQL's half does not get cheaper (21.4 ms → 19.1 ms) and that is the
+  point: the ~50 ms of parsing and validation leaves the event loop, where it
+  serialised everything, and 1 685 kB across the socket becomes 133 kB. End to
+  end **172.9 ms → 38.6 ms**, throughput 7.1 → 25.9 requests a second at c=1 and
+  8.5 → 42.8 at c=16, p95 at c=16 2 279 ms → 436 ms, and the poll during one open
+  dashboard 301.0 ms → 169.6 ms.
+- The response is unchanged point for point, asserted by a test that compares the
+  sample against the whole timeline sliced. The type discipline from 10.11 holds:
+  a `DecimatedTimeline` carries an `AudioAnalysisSummary`, so a record holding 995
+  of 12 931 points has no path to a write, and its validator refuses a sample
+  whose size does not follow from the count and the stride.
+- Twenty-one tests, one contract suite over both repository implementations —
+  because "every n-th point" is only well defined if a Python slice and
+  `WITH ORDINALITY` start at the same one — plus the SQL-shape test 10.12's
+  precedent asks for: two references to `document`, the strip and the expansion,
+  and no third.
+- **What is left is not waste, and is recorded rather than fixed.** `/notes` and
+  `/key` fold every point, so they still load every point, unchanged at ~135 ms
+  and ~7 requests a second. ~25 ms of that is the floor for reading the document
+  at all; the rest is model construction that only a different input type would
+  remove, and a thread would not help because `json.loads` and pydantic both hold
+  the GIL. The two options — flat field arrays (15.4 ms in PostgreSQL, and it
+  changes the signature of two measurement functions) or storing the derived
+  answers (which 10.8 rejected so that every analysis ever completed stays
+  answerable) — are analysed in [architecture.md](architecture.md) and neither is
+  chosen.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -550,9 +604,15 @@ three things 10.11 left alone — the speech read (11.6 ms), the history list
 the cost somewhere else, in the progress query. 10.13 profiled the frontend in a
 browser (180 kB over the wire, first contentful paint 88 ms, no console errors)
 and found nothing worth changing, and measured the history read at 5 000
-recordings, where paging is flat with depth. What is still unmeasured: the speech
-pipeline and the progress query at a hundred times the data, and every read under
-concurrent load — every number in 10.11–10.13 was taken one request at a time. The shared rate-limit counter
+recordings, where paging is flat with depth. 10.14 took every read under
+concurrent load — the gap 10.11–10.13 left — found that only the timeline reads
+fail to scale, and fixed the one of the three that was building points it threw
+away. What is still unmeasured: the speech pipeline and the progress query at a
+hundred times the data, and everything under concurrency has been measured on
+**one worker**; the shared rate-limit counter that makes several of them
+supported landed in 10.10, but no read has been measured across them. `/notes`
+and `/key` remain the slowest reads in the product at ~135 ms, for reasons 10.14
+measured and left in place. The shared rate-limit counter
 landed in 10.10. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that

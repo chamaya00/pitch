@@ -66,6 +66,8 @@ from app.services.audio_analysis.models import (
     AudioAnalysisStatus,
     AudioAnalysisSummary,
     AudioFeedbackStatus,
+    DecimatedTimeline,
+    PitchPoint,
 )
 
 #: Everything the record says about itself, minus the timeline, plus its length.
@@ -78,6 +80,70 @@ from app.services.audio_analysis.models import (
 _SUMMARY_COLUMNS = """
     document - 'pitch_points' AS document,
     pitch_point_count
+"""
+
+#: The timeline read, sampled in PostgreSQL rather than in Python.
+#:
+#: ``GET …/audio-analysis/pitch`` returns at most ``max_points`` points and has
+#: defaulted to a thousand since Step 7I, because a graph a few hundred pixels
+#: wide cannot draw more. It nevertheless used to parse the whole stored
+#: timeline and throw 92% of it away: 1 685 kB across the socket, 20 ms of
+#: ``json.loads`` and 30 ms of pydantic validation to build 12 931 points, of
+#: which 995 were returned. Every millisecond of that ran on the event loop, so
+#: it was not one slow request — it was every other request in the process
+#: waiting. Step 10.14 measured what that costs under concurrency; the numbers
+#: and the experiment are in ``docs/architecture.md``.
+#:
+#: **PostgreSQL's half of the work does not get cheaper, and that is the point.**
+#: Detoasting and parsing the stored jsonb costs it ~20 ms either way — 19.1 ms
+#: for this statement against 21.4 ms to hand over the whole document. What
+#: changes is what crosses the socket and what the API process then does with
+#: it: 133 kB parsed in ~4 ms, rather than 1 685 kB turned into 12 931 validated
+#: points in ~50 ms. PostgreSQL does its 20 ms in a backend process per
+#: connection; the event loop does its 50 ms in front of every other request in
+#: the process. End to end the read went from 172.9 ms to 40.8 ms, and from 7.1
+#: to 20.9 requests a second.
+#:
+#: Three details are deliberate:
+#:
+#: * **``WITH ORDINALITY``, not ``generate_series`` over subscripts.** They cost
+#:   the same (17.7 ms against 17.7 ms), and this one walks the array that is
+#:   actually stored. Indexing up to ``pitch_point_count - 1`` would silently
+#:   drop the end of a recording if the count and the array ever disagreed.
+#: * **The stride is computed from the stored count in the same statement**, so
+#:   the sample and the total it is a sample of are read from one row. Deciding
+#:   it in Python would take a second read, and two reads can straddle a
+#:   re-analysis — the window Phase 8 slice 5 and Step 10.11 both closed.
+#: * **The CTE picks the row, not the document.** It selects the id and the
+#:   count, and the document is reached once the row is chosen. Carrying the
+#:   document through the CTE measured the same (19.1 ms against 19.6 ms), and
+#:   this way the statement has exactly two references to it — the strip and the
+#:   expansion, both of which have to decompress — so counting them is a
+#:   meaningful check rather than one confused by a pass-through.
+_DECIMATED_SQL = """
+    WITH latest AS (
+        SELECT id,
+               pitch_point_count,
+               GREATEST(1, CEIL(pitch_point_count::numeric / %s))::int AS decimation
+        FROM audio_analyses
+        WHERE recording_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    )
+    SELECT analysis.document - 'pitch_points' AS document,
+           latest.pitch_point_count,
+           latest.decimation,
+           COALESCE(
+               (
+                   SELECT jsonb_agg(point ORDER BY ordinality)
+                   FROM jsonb_array_elements(analysis.document -> 'pitch_points')
+                        WITH ORDINALITY AS sampled(point, ordinality)
+                   WHERE (ordinality - 1) %% latest.decimation = 0
+               ),
+               '[]'::jsonb
+           ) AS pitch_points
+    FROM latest
+    JOIN audio_analyses AS analysis ON analysis.id = latest.id
 """
 
 
@@ -136,6 +202,21 @@ class AsyncAudioAnalysisRepository(Protocol):
 
     async def latest_summary_for_recording(self, recording_id: str) -> AudioAnalysisSummary | None:
         """The most recent audio analysis of a recording, without its timeline."""
+
+    async def latest_decimated_for_recording(
+        self, recording_id: str, *, max_points: int
+    ) -> DecimatedTimeline | None:
+        """The most recent analysis with **at most ``max_points``** of its timeline.
+
+        The read behind ``GET …/audio-analysis/pitch``, which draws a graph a
+        few hundred pixels wide and has never returned more than a thousand
+        points by default. Every ``n``-th point is selected where the timeline
+        is longer than that, and ``n`` is reported rather than implied.
+
+        The stride is decided from the stored count, so the caller does not
+        supply one and cannot ask for a sample that misrepresents its own
+        density.
+        """
 
     async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
         """Every audio analysis of one recording, newest first, without timelines.
@@ -288,6 +369,15 @@ class PostgresAudioAnalysisRepository:
             )
         return None if row is None else _to_summary(row)
 
+    async def latest_decimated_for_recording(
+        self, recording_id: str, *, max_points: int
+    ) -> DecimatedTimeline | None:
+        if max_points < 1:
+            raise ValueError("max_points must be at least 1")
+        async with self._db.connection() as connection:
+            row = await fetch_one(connection, _DECIMATED_SQL, (max_points, recording_id))
+        return None if row is None else _to_decimated(row)
+
     async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
         async with self._db.connection() as connection:
             rows = await fetch_all(
@@ -314,4 +404,17 @@ def _to_summary(row: dict[str, Any]) -> AudioAnalysisSummary:
     """
     return AudioAnalysisSummary.model_validate(
         {**row["document"], "pitch_point_count": row["pitch_point_count"]}
+    )
+
+
+def _to_decimated(row: dict[str, Any]) -> DecimatedTimeline:
+    """Build a sampled timeline from the stripped document and the points beside it.
+
+    The points are validated exactly as they would be coming out of a whole
+    document — there is one fewer of them, not one less check.
+    """
+    return DecimatedTimeline(
+        analysis=_to_summary(row),
+        points=tuple(PitchPoint.model_validate(point) for point in row["pitch_points"]),
+        decimation=row["decimation"],
     )

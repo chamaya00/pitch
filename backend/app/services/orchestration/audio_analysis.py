@@ -47,6 +47,7 @@ from app.services.audio_analysis.models import (
     AudioAnalysisSummary,
     AudioFeedbackStatus,
     AudioMetrics,
+    DecimatedTimeline,
     KeyAnalysis,
     NoteSummary,
     new_audio_analysis_id,
@@ -157,12 +158,35 @@ class AudioAnalysisService:
 
         The same owner-scoped read, and the same answers; the only difference is
         that this one carries the points. It exists so that reading the timeline
-        is a decision a caller makes rather than a cost every caller pays, and
-        the three endpoints that need it — the timeline itself, the note
-        breakdown and the key — are the three that call it.
+        is a decision a caller makes rather than a cost every caller pays.
+
+        Two callers, and both fold every point they load: the note breakdown and
+        the key. The pitch graph used to be the third, and is not any more — it
+        returns a sample, so it reads one (:meth:`current_decimated_timeline`).
         """
         await self._require_owned(recording_id, owner_id)
         return await self._analyses.latest_for_recording(recording_id)
+
+    async def current_decimated_timeline(
+        self, recording_id: str, owner_id: uuid.UUID, *, max_points: int
+    ) -> DecimatedTimeline | None:
+        """:meth:`current`, with **at most ``max_points``** of the timeline attached.
+
+        What the pitch graph needs, and all it has ever needed: the endpoint has
+        decimated its response since Step 7I. Until Step 10.14 it decimated
+        *after* materialising every stored point, which is why one graph cost
+        ~110 ms of event-loop time and stalled every other request in the
+        process for as long as it took. The sample is taken in the store now, so
+        the points that are dropped are never built.
+
+        Same owner-scoped read as the other two, same answers, and the same
+        single load: the record and its sample come from one statement, so a
+        graph cannot pair one analysis's ids with another's points.
+        """
+        await self._require_owned(recording_id, owner_id)
+        return await self._analyses.latest_decimated_for_recording(
+            recording_id, max_points=max_points
+        )
 
     async def notes(self, recording_id: str, owner_id: uuid.UUID) -> tuple[NoteSummary, ...] | None:
         """The note breakdown of a recording's completed audio analysis.

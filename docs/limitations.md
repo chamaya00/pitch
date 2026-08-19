@@ -336,6 +336,29 @@ not know:
   those are what failed. Recordings and keys are untouched by any of this;
   nothing is stored in the page.
 
+## What several people at once costs
+
+Measured in Step 10.14 against a real server with one worker and five-minute
+recordings. The reads a browser makes most often — the history list, the progress
+chart, the identity panel, the speech analysis and the poll that runs while a
+measurement is in flight — hold their throughput as callers are added. Two do
+not, and it is worth knowing which:
+
+- **The note breakdown and the musical key serve about seven requests a second,
+  however many people are asking.** Both fold every frame of the stored timeline,
+  and building 12 931 measured points out of the stored document is ~50 ms of
+  single-threaded work per request. Sixteen concurrent readers therefore wait
+  about sixteen times as long rather than being served in parallel.
+- **While one of those runs, other requests wait too.** With one other person
+  viewing an analysis page, the poll that says whether a measurement has finished
+  took 301 ms instead of 14 ms; with three, 965 ms. Step 10.14 removed the pitch
+  graph from that set — it now asks the database for the points it will draw
+  rather than all of them — which is why the same figure is 170 ms today. The
+  other two remain.
+- **This is a property of the deployment, not of the measurements.** Nothing is
+  wrong with the numbers a slow read returns, and no measurement changes under
+  load. What changes is how long a page takes to appear when the product is busy.
+
 ## Reclaiming unused identities
 
 An identity that owns **no recordings** and has not been used for the retention

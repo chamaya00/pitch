@@ -38,6 +38,7 @@ from app.services.audio_analysis.models import (
     AudioAnalysisStatus,
     AudioAnalysisSummary,
     AudioFeedbackStatus,
+    DecimatedTimeline,
 )
 from app.services.orchestration.audio_analysis import AudioAnalysisService
 
@@ -190,19 +191,20 @@ async def get_pitch_timeline(
     ] = DEFAULT_MAX_POINTS,
 ) -> PitchTimelineResponse:
     """Return the analysis's pitch points, decimated to ``max_points``."""
-    analysis = await _require_timeline(service, recording_id, owner_id)
-    if analysis.status is not AudioAnalysisStatus.COMPLETED:
+    timeline = await _require_decimated_timeline(
+        service, recording_id, owner_id, max_points=max_points
+    )
+    if timeline.analysis.status is not AudioAnalysisStatus.COMPLETED:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
             "That recording's audio analysis has not finished yet.",
         )
 
-    points = list(analysis.pitch_points)
-    decimation = max(1, -(-len(points) // max_points))  # ceiling division
-    if decimation > 1:
-        points = points[::decimation]
-
-    return PitchTimelineResponse.from_domain(analysis, points=points, decimation=decimation)
+    return PitchTimelineResponse.from_domain(
+        timeline.analysis,
+        points=list(timeline.points),
+        decimation=timeline.decimation,
+    )
 
 
 @router.get(
@@ -420,7 +422,7 @@ async def _require_analysis(
 async def _require_timeline(
     service: AudioAnalysisService, recording_id: str, owner_id: uuid.UUID
 ) -> AudioAnalysis:
-    """The same record **with** its pitch timeline, for the three routes built on it.
+    """The same record **with** its pitch timeline, for the two routes that fold it.
 
     Separate from :func:`_require_analysis` so that paying for the points is a
     choice a route makes, and visible in its own body.
@@ -432,3 +434,30 @@ async def _require_timeline(
             "That recording's audio has not been analysed yet.",
         )
     return analysis
+
+
+async def _require_decimated_timeline(
+    service: AudioAnalysisService,
+    recording_id: str,
+    owner_id: uuid.UUID,
+    *,
+    max_points: int,
+) -> DecimatedTimeline:
+    """The record with a **sample** of its timeline, for the one route that draws it.
+
+    A third read rather than a slice of the second, because the points this
+    route discards are points nothing needs to build: at the longest accepted
+    recording the graph returns 995 of 12 931, and materialising the other
+    11 936 cost ~110 ms of event-loop time per request — time in which every
+    other request in the process, including the poll that says whether the
+    analysis has finished, was waiting.
+    """
+    timeline = await service.current_decimated_timeline(
+        recording_id, owner_id, max_points=max_points
+    )
+    if timeline is None:
+        raise ApiError(
+            ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
+            "That recording's audio has not been analysed yet.",
+        )
+    return timeline
