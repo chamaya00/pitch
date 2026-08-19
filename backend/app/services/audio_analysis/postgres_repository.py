@@ -19,11 +19,16 @@ is still derived from those points in Python by code that already exists and is
 tested — the same architecture as before, now reading from a different store.
 
 **Not every read wants it, and the ones that do not say so in their return
-type.** Each method below comes in two forms: one that returns an
-:class:`AudioAnalysis` with the timeline, and one that returns an
-:class:`AudioAnalysisSummary` without it. The summary form selects
-``document - 'pitch_points'``, so PostgreSQL drops the points before the row
-crosses the socket. Measured on a completed analysis of the longest accepted
+type.** There are four forms, and each is a type rather than a convention:
+
+* :class:`AudioAnalysisSummary` — no timeline, plus ``pitch_point_count`` (10.11)
+* :class:`DecimatedTimeline` — a summary, plus every ``n``-th point (10.14)
+* :class:`TimelineFields` — a summary, plus two fields of every frame (10.15)
+* :class:`AudioAnalysis` — a summary, plus whole frames
+
+Only the last can be written back, and only writes ask for it. The summary form
+selects ``document - 'pitch_points'``, so PostgreSQL drops the points before the
+row crosses the socket. Measured on a completed analysis of the longest accepted
 recording — 12 931 points, a 1 596 kB document — through the real driver:
 
 ============================================  ========  ===============
@@ -36,8 +41,11 @@ without the timeline (``latest_summary_…``)     1.8 ms          15 kB
 47×, on the read the browser polls while a measurement runs. End to end over
 HTTP against a real server, the same recording: ``GET /audio-analysis`` went
 from 116.7 ms to 8.4 ms and ``GET /audio-analysis/feedback`` from 120.2 ms to
-8.6 ms, while ``/pitch`` and ``/key`` are unchanged at ~120 ms and ~114 ms
-because they genuinely return or fold the points.
+8.6 ms, while ``/pitch`` and ``/key`` were unchanged at ~120 ms and ~114 ms
+because they genuinely returned or folded the points. Both were fixed later, by
+reading something narrower rather than by loading less of the record: ``/pitch``
+a sample of the timeline (10.14), ``/key`` and ``/notes`` the two fields they
+fold (10.15).
 
 The split is not an optimisation a caller may forget to apply: a summary cannot
 be handed to ``update``, because that would re-serialise a document with no
@@ -67,7 +75,9 @@ from app.services.audio_analysis.models import (
     AudioAnalysisSummary,
     AudioFeedbackStatus,
     DecimatedTimeline,
+    PitchFields,
     PitchPoint,
+    TimelineFields,
 )
 
 #: Everything the record says about itself, minus the timeline, plus its length.
@@ -147,6 +157,74 @@ _DECIMATED_SQL = """
 """
 
 
+#: The two aggregations' read: every frame, but only the fields they fold.
+#:
+#: ``GET …/audio-analysis/notes`` and ``…/key`` are the only reads left that
+#: touch every stored point, and unlike the graph they genuinely need every one:
+#: a breakdown of a sample is a breakdown of a different recording. What they do
+#: not need is the *frame*. Of the six fields a stored point carries they read
+#: two — the semitone and the deviation from it — and Step 10.14 measured what
+#: building the other four cost: of ~80 ms per request, 23 ms was SQL and
+#: transfer, 20 ms ``json.loads`` and **30 ms pydantic building 12 931
+#: ``PitchPoint`` models**, against folds of 3.3 ms and 1.4 ms. All of it on the
+#: event loop, so the two reads served ~7 requests a second however many clients
+#: asked, and a client with an analysis page open pushed the poll behind it from
+#: 14.2 ms to 301.0 ms.
+#:
+#: PostgreSQL projects the two fields into arrays now. Four details are
+#: deliberate:
+#:
+#: * **One walk of the array, two aggregates.** Both fields come from the same
+#:   ``jsonb_array_elements`` expansion inside one lateral, so the statement has
+#:   exactly two references to ``document`` — the strip and the expansion — and
+#:   the 10.12 rule holds: a third reference would be a third full detoast of a
+#:   1 685 kB document — which is what one ``jsonb_path_query_array`` per field
+#:   would have cost, three references in place of two.
+#: * **``array_agg`` into typed arrays, not ``jsonb_agg``.** The values arrive as
+#:   an ``int[]`` and a ``float8[]`` the driver decodes directly, rather than as
+#:   a jsonb array the API process has to parse: 26.0 ms against 28.1 ms end to
+#:   end, and it is the cast that decides what a bad value does — a stored note
+#:   that is not a number fails in PostgreSQL rather than becoming one.
+#: * **Both aggregates are ordered by the same ordinality.** Neither fold cares
+#:   what order the frames arrive in, but ``cents[i]`` must be the deviation of
+#:   ``midi_notes[i]``: two aggregates that disagreed about order would attribute
+#:   real deviations to the wrong notes and produce a breakdown that looks
+#:   entirely reasonable. Measured at 26.0 ms against 28.5 ms unordered, so the
+#:   guarantee is free.
+#: * **The lateral holds an aggregate, so it always returns a row.** An analysis
+#:   still running has no ``pitch_points`` key at all; an aggregate with no
+#:   ``GROUP BY`` answers "no rows" with one row of nulls, which ``COALESCE``
+#:   turns into empty arrays. A pending record therefore reads back as itself
+#:   with an empty timeline, rather than vanishing from the result.
+_FIELDS_SQL = """
+    WITH latest AS (
+        SELECT id
+        FROM audio_analyses
+        WHERE recording_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    )
+    SELECT analysis.document - 'pitch_points' AS document,
+           analysis.pitch_point_count,
+           frames.midi_notes,
+           frames.cents
+    FROM latest
+    JOIN audio_analyses AS analysis ON analysis.id = latest.id
+    CROSS JOIN LATERAL (
+        SELECT COALESCE(
+                   array_agg((frame.point ->> 'midi_note')::int ORDER BY frame.ordinality),
+                   '{}'::int[]
+               ) AS midi_notes,
+               COALESCE(
+                   array_agg((frame.point ->> 'cents')::float8 ORDER BY frame.ordinality),
+                   '{}'::float8[]
+               ) AS cents
+        FROM jsonb_array_elements(analysis.document -> 'pitch_points')
+             WITH ORDINALITY AS frame(point, ordinality)
+    ) AS frames
+"""
+
+
 class AudioAnalysisConflictError(Exception):
     """Another worker owns this analysis, or already finished it."""
 
@@ -216,6 +294,19 @@ class AsyncAudioAnalysisRepository(Protocol):
         The stride is decided from the stored count, so the caller does not
         supply one and cannot ask for a sample that misrepresents its own
         density.
+        """
+
+    async def latest_fields_for_recording(self, recording_id: str) -> TimelineFields | None:
+        """The most recent analysis with the **fields the aggregations fold**.
+
+        The read behind ``GET …/audio-analysis/notes`` and ``…/key``. Both fold
+        every frame of the timeline, so unlike the graph neither may be given a
+        sample; both read exactly two things about a frame, so neither needs it
+        built. What comes back is every stored frame's semitone and deviation,
+        as two arrays, and the record they belong to.
+
+        Nothing built from this can be returned as a timeline or written back —
+        see :class:`TimelineFields`.
         """
 
     async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
@@ -378,6 +469,11 @@ class PostgresAudioAnalysisRepository:
             row = await fetch_one(connection, _DECIMATED_SQL, (max_points, recording_id))
         return None if row is None else _to_decimated(row)
 
+    async def latest_fields_for_recording(self, recording_id: str) -> TimelineFields | None:
+        async with self._db.connection() as connection:
+            row = await fetch_one(connection, _FIELDS_SQL, (recording_id,))
+        return None if row is None else _to_fields(row)
+
     async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
         async with self._db.connection() as connection:
             rows = await fetch_all(
@@ -404,6 +500,21 @@ def _to_summary(row: dict[str, Any]) -> AudioAnalysisSummary:
     """
     return AudioAnalysisSummary.model_validate(
         {**row["document"], "pitch_point_count": row["pitch_point_count"]}
+    )
+
+
+def _to_fields(row: dict[str, Any]) -> TimelineFields:
+    """Build the fold's input from the stripped document and the two arrays.
+
+    The driver has already decoded them as an ``int[]`` and a ``float8[]``;
+    :class:`PitchFields` bounds every value exactly as :class:`PitchPoint` does,
+    so a fold still cannot be handed a number that is not a note. That check
+    costs 0.83 ms for 12 931 frames — it was never the models that made it
+    possible.
+    """
+    return TimelineFields(
+        analysis=_to_summary(row),
+        fields=PitchFields(midi_notes=row["midi_notes"], cents=row["cents"]),
     )
 
 

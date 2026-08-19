@@ -39,6 +39,8 @@ from app.services.audio_analysis.models import (
     AudioAnalysisSummary,
     AudioFeedbackStatus,
     DecimatedTimeline,
+    PitchFields,
+    TimelineFields,
 )
 from app.services.audio_analysis.postgres_repository import (
     ActiveAudioAnalysisExistsError,
@@ -598,6 +600,26 @@ class InMemoryAudioAnalysisRepository:
             analysis=_summary_of(stored),
             points=stored.pitch_points[::decimation],
             decimation=decimation,
+        )
+
+    async def latest_fields_for_recording(self, recording_id: str) -> TimelineFields | None:
+        """The fields the two aggregations fold, where the SQL projects them.
+
+        PostgreSQL never builds the frames; this takes them apart again after
+        the fact. The contract suite asserts that both routes arrive at the same
+        arrays for the same stored timeline — a fold reading ``cents`` that
+        belong to other notes would produce a breakdown that looks entirely
+        reasonable, so "the same" is asserted rather than assumed.
+        """
+        # Not via ``latest_for_recording``: in PostgreSQL this is its own
+        # statement, and the suites that count which read a route asked for
+        # patch that method. See the note on the decimated read above.
+        stored = next(iter(await self.list_for_recording(recording_id)), None)
+        if stored is None:
+            return None
+        return TimelineFields(
+            analysis=_summary_of(stored),
+            fields=PitchFields.of_points(stored.pitch_points),
         )
 
     async def list_for_recording(self, recording_id: str) -> list[AudioAnalysis]:

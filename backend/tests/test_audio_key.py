@@ -99,6 +99,7 @@ from app.services.audio_analysis.models import (
     KeyAnalysis,
     KeyMode,
     KeyUnmeasuredReason,
+    PitchFields,
     PitchPoint,
 )
 from app.services.audio_analysis.notes import summarise_notes
@@ -115,11 +116,15 @@ HOP = 0.0232
 BASE_MIDI = 60
 
 
-def timeline(weights: dict[int, int], *, base: int = BASE_MIDI) -> tuple[PitchPoint, ...]:
+def timeline(weights: dict[int, int], *, base: int = BASE_MIDI) -> PitchFields:
     """Build a timeline spending ``frames`` on each named pitch class.
 
-    Real ``PitchPoint`` objects, validated by the same model the analyzer writes,
-    so a fixture cannot express something the pipeline could not produce.
+    Built as real ``PitchPoint`` objects, validated by the same model the
+    analyzer writes, so a fixture cannot express something the pipeline could
+    not produce — then reduced to the two fields the estimator reads by the same
+    constructor production uses. The store projects those two fields straight
+    out of the stored document; the contract suite asserts both routes reach the
+    same arrays.
     """
     points: list[PitchPoint] = []
     timestamp = 0.0
@@ -140,7 +145,15 @@ def timeline(weights: dict[int, int], *, base: int = BASE_MIDI) -> tuple[PitchPo
                 )
             )
             timestamp += HOP
-    return tuple(points)
+    return PitchFields.of_points(tuple(points))
+
+
+def joined(*parts: PitchFields) -> PitchFields:
+    """Several fixtures as one timeline. Arrays concatenate field by field."""
+    return PitchFields(
+        midi_notes=tuple(note for part in parts for note in part.midi_notes),
+        cents=tuple(value for part in parts for value in part.cents),
+    )
 
 
 def transposed(weights: dict[int, int], semitones: int) -> dict[int, int]:
@@ -178,10 +191,10 @@ def test_the_profile_always_has_twelve_entries_in_order() -> None:
 
 def test_octaves_fold_into_one_pitch_class() -> None:
     """A2, A4 and A5 are three pitches and one pitch class."""
-    points = (
-        timeline({0: 30}, base=45)  # A2
-        + timeline({0: 30}, base=57)  # A3
-        + timeline({0: 30}, base=69)  # A4
+    points = joined(
+        timeline({0: 30}, base=45),  # A2
+        timeline({0: 30}, base=57),  # A3
+        timeline({0: 30}, base=69),  # A4
     )
     shares = pitch_class_profile(points, frame_seconds=HOP)
     assert shares[6].name == "F#"  # index is the pitch class, not the order sung
@@ -196,7 +209,7 @@ def test_shares_are_of_voiced_time_and_sum_to_one_hundred() -> None:
 
 def test_an_empty_timeline_has_no_profile_rather_than_twelve_zeroes() -> None:
     """ "No pitch classes were detected" is not a measurement of twelve zeroes."""
-    assert pitch_class_profile((), frame_seconds=HOP) == ()
+    assert pitch_class_profile(PitchFields(), frame_seconds=HOP) == ()
 
 
 def test_a_nonsense_hop_produces_no_profile() -> None:
@@ -633,11 +646,15 @@ def test_a_partial_profile_is_refused_by_the_model() -> None:
 # What has to stay true is that it remains one, and these assertions are written
 # so that an algorithmic regression fails them and a slow machine does not.
 #
-# Measured on the development machine at the ceiling below, best of fifteen runs:
+# Measured on the development machine at the ceiling below, best of fifteen runs.
+# The second column is Step 10.15, which handed both folds the two fields they
+# read as arrays instead of a tuple of ``PitchPoint``: the arithmetic is
+# unchanged, and indexing an array is not attribute access on a model.
 #
-#   analyse_key (fold + 24 correlations)   1.35 ms
-#   estimate_key alone, profile pre-folded 0.18 ms
-#   summarise_notes, the same timeline     2.95 ms
+#                                          over frames   over fields
+#   analyse_key (fold + 24 correlations)      1.35 ms       0.90 ms
+#   estimate_key alone, profile pre-folded    0.18 ms       0.18 ms
+#   summarise_notes, the same timeline        2.95 ms       2.04 ms
 #
 # The fold dominates, the 24 correlations do not: they are twelve-element
 # arithmetic whatever the recording's length.
@@ -653,7 +670,7 @@ def _ceiling_points() -> int:
     return math.floor(Settings().max_audio_duration_seconds / HOP_SECONDS)
 
 
-def long_timeline(points: int) -> tuple[PitchPoint, ...]:
+def long_timeline(points: int) -> PitchFields:
     """A melody-shaped timeline of ``points`` frames, spanning three octaves.
 
     Not one held note repeated: the fold's work is a modulo and a list index per
@@ -687,7 +704,7 @@ def long_timeline(points: int) -> tuple[PitchPoint, ...]:
             )
             timestamp += HOP_SECONDS
         index += 1
-    return tuple(built)
+    return PitchFields.of_points(tuple(built))
 
 
 def fastest(call: Callable[[], object], runs: int = 9) -> float:

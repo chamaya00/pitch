@@ -39,7 +39,14 @@ from typing import Final
 # the domain rather than restated so the two can never drift apart — and taken
 # from ``models`` rather than from the analyzer, so aggregating a timeline does
 # not drag numpy and a decoder in behind it.
-from app.services.audio_analysis.models import IN_TUNE_CENTS, NoteSummary, PitchPoint
+from app.services.audio_analysis.models import IN_TUNE_CENTS, NoteSummary, PitchFields
+
+# The naming rule, from the one module that states it. A note's name is a fact
+# about its number, so it is derived here rather than carried through the read:
+# the analyzer names every point with this same function, from the same integer
+# this aggregation groups on, which makes reading the stored name a second copy
+# of an answer rather than a second source for it.
+from app.services.audio_analysis.pitch import note_name_for_midi
 
 __all__ = [
     "IN_TUNE_CENTS",
@@ -63,19 +70,17 @@ def frame_duration_seconds(hop_length_samples: int, sample_rate_hz: int) -> floa
     return hop_length_samples / sample_rate_hz
 
 
-def voiced_seconds(points: tuple[PitchPoint, ...], frame_seconds: float) -> float:
+def voiced_seconds(frames: PitchFields, frame_seconds: float) -> float:
     """Total reliably pitched time in a timeline.
 
-    Every point in the timeline is a voiced frame — unvoiced audio is omitted
+    Every frame in the timeline is a voiced one — unvoiced audio is omitted
     upstream rather than stored with null fields — so this is a frame count
     times the hop.
     """
-    return len(points) * frame_seconds
+    return len(frames) * frame_seconds
 
 
-def summarise_notes(
-    points: tuple[PitchPoint, ...], *, frame_seconds: float
-) -> tuple[NoteSummary, ...]:
+def summarise_notes(frames: PitchFields, *, frame_seconds: float) -> tuple[NoteSummary, ...]:
     """Aggregate a pitch timeline into one entry per musical note.
 
     Returns an empty tuple when there is nothing pitched to break down. That is
@@ -87,35 +92,35 @@ def summarise_notes(
     order would depend on dictionary iteration and the same recording could
     render differently between runs.
     """
-    if not points or frame_seconds <= 0:
+    if not frames or frame_seconds <= 0:
         return ()
 
-    grouped: dict[int, list[PitchPoint]] = defaultdict(list)
-    for point in points:
-        grouped[point.midi_note].append(point)
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for midi, cents in zip(frames.midi_notes, frames.cents, strict=True):
+        grouped[midi].append(cents)
 
-    total_frames = len(points)
+    total_frames = len(frames)
     summaries = [
-        _summarise(midi, frames, frame_seconds, total_frames) for midi, frames in grouped.items()
+        _summarise(midi, deviations, frame_seconds, total_frames)
+        for midi, deviations in grouped.items()
     ]
     return tuple(sorted(summaries, key=lambda note: (-note.duration_seconds, note.midi_note)))
 
 
 def _summarise(
-    midi: int, frames: list[PitchPoint], frame_seconds: float, total_frames: int
+    midi: int, cents: list[float], frame_seconds: float, total_frames: int
 ) -> NoteSummary:
-    cents = [frame.cents for frame in frames]
     in_tune = sum(1 for value in cents if abs(value) <= IN_TUNE_CENTS)
 
     return NoteSummary(
         midi_note=midi,
-        note_name=frames[0].note_name,
-        duration_seconds=len(frames) * frame_seconds,
+        note_name=note_name_for_midi(midi),
+        duration_seconds=len(cents) * frame_seconds,
         # Of voiced time, which is the same denominator for every note, so the
         # shares sum to 100 without needing to be normalised afterwards.
-        percentage_of_voiced_time=100.0 * len(frames) / total_frames,
-        frame_count=len(frames),
+        percentage_of_voiced_time=100.0 * len(cents) / total_frames,
+        frame_count=len(cents),
         average_cents=sum(cents) / len(cents),
         mean_abs_cents=sum(abs(value) for value in cents) / len(cents),
-        in_tune_ratio=in_tune / len(frames),
+        in_tune_ratio=in_tune / len(cents),
     )

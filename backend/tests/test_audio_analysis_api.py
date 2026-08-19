@@ -787,11 +787,10 @@ def test_reading_a_key_loads_the_analysis_once_and_writes_nothing(
 ) -> None:
     """The endpoint's cost, counted rather than reasoned about.
 
-    The analysis document carries the pitch timeline — up to 12 931 points of
-    JSONB at the accepted maximum — and loading it dominates this request by an
-    order of magnitude over the ~1.4 ms of arithmetic that folds it. The route
-    needs the record twice over: once for the ids in the response, once for the
-    timeline to fold. It must get both from one load.
+    Folding a stored timeline dominates this request by an order of magnitude
+    over the ~1.4 ms of arithmetic that decides the key. The route needs the
+    record twice over: once for the ids in the response, once for the frames to
+    fold. It must get both from one load.
 
     Counting is also what keeps the two halves of the response consistent. Two
     loads can straddle a re-analysis and pair one record's ids with another
@@ -801,14 +800,14 @@ def test_reading_a_key_loads_the_analysis_once_and_writes_nothing(
     client.post(audio_url(recording_id))
 
     loads = 0
-    original = doubles.audio_analyses.latest_for_recording
+    original = doubles.audio_analyses.latest_fields_for_recording
 
     async def counted(rid: str):  # type: ignore[no-untyped-def]
         nonlocal loads
         loads += 1
         return await original(rid)
 
-    monkeypatch.setattr(doubles.audio_analyses, "latest_for_recording", counted)
+    monkeypatch.setattr(doubles.audio_analyses, "latest_fields_for_recording", counted)
     before = {
         analysis_id: analysis.model_dump()
         for analysis_id, analysis in doubles.audio_analyses._records.items()
@@ -873,6 +872,19 @@ def _count_timeline_loads(doubles: Doubles, monkeypatch: pytest.MonkeyPatch) -> 
     return loads
 
 
+def _count_field_loads(doubles: Doubles, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count reads that fetch the fields the two aggregations fold."""
+    loads = [0]
+    fields = doubles.audio_analyses.latest_fields_for_recording
+
+    async def counted(recording_id: str):  # type: ignore[no-untyped-def]
+        loads[0] += 1
+        return await fields(recording_id)
+
+    monkeypatch.setattr(doubles.audio_analyses, "latest_fields_for_recording", counted)
+    return loads
+
+
 def test_the_summary_endpoints_never_load_a_pitch_timeline(
     client: TestClient, doubles: Doubles, recording_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -919,17 +931,46 @@ def test_reading_the_note_breakdown_loads_the_analysis_once(
     """The same property Phase 8 slice 5 established for the key.
 
     This route resolved the record for the ids in its response and then called
-    `service.notes`, which resolved it again — two loads of the document whose
+    `service.notes`, which resolved it again — two loads of the record whose
     timeline is the whole cost of the request. Two loads can also straddle a
     re-analysis and pair one record's ids with another record's notes.
     """
     recording = upload(client, melody_wav(tmp_path / "phrase.wav"))
     client.post(audio_url(recording))
-    loads = _count_timeline_loads(doubles, monkeypatch)
+    loads = _count_field_loads(doubles, monkeypatch)
 
     assert client.get(notes_url(recording)).status_code == 200
 
     assert loads == [1]
+
+
+def test_the_folding_routes_read_two_fields_and_never_a_whole_timeline(
+    client: TestClient, doubles: Doubles, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read these two make must be the size of what they fold, not of the store.
+
+    Both aggregate every frame of the timeline, so neither may be given a sample
+    the way the graph is. But of the six fields a stored frame carries they read
+    two — the semitone and the deviation from it — and until Step 10.15 they
+    built all 12 931 frames to reach them: ~50 ms of parsing and validation per
+    request, on the event loop, in front of every other request in the process,
+    for folds costing 3.3 ms and 1.4 ms.
+
+    Counting is the only way to see it, exactly as for the graph: a breakdown
+    folded from frames and a breakdown folded from two arrays are the same
+    response.
+    """
+    recording = upload(client, melody_wav(tmp_path / "phrase.wav"))
+    client.post(audio_url(recording))
+
+    whole_loads = _count_timeline_loads(doubles, monkeypatch)
+    field_loads = _count_field_loads(doubles, monkeypatch)
+
+    assert client.get(notes_url(recording)).status_code == 200
+    assert client.get(key_url(recording)).status_code == 200
+
+    assert whole_loads == [0]
+    assert field_loads == [2]
 
 
 def test_the_pitch_graph_reads_a_sample_and_never_the_whole_timeline(
