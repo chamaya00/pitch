@@ -10,6 +10,11 @@ is upstream of here.
 
     pitch timeline ─▶ pitch-class profile ─▶ 24 correlations ─▶ key | None
 
+The timeline arrives as :class:`~app.services.audio_analysis.models.PitchFields`
+— the semitone of every frame, as an array — because the only thing this module
+reads about a frame is which semitone it was nearest. Building the rest of a
+frame to count it cost ~50 ms per request and is what Step 10.15 removed.
+
 Four decisions carry this module, and three of them exist because the obvious
 implementation reports a confident key for a hum.
 
@@ -65,7 +70,7 @@ from app.services.audio_analysis.models import (
     KeyMode,
     KeyUnmeasuredReason,
     PitchClassShare,
-    PitchPoint,
+    PitchFields,
 )
 from app.services.audio_analysis.notes import voiced_seconds
 from app.services.audio_analysis.pitch import NOTE_NAMES
@@ -214,7 +219,7 @@ MIN_KEY_CONFIDENCE: Final = 0.05
 
 
 def pitch_class_profile(
-    points: tuple[PitchPoint, ...], *, frame_seconds: float
+    frames: PitchFields, *, frame_seconds: float
 ) -> tuple[PitchClassShare, ...]:
     """Fold a pitch timeline into twelve pitch-class shares of voiced time.
 
@@ -226,14 +231,14 @@ def pitch_class_profile(
     pitch classes were detected", which a caller must render as such — never as
     twelve measured zeroes.
     """
-    if not points or frame_seconds <= 0:
+    if not frames or frame_seconds <= 0:
         return ()
 
     counts = [0] * _SEMITONES
-    for point in points:
-        counts[point.midi_note % _SEMITONES] += 1
+    for midi in frames.midi_notes:
+        counts[midi % _SEMITONES] += 1
 
-    total = len(points)
+    total = len(frames)
     return tuple(
         PitchClassShare(
             pitch_class=pitch_class,
@@ -304,15 +309,15 @@ def estimate_key(
 
 
 def analyse_key(
-    points: tuple[PitchPoint, ...],
+    frames: PitchFields,
     *,
     frame_seconds: float,
     profiles: KeyProfileSet = DEFAULT_PROFILE_SET,
 ) -> KeyAnalysis:
     """Fold a timeline and estimate its key in one call."""
     return estimate_key(
-        pitch_class_profile(points, frame_seconds=frame_seconds),
-        voiced_seconds=voiced_seconds(points, frame_seconds),
+        pitch_class_profile(frames, frame_seconds=frame_seconds),
+        voiced_seconds=voiced_seconds(frames, frame_seconds),
         profiles=profiles,
     )
 

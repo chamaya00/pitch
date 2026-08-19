@@ -27,6 +27,7 @@ from app.services.audio_analysis.models import (
     AudioAnalysisStatus,
     AudioMetrics,
     NoteSummary,
+    PitchFields,
 )
 from app.services.audio_analysis.notes import frame_duration_seconds, summarise_notes
 from app.services.comparison.compare import compare_metrics, compare_notes, detect_caveats
@@ -117,7 +118,13 @@ def _notes_of(source: ComparisonSource) -> tuple[NoteSummary, ...]:
         return ()
     settings = analysis.metrics.settings
     return summarise_notes(
-        analysis.pitch_points,
+        # This side already holds the whole record: a comparison reads two
+        # documents for their metrics as well as their timelines, in one
+        # statement, and takes the fields out of frames it has rather than
+        # asking for them again. What that read costs is measured in
+        # ``docs/architecture.md``; Step 10.15 changed the shape of this call
+        # and not the read behind it.
+        PitchFields.of_points(analysis.pitch_points),
         frame_seconds=frame_duration_seconds(settings.hop_length_samples, settings.sample_rate_hz),
     )
 

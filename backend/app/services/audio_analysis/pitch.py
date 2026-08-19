@@ -96,16 +96,31 @@ def nearest_midi(frequency: float | None) -> int | None:
     return round(midi)
 
 
+def note_name_for_midi(midi: int) -> str:
+    """Scientific pitch notation for a whole semitone, e.g. 69 → ``A4``.
+
+    **A note's name is a fact about its number**, and this is where that fact
+    is stated. Nothing is measured here and nothing can fail: a semitone always
+    has a name, so unlike every other function in this module it returns a
+    ``str`` rather than ``str | None``.
+
+    That totality is why it exists separately from :func:`midi_to_note_name`,
+    which takes a possibly-fractional, possibly-absent pitch and must be able to
+    say "that is not a note". Aggregations read the stored ``midi_note`` of a
+    frame — an integer the model bounds to 0–127 — and would otherwise have to
+    handle a ``None`` that cannot arrive. One arithmetic, two entry points; the
+    naming rule is not restated anywhere else in this codebase.
+    """
+    return f"{NOTE_NAMES[midi % _SEMITONES_PER_OCTAVE]}{midi // _SEMITONES_PER_OCTAVE - 1}"
+
+
 def midi_to_note_name(midi: float | None) -> str | None:
     """Scientific pitch notation, e.g. 69 → ``A4``. Rounds to the nearest note."""
     if midi is None or isinstance(midi, bool) or not isinstance(midi, int | float):
         return None
     if not math.isfinite(midi):
         return None
-    rounded = round(midi)
-    name = NOTE_NAMES[rounded % _SEMITONES_PER_OCTAVE]
-    octave = rounded // _SEMITONES_PER_OCTAVE - 1
-    return f"{name}{octave}"
+    return note_name_for_midi(round(midi))
 
 
 def cents_from_nearest_note(frequency: float | None) -> float | None:

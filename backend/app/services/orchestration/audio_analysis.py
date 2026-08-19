@@ -50,6 +50,7 @@ from app.services.audio_analysis.models import (
     DecimatedTimeline,
     KeyAnalysis,
     NoteSummary,
+    TimelineFields,
     new_audio_analysis_id,
 )
 from app.services.audio_analysis.notes import frame_duration_seconds, summarise_notes
@@ -160,12 +161,40 @@ class AudioAnalysisService:
         that this one carries the points. It exists so that reading the timeline
         is a decision a caller makes rather than a cost every caller pays.
 
-        Two callers, and both fold every point they load: the note breakdown and
-        the key. The pitch graph used to be the third, and is not any more — it
-        returns a sample, so it reads one (:meth:`current_decimated_timeline`).
+        **No route reads this any more.** The graph reads a sample
+        (:meth:`current_decimated_timeline`) and the two aggregations read the
+        fields they fold (:meth:`current_timeline_fields`); each of those was one
+        of these reads until the step that gave it its own. This is kept as the
+        general form — the whole stored timeline, as frames, exactly as it was
+        written — and the repository read beneath it is what the contract suite
+        measures the narrower two against, point for point and field for field.
         """
         await self._require_owned(recording_id, owner_id)
         return await self._analyses.latest_for_recording(recording_id)
+
+    async def current_timeline_fields(
+        self, recording_id: str, owner_id: uuid.UUID
+    ) -> TimelineFields | None:
+        """:meth:`current`, with the **fields the aggregations fold** attached.
+
+        What the note breakdown and the key need, and all they have ever needed:
+        each frame's semitone and its deviation from that semitone. Until Step
+        10.15 they read the timeline as frames and built 12 931 ``PitchPoint``
+        models per request to read two fields of each — ~50 ms on the event
+        loop, in front of every other request in the process, for folds costing
+        3.3 ms and 1.4 ms.
+
+        Unlike the graph, neither may be given a sample: a breakdown of every
+        thirteenth frame is a breakdown of a different recording. This is the
+        whole timeline, and :class:`TimelineFields` refuses one that is shorter
+        than the stored count says it should be.
+
+        Same owner-scoped read as the others, and the same single load: the
+        record and its fields come from one statement, so a response cannot pair
+        one analysis's ids with another analysis's notes.
+        """
+        await self._require_owned(recording_id, owner_id)
+        return await self._analyses.latest_fields_for_recording(recording_id)
 
     async def current_decimated_timeline(
         self, recording_id: str, owner_id: uuid.UUID, *, max_points: int
@@ -204,7 +233,7 @@ class AudioAnalysisService:
             ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown or is
                 not this owner's.
         """
-        return self.notes_of(await self.current_timeline(recording_id, owner_id))
+        return self.notes_of(await self.current_timeline_fields(recording_id, owner_id))
 
     async def key(self, recording_id: str, owner_id: uuid.UUID) -> KeyAnalysis | None:
         """The musical key a recording's completed audio analysis best fits.
@@ -234,10 +263,10 @@ class AudioAnalysisService:
             ApiError: ``RECORDING_NOT_FOUND`` if the recording is unknown or is
                 not this owner's.
         """
-        return self.key_of(await self.current_timeline(recording_id, owner_id))
+        return self.key_of(await self.current_timeline_fields(recording_id, owner_id))
 
     @staticmethod
-    def key_of(analysis: AudioAnalysis | None) -> KeyAnalysis | None:
+    def key_of(timeline: TimelineFields | None) -> KeyAnalysis | None:
         """The key of one analysis record, with no repository access.
 
         The counterpart to :meth:`notes_of`, and it exists for a measured
@@ -257,13 +286,13 @@ class AudioAnalysisService:
         The caller must not collapse that with a :class:`KeyAnalysis` whose
         ``key`` is ``None``, which means the notes settled nothing.
         """
-        if analysis is None or analysis.status is not AudioAnalysisStatus.COMPLETED:
+        if timeline is None or timeline.analysis.status is not AudioAnalysisStatus.COMPLETED:
             return None
-        if analysis.metrics is None:
+        if timeline.analysis.metrics is None:
             return None
         return analyse_key(
-            analysis.pitch_points,
-            frame_seconds=AudioAnalysisService._frame_seconds(analysis.metrics),
+            timeline.fields,
+            frame_seconds=AudioAnalysisService._frame_seconds(timeline.analysis.metrics),
         )
 
     @staticmethod
@@ -280,7 +309,7 @@ class AudioAnalysisService:
         )
 
     @staticmethod
-    def notes_of(analysis: AudioAnalysis | None) -> tuple[NoteSummary, ...] | None:
+    def notes_of(timeline: TimelineFields | None) -> tuple[NoteSummary, ...] | None:
         """The breakdown of one analysis record, with no repository access.
 
         Split out so the feedback run can build the same breakdown from the
@@ -301,13 +330,13 @@ class AudioAnalysisService:
         and it found no notes. Audio feedback is still not given the key — see
         ``docs/phase-8-specification.md``.
         """
-        if analysis is None or analysis.status is not AudioAnalysisStatus.COMPLETED:
+        if timeline is None or timeline.analysis.status is not AudioAnalysisStatus.COMPLETED:
             return None
-        if analysis.metrics is None:
+        if timeline.analysis.metrics is None:
             return None
         return summarise_notes(
-            analysis.pitch_points,
-            frame_seconds=AudioAnalysisService._frame_seconds(analysis.metrics),
+            timeline.fields,
+            frame_seconds=AudioAnalysisService._frame_seconds(timeline.analysis.metrics),
         )
 
     async def start_feedback(self, recording_id: str, owner_id: uuid.UUID) -> AudioAnalysisSummary:
@@ -370,7 +399,7 @@ class AudioAnalysisService:
         # A claimed record is completed with metrics, checked above, so the
         # breakdown is a tuple; `or ()` narrows it rather than substituting for
         # a missing one.
-        notes = self.notes_of(analysis) or ()
+        notes = self.notes_of(TimelineFields.of_analysis(analysis)) or ()
         request = build_request(analysis.metrics, notes)
 
         try:

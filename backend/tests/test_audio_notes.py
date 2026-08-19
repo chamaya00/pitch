@@ -13,7 +13,7 @@ that reads like a successful measurement of zero.
 
 import pytest
 
-from app.services.audio_analysis.models import IN_TUNE_CENTS, PitchPoint
+from app.services.audio_analysis.models import IN_TUNE_CENTS, PitchFields, PitchPoint
 from app.services.audio_analysis.notes import (
     frame_duration_seconds,
     summarise_notes,
@@ -54,8 +54,20 @@ def timeline(*runs: tuple[int, int]) -> tuple[PitchPoint, ...]:
     return tuple(points)
 
 
+def fields(points: tuple[PitchPoint, ...]) -> PitchFields:
+    """The fixture as the aggregation reads it: two fields of every frame.
+
+    Fixtures are still written as whole frames, validated by the same model the
+    analyzer writes, so nothing here can express a point the pipeline could not
+    produce. The conversion is the one production uses — the store projects the
+    same two fields straight out of the stored document, and the contract suite
+    asserts the two routes reach the same arrays.
+    """
+    return PitchFields.of_points(points)
+
+
 def summarise(points: tuple[PitchPoint, ...]):  # type: ignore[no-untyped-def]
-    return summarise_notes(points, frame_seconds=FRAME_SECONDS)
+    return summarise_notes(fields(points), frame_seconds=FRAME_SECONDS)
 
 
 # --- Basic aggregation -----------------------------------------------------
@@ -87,7 +99,7 @@ def test_the_durations_sum_to_the_voiced_time() -> None:
     notes = summarise(points)
 
     assert sum(note.duration_seconds for note in notes) == pytest.approx(
-        voiced_seconds(points, FRAME_SECONDS)
+        voiced_seconds(fields(points), FRAME_SECONDS)
     )
 
 
@@ -255,7 +267,7 @@ def test_an_empty_timeline_produces_no_notes() -> None:
 
 
 def test_an_impossible_frame_duration_produces_no_notes_rather_than_infinity() -> None:
-    assert summarise_notes(timeline((60, 5)), frame_seconds=0.0) == ()
+    assert summarise_notes(fields(timeline((60, 5))), frame_seconds=0.0) == ()
 
 
 @pytest.mark.parametrize(("hop", "rate"), [(0, 22050), (512, 0), (-1, 22050)])
@@ -271,7 +283,7 @@ def test_the_frame_duration_is_the_hop_not_the_frame_length() -> None:
 
 
 def test_voiced_seconds_of_an_empty_timeline_is_zero() -> None:
-    assert voiced_seconds((), FRAME_SECONDS) == 0.0
+    assert voiced_seconds(PitchFields(), FRAME_SECONDS) == 0.0
 
 
 # --- Short events ----------------------------------------------------------

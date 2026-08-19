@@ -169,6 +169,25 @@ could render differently between runs.
 timeline; `_sustained` and `_vocal_range` are untouched, and the range remains
 the authoritative one.
 
+**A note's name is derived from its number, not read beside it** (Step 10.15).
+The breakdown needs one name per *note*, not one per frame, and a name is a
+function of a semitone: `note_name_for_midi` in `pitch.py` is the one place that
+arithmetic lives, and the analyzer names every point it writes with it, from the
+same integer this aggregation groups on. Reading the stored `note_name` would
+mean carrying 12 931 strings across the socket so the fold could avoid ~40
+function calls. Two tests hold the property that makes it sound: the two naming
+entry points agree for all 128 MIDI notes, and every point the real analyzer
+produces is named by its own number. Nothing here re-derives the *name* rule —
+there is one, in one module.
+
+**What the fold is given changed in 10.15; what it computes did not.** Both this
+and the key estimation take `PitchFields` — the semitone and deviation of every
+frame, as two arrays — rather than a tuple of `PitchPoint`. Every frame that was
+measured is still folded, the definitions above are unchanged and the responses
+are byte for byte what they were. What went away is building six fields per frame
+to read two: `/notes` 151.2 ms → 37.3 ms and `/key` 143.3 ms → 38.8 ms end to
+end, measured in [architecture.md](architecture.md).
+
 ### AI interpretation (Step 7L)
 
 A completed audio analysis can optionally be explained in plain language. The
@@ -650,11 +669,16 @@ at any recording length. Measured at the ceiling — 12 931 points, which is 300
 at the analyzer's 23.2 ms hop, derived from `max_audio_duration_seconds` and
 `HOP_SECONDS` rather than written down:
 
-| Operation | Cost at the ceiling |
-| --- | --- |
-| `analyse_key` (fold + 24 correlations) | 1.35 ms |
-| `estimate_key` alone, profile pre-folded | 0.18 ms |
-| `summarise_notes`, the same timeline | 2.95 ms |
+| Operation | Over frames | Over fields (10.15) |
+| --- | --- | --- |
+| `analyse_key` (fold + 24 correlations) | 1.35 ms | 0.90 ms |
+| `estimate_key` alone, profile pre-folded | 0.18 ms | 0.18 ms |
+| `summarise_notes`, the same timeline | 2.95 ms | 2.04 ms |
+
+The second column is the same arithmetic over the same frames, given the two
+fields it reads as arrays rather than as `PitchPoint` objects — see
+[architecture.md](architecture.md). `estimate_key` does not move, because it
+never saw a timeline: it is handed a twelve-element profile.
 
 Those are development-machine timings, best of fifteen runs, and the tests do not
 assert them. What is asserted is written to survive hardware nobody has measured:
@@ -681,13 +705,22 @@ about the algorithm changed. See [architecture.md](architecture.md).
 **Step 10.14 measured what that load costs when more than one person asks at
 once, and it is worse than the single-request figure suggests.** Building 12 931
 `PitchPoint` models is ~50 ms of GIL-held work on the event loop, so the three
-timeline endpoints serve ~7 requests a second between them however many clients
-are waiting, and while one is running every other request in the process —
-including the poll that says whether a measurement has finished — is stopped.
-`/pitch` was fixed by asking PostgreSQL for the sample it returns instead of the
-whole timeline; `/key` and `/notes` fold every point and therefore still load
-every point, unchanged at ~135 ms. That is a property of the read, not of the
-arithmetic: the folds are still 1.35 ms and 2.95 ms.
+timeline endpoints served ~7 requests a second between them however many clients
+were waiting, and while one was running every other request in the process —
+including the poll that says whether a measurement has finished — was stopped.
+10.14 fixed `/pitch` by asking PostgreSQL for the sample it returns instead of
+the whole timeline, and left `/key` and `/notes` at ~135 ms, because both fold
+every point and so must read every point.
+
+**Step 10.15 separated those two statements.** Reading every *frame* and reading
+every *point* are not the same requirement: the folds read two of a frame's six
+fields, so PostgreSQL projects those two into arrays and the frames are never
+built. Both folds still see every measured frame. End to end `/notes` went
+151.2 ms → 37.3 ms and `/key` 143.3 ms → 38.8 ms, and at sixteen concurrent
+readers throughput went 8.4 → 64.7 and 10.0 → 71.4 requests a second. The
+arithmetic got slightly cheaper as a side effect — 2.95 → 2.04 ms and 1.35 →
+0.90 ms, because indexing an array is not attribute access on a model — but the
+algorithm is unchanged and so is every number it produces.
 
 **Nothing here has been validated against human singing**: every fixture is
 synthetic, and this repository holds no annotated corpus to do it with.

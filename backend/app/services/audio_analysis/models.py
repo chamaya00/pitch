@@ -21,7 +21,7 @@ names.
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Final, Self
+from typing import Annotated, Any, Final, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -658,5 +658,121 @@ class DecimatedTimeline(BaseModel):
             raise ValueError(
                 f"a stride of {self.decimation} over {self.analysis.pitch_point_count} points "
                 f"is {expected} points, not {len(self.points)}"
+            )
+        return self
+
+
+class PitchFields(BaseModel):
+    """A stored timeline as the fields the aggregations read, not as frames.
+
+    :func:`~app.services.audio_analysis.notes.summarise_notes` and
+    :func:`~app.services.audio_analysis.key.pitch_class_profile` read two things
+    about each frame — which semitone it was nearest, and how far from it — and
+    nothing else. A frame also carries a timestamp, a frequency, a name and a
+    confidence, and building all six for a fold that reads two cost ~50 ms per
+    request at the longest accepted recording, all of it on the event loop. This
+    is the same timeline expressed as **one array per field rather than one
+    object per frame**, which is the shape a fold consumes and the shape
+    PostgreSQL can produce without sending the rest.
+
+    **Not a timeline, and deliberately unable to become one.** There is no
+    timestamp here, so nothing built from this can be drawn, returned as points
+    or written back — ``/pitch`` reads :class:`DecimatedTimeline` and every
+    write takes an :class:`AudioAnalysis`. What this supports is aggregation.
+
+    The values are still checked. Each note is a MIDI number and each deviation
+    is within ±50 cents, exactly as on :class:`PitchPoint`, because a fold over
+    values nobody bounded would produce a note name for a number that is not a
+    note. It costs 0.83 ms for 12 931 frames against ~50 ms to build them as
+    models — the models were never what made the check possible.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Nearest semitone per frame, in recording order.
+    midi_notes: tuple[Annotated[int, Field(ge=0, le=127)], ...] = ()
+    #: Signed distance to that semitone per frame, in the same order.
+    cents: tuple[Annotated[float, Field(ge=-50, le=50)], ...] = ()
+
+    @model_validator(mode="after")
+    def _check_the_fields_describe_the_same_frames(self) -> Self:
+        """Two arrays are one timeline only while they are the same length.
+
+        ``cents[i]`` is the deviation of ``midi_notes[i]``. A pair that has
+        drifted apart is not a timeline missing a value — it is a set of
+        deviations attributed to the wrong notes, which would produce a note
+        breakdown that looks entirely reasonable and is wrong. It cannot happen
+        by construction in either repository; it is refused here anyway, because
+        the cost is one comparison and the failure is silent.
+        """
+        if len(self.midi_notes) != len(self.cents):
+            raise ValueError(
+                f"{len(self.midi_notes)} notes and {len(self.cents)} deviations "
+                "cannot describe the same frames"
+            )
+        return self
+
+    @classmethod
+    def of_points(cls, points: tuple[PitchPoint, ...]) -> Self:
+        """The same fields, taken from frames already in memory.
+
+        For callers that hold a whole record for another reason — the feedback
+        run, which has just measured it, and the comparison, which reads both
+        sides whole. Reading a document *in order to* fold it goes through
+        ``latest_fields_for_recording`` instead, which never builds the frames.
+        """
+        return cls(
+            midi_notes=tuple(point.midi_note for point in points),
+            cents=tuple(point.cents for point in points),
+        )
+
+    def __len__(self) -> int:
+        """Frames described. The two arrays agree on this by validation above."""
+        return len(self.midi_notes)
+
+
+class TimelineFields(BaseModel):
+    """An analysis record, and the fields of its timeline that a fold reads.
+
+    The fourth form of an audio-analysis read, and a separate type for the
+    reason :class:`DecimatedTimeline` is one: what it carries cannot be written
+    back. The record is an :class:`AudioAnalysisSummary`, which ``update``
+    refuses, and :class:`PitchFields` is not a timeline — so a fold cannot
+    accidentally become a write that erases one.
+
+    Both halves come from one statement, so the ids in a response and the notes
+    in it always describe the same analysis, even if the recording is being
+    re-analysed while the request runs.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    analysis: AudioAnalysisSummary
+    fields: PitchFields = PitchFields()
+
+    @classmethod
+    def of_analysis(cls, analysis: AudioAnalysis) -> Self:
+        """The same thing, from a record whose frames are already in memory.
+
+        For the background feedback run, which has just measured the recording
+        and holds every point anyway. A read that exists *in order to* fold goes
+        to ``latest_fields_for_recording`` and never builds them.
+        """
+        return cls(analysis=analysis, fields=PitchFields.of_points(analysis.pitch_points))
+
+    @model_validator(mode="after")
+    def _check_every_stored_frame_is_here(self) -> Self:
+        """A fold reads the whole timeline or it is not that recording's answer.
+
+        Unlike a sample, this is not allowed to be short: a note breakdown of
+        half a recording is a plausible-looking answer to a question nobody
+        asked. ``pitch_point_count`` is the stored length, written beside the
+        document, so the two are independent statements about the same timeline
+        and disagreeing means one of them is wrong.
+        """
+        if len(self.fields) != self.analysis.pitch_point_count:
+            raise ValueError(
+                f"{len(self.fields)} frames cannot be the whole of a timeline of "
+                f"{self.analysis.pitch_point_count}"
             )
         return self

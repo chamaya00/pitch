@@ -29,6 +29,7 @@ from app.services.audio_analysis.errors import (
     AudioUnsupportedError,
     InsufficientPitchSignalError,
 )
+from app.services.audio_analysis.pitch import note_name_for_midi
 from tests.fixtures import (
     harmonic_samples,
     noise_samples,
@@ -53,6 +54,14 @@ def tone_file(path: Path, frequency: float, *, seconds: float = 2.0) -> Path:
     )
 
 
+def phrase_file(path: Path, *frequencies: float, seconds_per_note: float = 0.6) -> Path:
+    """Several notes in a row, for properties that a single held note cannot show."""
+    samples: list[float] = []
+    for frequency in frequencies:
+        samples += harmonic_samples(frequency, seconds=seconds_per_note, sample_rate=SAMPLE_RATE)
+    return write_signal_wav(path, samples, sample_rate=SAMPLE_RATE)
+
+
 def cents_between(measured: float, expected: float) -> float:
     return 1200 * math.log2(measured / expected)
 
@@ -69,6 +78,29 @@ def test_a_held_a4_is_measured_as_a4(analyzer: SignalAudioAnalyzer, tmp_path: Pa
     assert result.metrics.pitch.semitone_span == 0
     assert result.metrics.stability.voiced_ratio > 0.9
     assert all(point.note_name == "A4" for point in result.pitch_points)
+
+
+def test_every_point_the_analyzer_writes_is_named_by_its_own_number(
+    analyzer: SignalAudioAnalyzer, tmp_path: Path
+) -> None:
+    """The property the two aggregations rely on, asserted where the names are made.
+
+    Since Step 10.15 the note breakdown derives a note's name from the stored
+    ``midi_note`` rather than reading the ``note_name`` beside it — the name is a
+    fact about the number, and reading it would mean sending 12 931 strings the
+    fold can compute. That is only sound while the writer agrees, which it does
+    by construction: it names each point with the same function from the same
+    integer. This is the test that would fail if that ever stopped being true,
+    and it runs against real decoded audio rather than a fixture.
+    """
+    #  C4       E4       G4       B4       C5
+    result = analyzer.analyze(
+        phrase_file(tmp_path / "phrase.wav", 261.626, 329.628, 391.995, 493.883, 523.251)
+    )
+
+    assert result.pitch_points
+    for point in result.pitch_points:
+        assert point.note_name == note_name_for_midi(point.midi_note)
 
 
 def test_a_held_c4_is_measured_as_c4(analyzer: SignalAudioAnalyzer, tmp_path: Path) -> None:

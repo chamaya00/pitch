@@ -34,11 +34,11 @@ from app.schemas.audio_analysis import (
     PitchTimelineResponse,
 )
 from app.services.audio_analysis.models import (
-    AudioAnalysis,
     AudioAnalysisStatus,
     AudioAnalysisSummary,
     AudioFeedbackStatus,
     DecimatedTimeline,
+    TimelineFields,
 )
 from app.services.orchestration.audio_analysis import AudioAnalysisService
 
@@ -242,19 +242,19 @@ async def get_note_breakdown(
     owner_id: OwnerIdDep,
 ) -> NoteBreakdownResponse:
     """Return the analysis's pitched time, aggregated by note."""
-    analysis = await _require_timeline(service, recording_id, owner_id)
+    timeline = await _require_timeline_fields(service, recording_id, owner_id)
     # Aggregated from the record already loaded, exactly as the key is below.
     # This route used to resolve the analysis and then call `service.notes`,
     # which resolved it again — two loads of a document whose timeline is the
     # whole cost of the request, and a window in which a re-analysis between
     # them could pair one analysis's ids with another analysis's notes.
-    notes = service.notes_of(analysis)
+    notes = service.notes_of(timeline)
     if notes is None:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
             "That recording's audio analysis has not finished yet.",
         )
-    return NoteBreakdownResponse.from_domain(analysis, notes)
+    return NoteBreakdownResponse.from_domain(timeline.analysis, notes)
 
 
 @router.get(
@@ -292,12 +292,12 @@ async def get_musical_key(
     owner_id: OwnerIdDep,
 ) -> MusicalKeyResponse:
     """Return the key the analysis's pitch classes best fit, or say there is none."""
-    analysis = await _require_timeline(service, recording_id, owner_id)
+    timeline = await _require_timeline_fields(service, recording_id, owner_id)
     # Folded from the record already loaded, not fetched again: the pitch
     # timeline is the expensive part of this request and a second read would
     # buy nothing but the chance of pairing one analysis's ids with another
     # analysis's key.
-    key = service.key_of(analysis)
+    key = service.key_of(timeline)
     if key is None:
         # No *completed* analysis. Deliberately the same answer `/notes` gives,
         # and deliberately not a null key: one means there is nothing to look
@@ -306,7 +306,7 @@ async def get_musical_key(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
             "That recording's audio analysis has not finished yet.",
         )
-    return MusicalKeyResponse.from_domain(analysis, key)
+    return MusicalKeyResponse.from_domain(timeline.analysis, key)
 
 
 @router.post(
@@ -419,21 +419,26 @@ async def _require_analysis(
     return analysis
 
 
-async def _require_timeline(
+async def _require_timeline_fields(
     service: AudioAnalysisService, recording_id: str, owner_id: uuid.UUID
-) -> AudioAnalysis:
-    """The same record **with** its pitch timeline, for the two routes that fold it.
+) -> TimelineFields:
+    """The same record with **what the two folding routes read** of its timeline.
 
-    Separate from :func:`_require_analysis` so that paying for the points is a
-    choice a route makes, and visible in its own body.
+    Separate from :func:`_require_analysis` so that paying for the timeline is a
+    choice a route makes, and visible in its own body. Both routes here fold
+    every frame and return none, and they read two of a frame's six fields; this
+    reads those two, as arrays. Building the frames to reach them cost ~50 ms of
+    event-loop time per request — time in which every other request in the
+    process, including the poll that says whether an analysis has finished, was
+    waiting.
     """
-    analysis = await service.current_timeline(recording_id, owner_id)
-    if analysis is None:
+    timeline = await service.current_timeline_fields(recording_id, owner_id)
+    if timeline is None:
         raise ApiError(
             ErrorCode.AUDIO_ANALYSIS_NOT_FOUND,
             "That recording's audio has not been analysed yet.",
         )
-    return analysis
+    return timeline
 
 
 async def _require_decimated_timeline(

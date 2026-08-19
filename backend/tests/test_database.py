@@ -40,6 +40,7 @@ from app.services.audio_analysis.models import (
 )
 from app.services.audio_analysis.postgres_repository import (
     _DECIMATED_SQL,
+    _FIELDS_SQL,
     _SUMMARY_COLUMNS,
     ActiveAudioAnalysisExistsError,
     AudioAnalysisConflictError,
@@ -932,6 +933,31 @@ def test_the_decimated_read_touches_the_document_twice_and_no_more() -> None:
     assert reads == 2, f"the decimated read decompresses the document {reads} times"
     assert "WITH ORDINALITY" in _DECIMATED_SQL
     assert "pitch_point_count::numeric" in _DECIMATED_SQL, "the stride comes from the column"
+
+
+def test_the_fields_read_touches_the_document_twice_and_no_more() -> None:
+    """Two fields, one expansion — not one expansion per field.
+
+    The strip produces the record without its timeline; the expansion produces
+    the frames both arrays are aggregated from. Reading each field with its own
+    ``jsonb_path_query_array`` would have been the natural way to write this and
+    would have detoasted a 1 685 kB document three times instead of twice, which
+    is the 10.12 regression in a new statement.
+
+    The ordering is asserted with them because it is what makes the pair a
+    timeline: ``cents[i]`` must be the deviation of ``midi_notes[i]``, and two
+    aggregates ordered by the same ordinality is how that holds.
+    """
+    reads = _document_reads(_FIELDS_SQL)
+    assert reads == 2, f"the fields read decompresses the document {reads} times"
+    assert _FIELDS_SQL.count("jsonb_array_elements") == 1, "one walk of the timeline, not two"
+    assert _FIELDS_SQL.count("array_agg") == 2
+    assert _FIELDS_SQL.count("ORDER BY frame.ordinality") == 2, "both arrays in the same order"
+    # Typed arrays, so the driver decodes them without parsing json — and so a
+    # stored value that is not a number fails in PostgreSQL rather than arriving
+    # as one.
+    assert "::int ORDER BY" in _FIELDS_SQL
+    assert "::float8 ORDER BY" in _FIELDS_SQL
 
 
 def test_the_progress_query_reaches_the_metrics_once_per_row() -> None:

@@ -45,8 +45,10 @@ from app.services.audio_analysis.models import (
     KeyMode,
     KeyUnmeasuredReason,
     Loudness,
+    PitchFields,
     PitchPoint,
     PitchStability,
+    TimelineFields,
     VocalRange,
     new_audio_analysis_id,
 )
@@ -605,6 +607,13 @@ class CountingAnalysisRepository(InMemoryAudioAnalysisRepository):
     Those are the cheap ones — 1.7 ms against 87 ms, measured — and they are
     counted separately rather than ignored so a test can say "this path read the
     record, and read it the inexpensive way" instead of only "it read nothing".
+
+    ``field_loads`` counts the reads the two aggregations make: every frame of
+    the timeline, but only the two fields they fold, projected into arrays by
+    the store. Also its own counter rather than folded into ``loads``, because
+    the whole point of Step 10.15 is that a note breakdown reads a timeline
+    without building one — a test that could not tell the two apart could not
+    see the difference.
     """
 
     def __init__(self) -> None:
@@ -612,6 +621,7 @@ class CountingAnalysisRepository(InMemoryAudioAnalysisRepository):
         self.writes = 0
         self.loads = 0
         self.summary_loads = 0
+        self.field_loads = 0
 
     async def create(self, analysis: AudioAnalysis) -> AudioAnalysis:
         self.writes += 1
@@ -632,6 +642,10 @@ class CountingAnalysisRepository(InMemoryAudioAnalysisRepository):
     async def latest_summary_for_recording(self, recording_id: str) -> AudioAnalysisSummary | None:
         self.summary_loads += 1
         return await super().latest_summary_for_recording(recording_id)
+
+    async def latest_fields_for_recording(self, recording_id: str) -> TimelineFields | None:
+        self.field_loads += 1
+        return await super().latest_fields_for_recording(recording_id)
 
     async def list_summaries_for_recording(self, recording_id: str) -> list[AudioAnalysisSummary]:
         self.summary_loads += 1
@@ -701,7 +715,7 @@ def test_the_service_reports_exactly_what_the_estimator_decided(
     )
 
     through_service = run(lambda: service.key(recording_id, OWNER_ID))
-    directly = analyse_key(points, frame_seconds=_HOP_SECONDS)
+    directly = analyse_key(PitchFields.of_points(points), frame_seconds=_HOP_SECONDS)
 
     assert through_service is not None
     assert through_service.model_dump() == directly.model_dump()
@@ -950,13 +964,16 @@ def test_estimating_a_key_loads_the_analysis_exactly_once(
     storage: RecordingStorage,
     recording_id: str,
 ) -> None:
-    """One document read per call, and the count is the assertion.
+    """One read per call, and the count is the assertion.
 
-    The document is the cost of this request — the timeline inside it is up to
-    12 931 points of JSONB, against ~1.4 ms of arithmetic to fold it. A second
-    load would roughly double the expensive half of a read-only endpoint, so it
-    is worth a test that says so in numbers rather than a comment that says so
-    in prose.
+    Reading the timeline is the cost of this request — up to 12 931 stored
+    frames, against ~1.4 ms of arithmetic to fold them. A second read would
+    roughly double the expensive half of a read-only endpoint, so it is worth a
+    test that says so in numbers rather than a comment that says so in prose.
+
+    It must also be the *right* read: since Step 10.15 the fold is given the two
+    fields it uses rather than whole frames, so a whole-document load here would
+    be the cost this endpoint stopped paying, quietly returned.
     """
     analyses = CountingAnalysisRepository()
     _store_completed(analyses, recording_id, _timeline(_C_MAJOR_MELODY))
@@ -964,11 +981,13 @@ def test_estimating_a_key_loads_the_analysis_exactly_once(
         recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
     )
     analyses.loads = 0
+    analyses.field_loads = 0
     analyses.writes = 0
 
     assert run(lambda: service.key(recording_id, OWNER_ID)) is not None
 
-    assert analyses.loads == 1
+    assert analyses.field_loads == 1
+    assert analyses.loads == 0
     assert analyses.writes == 0
 
 
@@ -992,7 +1011,7 @@ def test_folding_a_key_from_a_record_already_held_loads_nothing(
     analyses.loads = 0
     analyses.writes = 0
 
-    folded = service.key_of(stored)
+    folded = service.key_of(TimelineFields.of_analysis(stored))
 
     assert folded is not None and folded.key is not None
     assert folded.key.tonic == "C"
@@ -1018,7 +1037,7 @@ def test_folding_a_key_from_a_record_agrees_with_looking_one_up(
     )
 
     looked_up = run(lambda: service.key(recording_id, OWNER_ID))
-    folded = service.key_of(stored)
+    folded = service.key_of(TimelineFields.of_analysis(stored))
 
     assert looked_up is not None and folded is not None
     assert looked_up.model_dump() == folded.model_dump()
@@ -1050,7 +1069,7 @@ def test_folding_a_key_from_nothing_is_the_same_absence_as_looking_one_up(
                 ErrorCode.AUDIO_ANALYSIS_FAILED if status is AudioAnalysisStatus.FAILED else None
             ),
         )
-        assert service.key_of(record) is None
+        assert service.key_of(TimelineFields.of_analysis(record)) is None
 
 
 def test_a_completed_analysis_cannot_reach_the_fold_without_metrics(
@@ -1106,7 +1125,7 @@ def test_the_service_adds_nothing_measurable_to_the_estimator_at_the_ceiling(
         run(lambda: service.key(recording_id, OWNER_ID))
 
     def estimator_only() -> None:
-        analyse_key(points, frame_seconds=_HOP_SECONDS)
+        analyse_key(PitchFields.of_points(points), frame_seconds=_HOP_SECONDS)
 
     through_service()
     estimator_only()
@@ -1218,11 +1237,13 @@ def test_reading_the_note_breakdown_loads_the_analysis_once(
     service = build(
         recordings=recordings, storage=storage, analyses=analyses, analyzer=StubAnalyzer()
     )
+    analyses.field_loads = 0
 
     notes = run(lambda: service.notes(recording_id, OWNER_ID))
 
     assert notes
-    assert analyses.loads == 1
+    assert analyses.field_loads == 1
+    assert analyses.loads == 0
 
 
 def test_a_summary_read_still_reports_the_measured_frames(
