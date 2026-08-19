@@ -24,6 +24,7 @@ from app.services.audio_analysis.pitch import (
     midi_to_note_name,
     nearest_midi,
     note_name_for_frequency,
+    note_name_for_midi,
     semitones_between,
 )
 
@@ -146,6 +147,33 @@ def test_midi_to_note_name_rejects_what_cannot_be_a_note() -> None:
     assert midi_to_note_name(math.inf) is None
     assert midi_to_frequency(math.nan) is None
     assert midi_to_frequency(None) is None
+
+
+def test_a_semitone_is_named_the_same_whichever_entry_point_asks() -> None:
+    """One naming rule, two entry points, and no room for a third.
+
+    :func:`note_name_for_midi` is what the two aggregations call: they group on
+    the stored ``midi_note`` and derive the name rather than reading the one in
+    the document, which is why the two must agree for **every** note a stored
+    point can hold. If they could differ, a note breakdown would disagree with
+    the timeline it was folded from — and the analyzer names every point it
+    writes through the other entry point.
+    """
+    for midi in range(128):
+        assert note_name_for_midi(midi) == midi_to_note_name(midi)
+
+
+def test_naming_a_semitone_cannot_fail() -> None:
+    """A semitone always has a name, which is why this one returns a ``str``.
+
+    The distinction from :func:`midi_to_note_name`, which takes a possibly
+    fractional and possibly absent pitch and must be able to answer "that is not
+    a note". A caller folding validated notes would otherwise have to handle a
+    ``None`` that cannot arrive.
+    """
+    assert note_name_for_midi(0) == "C-1"
+    assert note_name_for_midi(60) == "C4"
+    assert note_name_for_midi(127) == "G9"
 
 
 def test_note_names_use_sharps_only() -> None:
