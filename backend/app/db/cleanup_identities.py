@@ -26,7 +26,11 @@ import asyncio
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
-from app.db.pool import Database
+from app.db.pool import (
+    MAINTENANCE_APPLICATION_NAME,
+    MAINTENANCE_POOL_SIZE,
+    Database,
+)
 from app.services.audio.storage import RecordingStorage
 from app.services.owners.deletion import OwnerDeletionService
 from app.services.owners.repository import PostgresOwnerRepository
@@ -47,7 +51,14 @@ async def cleanup(*, limit: int, dry_run: bool) -> CleanupReport:
         raise SystemExit("DATABASE_URL is not set; there is nothing to clean up.")
 
     policy = RetentionPolicy(retention=settings.identity_retention)
-    database = Database(settings.database_url)
+    # One connection, and a name of its own in ``pg_stat_activity``. This job
+    # runs while the API is serving, and the server's connections are shared
+    # between them — see ``db/pool.py``.
+    database = Database(
+        settings.database_url,
+        max_size=MAINTENANCE_POOL_SIZE,
+        application_name=MAINTENANCE_APPLICATION_NAME,
+    )
     await database.open()
     try:
         repository = PostgresOwnerRepository(database)

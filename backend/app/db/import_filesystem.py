@@ -38,7 +38,12 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.migrate import apply_migrations
-from app.db.pool import Database, execute
+from app.db.pool import (
+    MAINTENANCE_APPLICATION_NAME,
+    MAINTENANCE_POOL_SIZE,
+    Database,
+    execute,
+)
 from app.services.analysis.models import Analysis
 from app.services.analysis.repository import JsonFileAnalysisRepository
 from app.services.audio_analysis.models import AudioAnalysis
@@ -259,7 +264,11 @@ async def _main(argv: list[str] | None = None) -> int:
     storage_root = args.storage_root or settings.storage_root
     owner, token = new_owner()
 
-    database = Database(settings.database_url)
+    database = Database(
+        settings.database_url,
+        max_size=MAINTENANCE_POOL_SIZE,
+        application_name=MAINTENANCE_APPLICATION_NAME,
+    )
     await database.open()
     try:
         async with database.transaction() as connection:
