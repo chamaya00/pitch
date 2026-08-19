@@ -23,7 +23,8 @@ type.** There are four forms, and each is a type rather than a convention:
 
 * :class:`AudioAnalysisSummary` — no timeline, plus ``pitch_point_count`` (10.11)
 * :class:`DecimatedTimeline` — a summary, plus every ``n``-th point (10.14)
-* :class:`TimelineFields` — a summary, plus two fields of every frame (10.15)
+* :class:`TimelineFields` — a summary, plus two fields of every frame (10.15),
+  which the comparison read carries for both its sides (10.16)
 * :class:`AudioAnalysis` — a summary, plus whole frames
 
 Only the last can be written back, and only writes ask for it. The summary form
@@ -64,6 +65,7 @@ written before 10.11 — which carry no count of their own and were the reason
 the expression existed.
 """
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from psycopg import errors
@@ -157,6 +159,43 @@ _DECIMATED_SQL = """
 """
 
 
+#: The two fields a fold reads, aggregated from one walk of a timeline.
+#:
+#: Selected inside a lateral over ``jsonb_array_elements(... -> 'pitch_points')
+#: WITH ORDINALITY AS frame(point, ordinality)``, which is the shape both
+#: statements that use it provide. It is one constant rather than two copies
+#: because two statements that aggregated these fields *differently* would be a
+#: silent defect: ``cents[i]`` must be the deviation of ``midi_notes[i]``, and
+#: what holds that is the shared ``ORDER BY frame.ordinality`` below.
+#:
+#: Three details are deliberate, and all three were measured on a five-minute
+#: recording of 12 931 points:
+#:
+#: * **Typed arrays, not ``jsonb_agg``.** The values arrive as an ``int[]`` and a
+#:   ``float8[]`` the driver decodes directly, rather than as a jsonb array the
+#:   API process has to parse: 26.0 ms against 28.1 ms end to end. The cast also
+#:   decides what a bad value does — a stored note that is not a number fails in
+#:   PostgreSQL rather than becoming one here.
+#: * **Both aggregates ordered by the same ordinality.** Neither fold cares what
+#:   order the frames arrive in, but a pair of aggregates that disagreed about
+#:   order would attribute real deviations to the wrong notes and produce a
+#:   breakdown that looks entirely reasonable. Measured at 26.0 ms against
+#:   28.5 ms unordered, so the guarantee is free.
+#: * **``COALESCE`` to empty arrays.** An analysis still running has no
+#:   ``pitch_points`` key at all; an aggregate with no ``GROUP BY`` answers "no
+#:   rows" with one row of nulls, and this turns that into an empty timeline
+#:   rather than a null one.
+PITCH_FIELD_AGGREGATES = """
+        COALESCE(
+            array_agg((frame.point ->> 'midi_note')::int ORDER BY frame.ordinality),
+            '{}'::int[]
+        ) AS midi_notes,
+        COALESCE(
+            array_agg((frame.point ->> 'cents')::float8 ORDER BY frame.ordinality),
+            '{}'::float8[]
+        ) AS cents
+"""
+
 #: The two aggregations' read: every frame, but only the fields they fold.
 #:
 #: ``GET …/audio-analysis/notes`` and ``…/key`` are the only reads left that
@@ -171,8 +210,10 @@ _DECIMATED_SQL = """
 #: asked, and a client with an analysis page open pushed the poll behind it from
 #: 14.2 ms to 301.0 ms.
 #:
-#: PostgreSQL projects the two fields into arrays now. Four details are
-#: deliberate:
+#: PostgreSQL projects the two fields into arrays now, with
+#: :data:`PITCH_FIELD_AGGREGATES` — the same pair the comparison read uses
+#: (10.16), so neither statement can aggregate a timeline the other way. Two
+#: details belong to this statement rather than to that constant:
 #:
 #: * **One walk of the array, two aggregates.** Both fields come from the same
 #:   ``jsonb_array_elements`` expansion inside one lateral, so the statement has
@@ -180,23 +221,11 @@ _DECIMATED_SQL = """
 #:   the 10.12 rule holds: a third reference would be a third full detoast of a
 #:   1 685 kB document — which is what one ``jsonb_path_query_array`` per field
 #:   would have cost, three references in place of two.
-#: * **``array_agg`` into typed arrays, not ``jsonb_agg``.** The values arrive as
-#:   an ``int[]`` and a ``float8[]`` the driver decodes directly, rather than as
-#:   a jsonb array the API process has to parse: 26.0 ms against 28.1 ms end to
-#:   end, and it is the cast that decides what a bad value does — a stored note
-#:   that is not a number fails in PostgreSQL rather than becoming one.
-#: * **Both aggregates are ordered by the same ordinality.** Neither fold cares
-#:   what order the frames arrive in, but ``cents[i]`` must be the deviation of
-#:   ``midi_notes[i]``: two aggregates that disagreed about order would attribute
-#:   real deviations to the wrong notes and produce a breakdown that looks
-#:   entirely reasonable. Measured at 26.0 ms against 28.5 ms unordered, so the
-#:   guarantee is free.
-#: * **The lateral holds an aggregate, so it always returns a row.** An analysis
-#:   still running has no ``pitch_points`` key at all; an aggregate with no
-#:   ``GROUP BY`` answers "no rows" with one row of nulls, which ``COALESCE``
-#:   turns into empty arrays. A pending record therefore reads back as itself
-#:   with an empty timeline, rather than vanishing from the result.
-_FIELDS_SQL = """
+#: * **The latest analysis is chosen before its timeline is expanded.** The
+#:   ``latest`` CTE picks one id, and the lateral runs against that row alone. A
+#:   re-analysed recording has several analyses, and expanding each of their
+#:   timelines to then discard all but one would cost a full walk per attempt.
+_FIELDS_SQL = f"""
     WITH latest AS (
         SELECT id
         FROM audio_analyses
@@ -211,14 +240,7 @@ _FIELDS_SQL = """
     FROM latest
     JOIN audio_analyses AS analysis ON analysis.id = latest.id
     CROSS JOIN LATERAL (
-        SELECT COALESCE(
-                   array_agg((frame.point ->> 'midi_note')::int ORDER BY frame.ordinality),
-                   '{}'::int[]
-               ) AS midi_notes,
-               COALESCE(
-                   array_agg((frame.point ->> 'cents')::float8 ORDER BY frame.ordinality),
-                   '{}'::float8[]
-               ) AS cents
+        SELECT {PITCH_FIELD_AGGREGATES}
         FROM jsonb_array_elements(analysis.document -> 'pitch_points')
              WITH ORDINALITY AS frame(point, ordinality)
     ) AS frames
@@ -503,18 +525,44 @@ def _to_summary(row: dict[str, Any]) -> AudioAnalysisSummary:
     )
 
 
-def _to_fields(row: dict[str, Any]) -> TimelineFields:
-    """Build the fold's input from the stripped document and the two arrays.
+def timeline_fields_of(
+    document: dict[str, Any],
+    *,
+    pitch_point_count: int,
+    midi_notes: Sequence[int],
+    cents: Sequence[float],
+) -> TimelineFields:
+    """Build the fold's input from a stripped document and the two arrays.
 
-    The driver has already decoded them as an ``int[]`` and a ``float8[]``;
+    Public, and taking values rather than a row, because two statements produce
+    this shape — the ``/notes`` and ``/key`` read below, and the comparison read
+    in ``services/comparison/sources.py`` (10.16), which projects the same
+    fields for two recordings at once. They name their columns differently and
+    must assemble them identically, and in particular must both take the count
+    from the **column** beside the document rather than from the document, which
+    no longer holds the array it counts.
+
+    The driver has already decoded the arrays as an ``int[]`` and a ``float8[]``;
     :class:`PitchFields` bounds every value exactly as :class:`PitchPoint` does,
     so a fold still cannot be handed a number that is not a note. That check
     costs 0.83 ms for 12 931 frames — it was never the models that made it
     possible.
     """
     return TimelineFields(
-        analysis=_to_summary(row),
-        fields=PitchFields(midi_notes=row["midi_notes"], cents=row["cents"]),
+        analysis=AudioAnalysisSummary.model_validate(
+            {**document, "pitch_point_count": pitch_point_count}
+        ),
+        fields=PitchFields(midi_notes=tuple(midi_notes), cents=tuple(cents)),
+    )
+
+
+def _to_fields(row: dict[str, Any]) -> TimelineFields:
+    """The fields read's row, as the fold's input."""
+    return timeline_fields_of(
+        row["document"],
+        pitch_point_count=row["pitch_point_count"],
+        midi_notes=row["midi_notes"],
+        cents=row["cents"],
     )
 
 
