@@ -48,6 +48,7 @@ from app.services.audio_analysis.models import (
     AudioAnalysis,
     AudioAnalysisStatus,
     AudioFeedbackStatus,
+    PitchFields,
     new_audio_analysis_id,
 )
 from app.services.audio_analysis.postgres_repository import (
@@ -983,6 +984,157 @@ def test_a_decimated_read_selects_the_newest_analysis(backend: Any) -> None:
         assert summary is not None
         assert sampled.analysis.audio_analysis_id == newest.audio_analysis_id
         assert sampled.analysis.audio_analysis_id == summary.audio_analysis_id
+
+    backend(work)
+
+
+# --- Audio analyses, read as the fields an aggregation folds ---------------
+#
+# The fourth form of the read, added in Step 10.15. ``/notes`` and ``/key`` fold
+# every stored frame, so neither may be handed a sample the way the graph is —
+# but between them they read two of a frame's six fields, and building all six
+# cost ~50 ms of event-loop time per request. PostgreSQL projects the two into
+# an ``int[]`` and a ``float8[]``; the double takes the same two out of the
+# points it holds. These assert the two produce the *same* arrays, because a
+# breakdown folded from deviations that belong to other notes looks entirely
+# reasonable and is wrong.
+
+
+def _varied_points(count: int) -> list[dict[str, Any]]:
+    """A timeline where no two frames share a note *and* a deviation.
+
+    ``_points`` is 12 931 copies of A4 at 0.0 cents, which is exactly the
+    fixture that cannot catch the mistakes worth catching here: a read that
+    returned the arrays in different orders, paired one field with the other's
+    order, or dropped a frame would all agree with it.
+    """
+    return [
+        {
+            "timestamp_seconds": round(index * 0.023, 3),
+            "frequency_hz": 220.0 + index,
+            "midi_note": 57 + index % 24,
+            "note_name": "A3",
+            "cents": round(-49.0 + (index * 3.5) % 98.0, 3),
+            "confidence": 0.9,
+        }
+        for index in range(count)
+    ]
+
+
+def test_the_fields_read_is_the_stored_timeline_field_by_field(backend: Any) -> None:
+    """What a fold sees must be what was written, in the order it was written.
+
+    The assertion that makes the two implementations interchangeable, and the
+    one that makes the read safe at all: ``cents[i]`` is the deviation of
+    ``midi_notes[i]``, so two aggregates that disagreed about order would
+    attribute real deviations to the wrong notes.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            completed_audio(stored.recording_id, pitch_points=_varied_points(40))
+        )
+
+        read = await prepared.audio.latest_fields_for_recording(stored.recording_id)
+        whole = await prepared.audio.latest_for_recording(stored.recording_id)
+
+        assert read is not None
+        assert whole is not None
+        assert read.analysis.audio_analysis_id == whole.audio_analysis_id
+        assert read.fields == PitchFields.of_points(whole.pitch_points)
+        assert read.fields.midi_notes == tuple(point.midi_note for point in whole.pitch_points)
+        assert read.fields.cents == tuple(point.cents for point in whole.pitch_points)
+
+    backend(work)
+
+
+def test_the_fields_read_carries_the_whole_timeline_and_says_so(backend: Any) -> None:
+    """A fold of part of a recording is a fold of a different recording.
+
+    Unlike the graph's read this one is not allowed to be short, and the check
+    is not a comment: ``pitch_point_count`` is written beside the document, so
+    the length of the arrays and the stored count are independent statements
+    about the same timeline and ``TimelineFields`` refuses a pair that disagree.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            completed_audio(stored.recording_id, pitch_points=_varied_points(57))
+        )
+
+        read = await prepared.audio.latest_fields_for_recording(stored.recording_id)
+
+        assert read is not None
+        assert len(read.fields) == 57
+        assert read.analysis.pitch_point_count == 57
+
+    backend(work)
+
+
+def test_a_record_with_no_timeline_reads_back_as_itself_with_no_fields(backend: Any) -> None:
+    """An analysis still running has no ``pitch_points`` key at all.
+
+    In PostgreSQL the two arrays come from a lateral over
+    ``jsonb_array_elements``, which yields no rows for a document that has no
+    timeline yet. It holds an aggregate, so it answers that with one row of
+    nulls rather than none — without which a pending record would vanish from
+    the result and the endpoint would report a recording it can see as unknown.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        created = await prepared.audio.create(make_audio(stored.recording_id))
+
+        read = await prepared.audio.latest_fields_for_recording(stored.recording_id)
+
+        assert read is not None
+        assert read.analysis.audio_analysis_id == created.audio_analysis_id
+        assert read.analysis.status is AudioAnalysisStatus.PENDING
+        assert len(read.fields) == 0
+
+    backend(work)
+
+
+def test_a_fields_read_of_an_unknown_recording_is_none(backend: Any) -> None:
+    async def work(prepared: Backend) -> None:
+        assert await prepared.audio.latest_fields_for_recording(uuid.uuid4().hex) is None
+
+    backend(work)
+
+
+def test_a_fields_read_selects_the_newest_analysis(backend: Any) -> None:
+    """The same row every other read of this recording selects.
+
+    A breakdown folded from the older record beside a summary read from the
+    newer would describe two different measurements as though they were one.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(
+            make_audio(
+                stored.recording_id,
+                status=AudioAnalysisStatus.FAILED,
+                error_code="INSUFFICIENT_PITCH_SIGNAL",
+            )
+        )
+        newest = await prepared.audio.create(
+            completed_audio(stored.recording_id, pitch_points=_varied_points(9))
+        )
+
+        read = await prepared.audio.latest_fields_for_recording(stored.recording_id)
+        summary = await prepared.audio.latest_summary_for_recording(stored.recording_id)
+
+        assert read is not None
+        assert summary is not None
+        assert read.analysis.audio_analysis_id == newest.audio_analysis_id
+        assert read.analysis.audio_analysis_id == summary.audio_analysis_id
 
     backend(work)
 
