@@ -349,7 +349,7 @@ which is the fourth form of an audio-analysis read:
 | --- | --- | --- |
 | `AudioAnalysisSummary` | no timeline, plus `pitch_point_count` | the summary and feedback routes, `start`, the claim, the sweep |
 | `DecimatedTimeline` (10.14) | a summary, plus every `n`-th point | `/pitch` |
-| `TimelineFields` (10.15) | a summary, plus two fields of **every** frame | `/notes`, `/key` |
+| `TimelineFields` (10.15) | a summary, plus two fields of **every** frame | `/notes`, `/key`, `/recordings/compare` (10.16) |
 | `AudioAnalysis` | a summary, plus whole frames | **every write**, and nothing else |
 
 The type discipline is the same one 10.11 established and is why none of this can
@@ -419,7 +419,83 @@ note breakdowns from whole frames. It is the same defect this step removed from
 untouched here — the fix is now a change to `COMPARISON_SOURCES_SQL` and the
 type `ComparisonSource` carries, not a new idea. Also still true: everything has
 been measured on **one worker**, and the speech pipeline and the progress query
-have not been measured at a hundred times the data.
+have not been measured at a hundred times the data. Step 10.16 took the
+comparison; the two sentences after it still stand.
+
+### The same fix, on the read that does it twice (10.16)
+
+10.15 ended by naming its own successor, and 10.16 is that and nothing more:
+`GET /recordings/compare` was the last read building pitch frames it did not
+need, and it built *two* recordings' worth. There is no new idea in this step —
+the type, the projection and the rule about how many times a statement may touch
+a document all come from 10.11 through 10.15. What is new is that the statement
+which reads two recordings at once now obeys them.
+
+A comparison needs three things about each side: the recording's identity, the
+analysis record, and a note breakdown. Only the third involves the timeline, and
+it is the one read in the product that may *not* be given a sample — a breakdown
+of every thirteenth frame is a breakdown of a different recording — so both
+sides are still read whole. Whole, as fields:
+
+| | Sent | Repository read | of which SQL and transfer |
+| --- | --- | --- | --- |
+| two whole documents, frames built | 2 916 kB | 122.1 ms | 44.3 ms |
+| two sides, as fields | 209 kB | **21.7 ms** | 18.7 ms |
+
+Measured in one process against the same two rows — a five-minute recording each,
+12 931 points, a 1 609 kB document — with the pre-10.16 statement kept beside the
+new one so both are timed on the same data rather than across two runs. About
+78 ms of that difference is model construction leaving the event loop: 25 862
+`PitchPoint` models were being built to read two fields off each.
+
+End to end over HTTP, the previous build running beside this one against the same
+database:
+
+| `GET /recordings/compare` | before | after |
+| --- | --- | --- |
+| p50, one client | 137.5 ms | **36.0 ms** |
+| p95, one client | 173.7 ms | **42.1 ms** |
+| p50, sixteen clients | 2 160.3 ms | **239.9 ms** |
+| p95, sixteen clients | 2 577.3 ms | **304.1 ms** |
+| requests a second, sixteen clients | 7.3 | **63.1** |
+
+Throughput is again the measurement that says the work left the event loop: 7.3
+requests a second at c=16 against 7.4 at c=1 is the signature of work that cannot
+overlap, and 63.1 against 27.9 is the signature of work that can. `/notes` and
+`GET /audio-analysis` were measured on both builds as controls and did not move.
+
+What a user would feel is somebody else's comparison. With three clients holding
+one open, the poll the browser makes while a measurement runs went from **303.6 ms
+to 35.9 ms**; idle it is 6.6 ms before and 8.4 ms after.
+
+**The response is identical, and that was checked rather than reasoned about.**
+Both builds were asked for the same comparison of the same two recordings and
+returned the same 14 478 bytes — 24 notes and 7 metrics — byte for byte.
+
+Two decisions inside this are worth recording:
+
+- **The aggregates are shared with the `/notes` read, not copied.** Both
+  statements project the same two fields, and a copy could have ordered its two
+  `array_agg`s differently — which would attribute real deviations to the wrong
+  notes and produce a breakdown that looks entirely reasonable. There is one
+  `PITCH_FIELD_AGGREGATES`, and a test asserts both statements use it.
+- **The latest analysis is chosen before its timeline is expanded.** The
+  comparison picks one analysis id per side and expands that row alone. Written
+  the natural way — the aggregate inside the subquery that orders and limits —
+  it would have walked the timeline of every analysis a re-analysed recording
+  has, and thrown all but one away.
+
+**What is left.** No read stands out any more. Measured on the new build at the
+same 12 931-point recording, the four timeline-derived reads sit within one band
+— compare 29.8 ms, `/key` 21.5 ms, `/notes` 26.4 ms, `/pitch` 24.8 ms at one
+client, and 64 to 109 requests a second at sixteen — while the three that never
+touch a timeline (`GET /audio-analysis`, the history list, the progress query)
+are ~6 ms and ~210 to 250 requests a second. The slowest of the four by
+throughput is now `/pitch`, at 64.2 requests a second and 298.9 ms p95 at c=16,
+and what it spends its time on is the sample it genuinely returns. Unchanged from
+10.14 and 10.15, and not addressed here: everything has been measured on **one
+worker**, and the speech pipeline and the progress query have not been measured
+at a hundred times the data.
 
 ### Concurrency belongs to the database
 
