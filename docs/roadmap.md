@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15) |
 
 ## Phase 0 — delivered
 
@@ -590,6 +590,56 @@ Delivered in 10.14 — *what concurrency does to a read*:
   answerable) — are analysed in [architecture.md](architecture.md) and neither is
   chosen.
 
+Delivered in 10.15 — *what a fold actually reads*:
+
+- 10.14 measured `/notes` and `/key` at ~135 ms and ~7 requests a second, named
+  the two ways out and chose neither. This step took the first — read the fields
+  the folds use rather than the frames — and leaves the second, storing the
+  derived answers, rejected for the reason 10.8 gave: derive on read and every
+  analysis ever completed is answerable.
+- Neither read may be given a *sample*, the way the graph is: a note breakdown of
+  every thirteenth frame is a breakdown of a different recording. What they need
+  not see is the frame. A stored point carries six fields; the note breakdown
+  reads `midi_note` and `cents`, and the key reads `midi_note`.
+- `PitchFields` is those fields as **one array per field rather than one object
+  per frame**, and `TimelineFields` is a record with them attached — the fourth
+  form of an audio-analysis read, after the summary (10.11) and the sample
+  (10.14). PostgreSQL projects them with two `array_agg`s over one
+  `jsonb_array_elements` walk, so the statement touches `document` exactly twice,
+  which is 10.12's rule.
+- The repository read went **106.2 ms → 27.3 ms** and what crosses the socket
+  1 722 kB → 130 kB. PostgreSQL's half is unchanged at ~18 ms; what left is the
+  ~85 ms the API process spent building 12 931 models on the event loop.
+- End to end over HTTP, measured against the previous build running beside this
+  one on the same database: `/notes` **151.2 → 37.3 ms**, `/key` **143.3 →
+  38.8 ms**, and at sixteen concurrent readers p95 **2 321.8 → 273.2 ms** and
+  **1 784.7 → 246.4 ms**. Throughput is the number that says the work left the
+  event loop: `/notes` 8.4 → 64.7 requests a second at c=16, `/key` 10.0 → 71.4.
+  With three clients reading a breakdown, the poll the browser makes while a
+  measurement runs went from **212.5 ms to 33.0 ms**.
+- **The responses are identical, and that was checked rather than reasoned
+  about**: both servers were asked for the same recording's notes and key, and
+  the JSON matched.
+- The folds got cheaper too — 3.3 → 2.0 ms and 1.4 → 0.9 ms — because reading
+  `midi_notes[i]` is not attribute access on a pydantic model. Bounds did not go
+  with the frames: every note is still checked to be a MIDI number and every
+  deviation within ±50 cents, for 0.83 ms across 12 931 frames.
+- A note's **name is derived from its number** rather than read: it is needed per
+  note, not per frame, and the analyzer writes it with the same function from the
+  same integer. Two tests hold that: the two naming entry points agree for all
+  128 notes, and every point the real analyzer writes is named by its own number.
+- Ten new tests — fifteen as collected, because five of them run against both
+  repository implementations. "The fields of a timeline" is only well defined if
+  the arrays PostgreSQL aggregates are the values the stored points hold, in the
+  order they hold them, so that is asserted rather than assumed. With them: the
+  SQL-shape test 10.12's precedent asks for, the two naming properties, and four
+  rewritten load counters that can tell a fields read from a whole-document one.
+- **What is left was measured, not assumed.** `GET /recordings/compare` is now
+  the slowest read in the product — **253.5 ms at c=1, 3 152.9 ms p50 at c=16,
+  3.8 requests a second** — because it loads two whole documents and folds two
+  note breakdowns from whole frames. Same defect, same fix, one statement away;
+  it is recorded rather than done here.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -610,9 +660,12 @@ fail to scale, and fixed the one of the three that was building points it threw
 away. What is still unmeasured: the speech pipeline and the progress query at a
 hundred times the data, and everything under concurrency has been measured on
 **one worker**; the shared rate-limit counter that makes several of them
-supported landed in 10.10, but no read has been measured across them. `/notes`
-and `/key` remain the slowest reads in the product at ~135 ms, for reasons 10.14
-measured and left in place. The shared rate-limit counter
+supported landed in 10.10, but no read has been measured across them. 10.15 took the first of the two
+options 10.14 left open for `/notes` and `/key` — the fields a fold reads rather
+than the frames — which took them from ~135 ms to ~38 ms and from ~8 to ~65
+requests a second at c=16, and found the read that is now slowest:
+`GET /recordings/compare`, at 253.5 ms and 3.15 s p50 under load, which folds two
+whole timelines and is untouched. The shared rate-limit counter
 landed in 10.10. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that

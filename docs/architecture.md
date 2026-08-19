@@ -134,6 +134,11 @@ The fix is a second read, and a type that stops it being misapplied:
 | `AudioAnalysisSummary` | everything but the timeline, plus `pitch_point_count` | the summary and feedback routes, `start`, the feedback claim, the staleness sweep |
 | `AudioAnalysis` (a subclass) | that, plus the points | `/pitch`, `/notes`, `/key`, and **every write** |
 
+Two later steps split the first column further, and both are in the table in
+[What a fold actually reads](#what-a-fold-actually-reads-1015): `/pitch` reads a
+`DecimatedTimeline` (10.14) and `/notes` and `/key` read `TimelineFields`
+(10.15), so of the four reads only **every write** still asks for whole frames.
+
 The direction of the subclassing is the guarantee. Anything needing only state
 accepts a summary and is handed either kind; anything reading the points — or
 re-serialising the document, which a summary would rewrite *without* them — asks
@@ -316,6 +321,105 @@ options exist — read the two or three fields the folds use as flat arrays
 measurement functions), or store the derived answers, which 10.8 rejected on
 purpose so that every analysis ever completed stays answerable. Neither is chosen
 here.
+
+### What a fold actually reads (10.15)
+
+Step 10.14 left the two aggregations where it found them and named the two ways
+out. Step 10.15 took the first: **the fields, not the frames.** The second — 
+storing the answers — stays rejected for the reason 10.8 gave, which this step
+did nothing to weaken: derive it on read and every analysis ever completed is
+answerable; store it and only the ones measured afterwards are.
+
+`/notes` and `/key` are not the graph. The graph returns a sample, so it may read
+one; a note breakdown of every thirteenth frame is a breakdown of a different
+recording, so both of these must see every frame that was measured. What they
+need not see is the *frame*. A stored point carries six fields and between them
+they read two:
+
+| Fold | Reads | Ignores |
+| --- | --- | --- |
+| `summarise_notes` | `midi_note`, `cents` | `timestamp_seconds`, `frequency_hz`, `note_name`, `confidence` |
+| `pitch_class_profile` | `midi_note` | the other five |
+
+`PitchFields` is that pair, as two arrays — one array per field rather than one
+object per frame — and `TimelineFields` is a record with its fields attached,
+which is the fourth form of an audio-analysis read:
+
+| Type | Carries | Used by |
+| --- | --- | --- |
+| `AudioAnalysisSummary` | no timeline, plus `pitch_point_count` | the summary and feedback routes, `start`, the claim, the sweep |
+| `DecimatedTimeline` (10.14) | a summary, plus every `n`-th point | `/pitch` |
+| `TimelineFields` (10.15) | a summary, plus two fields of **every** frame | `/notes`, `/key` |
+| `AudioAnalysis` | a summary, plus whole frames | **every write**, and nothing else |
+
+The type discipline is the same one 10.11 established and is why none of this can
+be misapplied: each of the three read forms carries an `AudioAnalysisSummary`,
+and `update` takes an `AudioAnalysis`, so a record read for folding has no path
+to a write. `PitchFields` has no timestamps in it at all, so nothing folded from
+one can be drawn or returned as points either.
+
+PostgreSQL projects the two fields with `array_agg` over a single
+`jsonb_array_elements` expansion — two aggregates, one walk, so the statement
+touches `document` exactly twice, which is the 10.12 rule. Measured against a
+real server on one worker, on a five-minute recording of 12 931 points stored as
+a 1 722 kB document, through the repository methods themselves:
+
+| | Sent | Repository read | of which PostgreSQL |
+| --- | --- | --- | --- |
+| whole document, frames built | 1 722 kB | 106.2 ms | ~21 ms (10.14) |
+| two fields, as arrays | 130 kB | 27.3 ms | 18.3 ms |
+
+PostgreSQL's half is what it always was — it detoasts and parses the same
+document either way, as 10.14 found for the graph. What changes is the ~85 ms
+the API process no longer spends turning 1 722 kB into 12 931 validated models
+on the event loop, in front of every other request.
+
+End to end over HTTP, with the response **byte for byte identical** — asserted
+against the previous build, running beside this one against the same database:
+
+| Read (c=1) | before | after | | c=16 p95 | before | after |
+| --- | --- | --- | --- | --- | --- | --- |
+| `GET …/audio-analysis/notes` | 151.2 ms | **37.3 ms** | | | 2 321.8 ms | **273.2 ms** |
+| `GET …/audio-analysis/key` | 143.3 ms | **38.8 ms** | | | 1 784.7 ms | **246.4 ms** |
+
+Throughput is the measurement that says the work left the event loop: `/notes`
+goes from 7.9 to 25.6 requests a second at c=1 and **8.4 to 64.7 at c=16**,
+`/key` from 7.3 to 25.4 and 10.0 to 71.4. A read that did not scale scales.
+`GET /audio-analysis` and `/pitch` are unchanged at every level, which is what a
+control is for.
+
+What a user would feel is the poll behind somebody else's page. With three
+clients reading a note breakdown, the poll the browser makes while a measurement
+runs went from **212.5 ms to 33.0 ms**; idle it is 12.8 ms either way.
+
+Two smaller decisions inside this, both measurable:
+
+- **The folds got cheaper as well as the reads.** `summarise_notes` measured
+  3.3 ms over frames and 2.0 ms over fields, and the key 1.4 ms against 0.9 ms:
+  reading `point.midi_note` 12 931 times is attribute access on a pydantic model,
+  and reading `midi_notes[i]` is not.
+- **A note's name is derived, not read.** `summarise_notes` needs a name per
+  *note*, not per frame, and the name is a function of the number — the analyzer
+  writes it with `note_name_for_midi` from the same integer. Sending 12 931
+  strings so the fold can avoid ~40 calls would be paying to carry an answer it
+  can compute. The property that makes this sound is asserted twice: the two
+  naming entry points agree for all 128 MIDI notes, and every point the real
+  analyzer writes is named by its own number.
+
+Bounds did not go with the frames. `PitchFields` checks that every note is a MIDI
+number and every deviation within ±50 cents, exactly as `PitchPoint` does, and
+that the two arrays are the same length — 0.83 ms for 12 931 frames. The models
+were never what made the check possible, only what made it expensive.
+
+**What is left, measured rather than assumed.** `GET /recordings/compare` is now
+the slowest read in the product: **253.5 ms at c=1, 3 152.9 ms p50 at c=16 and
+3.8 requests a second**, because it loads *two* whole documents and folds both
+note breakdowns from whole frames. It is the same defect this step removed from
+`/notes`, in the one statement that reads two recordings at once, and it is
+untouched here — the fix is now a change to `COMPARISON_SOURCES_SQL` and the
+type `ComparisonSource` carries, not a new idea. Also still true: everything has
+been measured on **one worker**, and the speech pipeline and the progress query
+have not been measured at a hundred times the data.
 
 ### Concurrency belongs to the database
 
