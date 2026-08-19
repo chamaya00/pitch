@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17) |
 
 ## Phase 0 — delivered
 
@@ -694,6 +694,65 @@ Delivered in 10.16 — *the same fix, on the read that does it twice*:
   are ~6 ms and ~210 to 250. The slowest of the four is now `/pitch`, and what it
   spends its time on is the sample it genuinely returns.
 
+Delivered in 10.17 — *what several workers do to a read*:
+
+- The gap 10.11–10.16 each closed with: every number in them was taken on **one
+  worker**, while 10.10 had already made several a supported shape. Taken again
+  across 1, 2 and 4 workers on the same rig, at sixteen concurrent clients, the
+  reads **scale, and the scaling stops where the cores do**: the second worker
+  is worth 1.4×–2.1× on every read, the third and fourth together 1.05×–1.35×
+  more, because four API processes and PostgreSQL are then sharing four cores.
+  `GET /recordings` 196 → 554 requests a second, `/pitch` 55 → 129, `/notes`
+  81 → 149, compare 64 → 98. The poll the browser makes while a measurement
+  runs, with three clients holding a note breakdown open: **31.0 ms → 12.2 ms**.
+- Nothing about a read was changed to get that, and that is the result: after
+  10.15 and 10.16 the reads are PostgreSQL's work plus a small fold, and work
+  that has already left the event loop parallelises across processes for free.
+- **The defect several workers exposed is in the pool, not in a read.**
+  `db/pool.py` opened up to ten connections per process behind a comment saying
+  "this is one API process" — true when it was written, false since 10.10. What
+  PostgreSQL sees is `workers × 10` against the 97 a default server grants.
+  Measured at twelve workers: **97 of 97 taken**, `psql` refused at the socket,
+  `too many clients` in the log continuously, and no thirteenth worker or
+  `cleanup_identities` run able to connect. The API's own requests did not fail
+  — psycopg queues a caller that cannot get a connection — so from outside, one
+  application quietly taking the whole database looked like latency.
+- The default is **four**, and the sweep says why: below four costs real
+  throughput (a pool of 1 halves the comparison read), at four it costs the
+  comparison read ~7% at sixteen concurrent clients on a single worker and
+  everything else nothing, and at four workers a pool of four and a pool of ten
+  are the same throughput on 16 connections against 40. Ten left room for nine
+  processes; four leaves room for twenty-four. The same load that took the
+  server down serves **82.8 requests a second against 87.4** through the fixed
+  default — the ceiling that broke it was never being used.
+- `DB_POOL_MAX_SIZE` and `DB_POOL_MIN_SIZE` are configuration, because a
+  per-process share of a server-wide limit depends on the deployment. Startup
+  logs the arithmetic an operator scaling workers needs and cannot derive from
+  the API's own settings — the pool size, the server's `max_connections`, and
+  how many processes of this size fit — and refuses a pool too large to fit even
+  once, the way 10.10 refuses `RATE_LIMIT_BACKEND=database` with no
+  `DATABASE_URL`.
+- Connections now say who holds them: `application_name` is `vocallens-api`, or
+  `vocallens-maintenance` for `cleanup_identities` and `import_filesystem`,
+  which also ask for **one** connection each — they are sequential, and the
+  moment they matter is the moment the API's workers are holding everything.
+  `pg_stat_activity` on an exhausted server is a list of culprits rather than a
+  list of rows.
+- Ten new tests. The ceiling the whole step rests on is counted rather than
+  assumed — twelve callers against a pool of three must find exactly three
+  backends, and "at most three" would have passed while counting nothing. The
+  budget is read from the server rather than from a comment, an oversized pool
+  is refused *and* releases what it opened, and startup is asserted to build the
+  pool the settings describe, because a wrongly sized pool serves requests
+  perfectly well. Two existing suites now state their own pool size: they open
+  six and eight connections *simultaneously* to make a race a race, which is a
+  different requirement from a worker sharing a server.
+- **What is left, and it is unchanged by this step**: a deployment that scales
+  workers must still move `RATE_LIMIT_BACKEND` to `database` by hand, and one
+  left on `memory` still gets a counter per worker. Everything above was
+  measured on one host with PostgreSQL sharing the workers' four cores, so where
+  the scaling flattens belongs to the rig, not the code.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -712,17 +771,20 @@ recordings, where paging is flat with depth. 10.14 took every read under
 concurrent load — the gap 10.11–10.13 left — found that only the timeline reads
 fail to scale, and fixed the one of the three that was building points it threw
 away. What is still unmeasured: the speech pipeline and the progress query at a
-hundred times the data, and everything under concurrency has been measured on
-**one worker**; the shared rate-limit counter that makes several of them
-supported landed in 10.10, but no read has been measured across them. 10.15 took the first of the two
+hundred times the data. 10.15 took the first of the two
 options 10.14 left open for `/notes` and `/key` — the fields a fold reads rather
 than the frames — which took them from ~135 ms to ~38 ms and from ~8 to ~65
 requests a second at c=16, and found the read that was then slowest:
 `GET /recordings/compare`, which folded two whole timelines. 10.16 gave that read
 the same fix, taking it from 137.5 to 36.0 ms and from 7.3 to 63.1 requests a
 second at c=16, after which no read stands out: the four built on a timeline sit
-within one band and the three that are not are ~6 ms. The shared rate-limit counter
-landed in 10.10. Error pages landed
+within one band and the three that are not are ~6 ms. 10.17 closed the gap every
+one of those steps had declared — they were all measured on one worker — by
+taking the same reads across 1, 2 and 4 of them: they scale until the cores run
+out, no read needed changing, and what several workers did expose was a pool
+sized per process for a deployment that had one, which at twelve workers took
+every connection the server had. The shared rate-limit counter landed in 10.10,
+and a deployment scaling workers must still turn it on by hand. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
 hold recordings remains unspecified and unbuilt. The Content-Security-Policy

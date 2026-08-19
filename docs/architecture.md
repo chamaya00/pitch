@@ -494,8 +494,109 @@ are ~6 ms and ~210 to 250 requests a second. The slowest of the four by
 throughput is now `/pitch`, at 64.2 requests a second and 298.9 ms p95 at c=16,
 and what it spends its time on is the sample it genuinely returns. Unchanged from
 10.14 and 10.15, and not addressed here: everything has been measured on **one
-worker**, and the speech pipeline and the progress query have not been measured
-at a hundred times the data.
+worker** — 10.17 took the same reads across several — and the speech pipeline
+and the progress query have not been measured at a hundred times the data.
+
+### What several workers do to a read (10.17)
+
+Every number in 10.11 through 10.16 was taken against **one uvicorn worker**,
+and each of those steps said so in its own closing paragraph. 10.10 had already
+made several workers a supported shape — it moved the rate-limit counter into a
+table for exactly that reason — so the gap was not hypothetical, it was the
+shape the previous six steps had never been measured in. This step measures it.
+
+Against the same rig those steps used — 30 five-minute recordings, 12 931 points
+each, one PostgreSQL on the same four-core host — every read at sixteen
+concurrent clients, in requests a second:
+
+| read | 1 worker | 2 workers | 4 workers |
+| --- | --- | --- | --- |
+| `GET /recordings` | 196.0 | 414.8 | **553.8** |
+| `GET /audio-analysis` | 161.8 | 269.8 | **355.4** |
+| `…/key` | 95.7 | 139.1 | **161.7** |
+| `GET /recordings/progress` | 95.5 | 132.7 | **135.1** |
+| `…/notes` | 81.1 | 133.2 | **148.7** |
+| `GET /recordings/compare` | 63.8 | 93.6 | **97.8** |
+| `…/pitch` | 55.3 | 103.6 | **128.5** |
+
+**They scale, and the scaling stops where the cores do.** The second worker is
+worth 1.4× to 2.1× on every read; the third and fourth together are worth 1.05×
+to 1.35× more, because by then four API processes and PostgreSQL are sharing
+four cores. Nothing needed changing for that — after 10.15 and 10.16 the reads
+are mostly PostgreSQL's work plus a small fold, and work that already left the
+event loop parallelises across processes for free. What a user would feel is the
+same shape: with three clients holding a note breakdown open, the poll the
+browser makes while a measurement runs is 31.0 ms on one worker and **12.2 ms**
+on four.
+
+**The defect several workers exposed is not in a read. It is in the pool.**
+`db/pool.py` opened up to ten connections with a comment saying "this is one API
+process serving a handful of concurrent requests" — written when it was true,
+and left alone when 10.10 made it false. Ten is not the number PostgreSQL sees.
+`workers × 10` is, and a default server grants 97 (`max_connections` 100, less
+three reserved for superusers). Measured, at twelve workers under load:
+
+| | connections held | `psql` can connect | `too many clients` in the log |
+| --- | --- | --- | --- |
+| pool of ten, twelve workers | **97 of 97** | **no** | yes, continuously |
+| pool of four, twelve workers | 21 (ceiling 48) | yes | none |
+
+The API's own requests did *not* fail in the first row, and that is what makes
+it worth writing down: psycopg queues a caller that cannot get a connection, so
+from the outside the symptom was latency, not an error. What broke was
+everything else — a thirteenth worker could not boot, `python -m
+app.db.cleanup_identities` could not run, and `psql` was refused at the socket.
+The database had been taken over by one application's idle capacity.
+
+The same load through the fixed default serves **82.8 requests a second against
+87.4**, which is the whole argument: the ceiling that took the server down was
+never being used for anything.
+
+**Four, because four is what one worker can use.** The pool size was swept at
+one worker, sixteen concurrent clients, two rounds each:
+
+| pool | `…/notes` | `GET /recordings/compare` |
+| --- | --- | --- |
+| 10 | 85.0, 83.1 req/s | 66.2, 66.4 req/s |
+| 6 | 85.4, 85.8 req/s | 65.5, 64.1 req/s |
+| 4 | 84.7, 87.4 req/s | 62.3, 60.2 req/s |
+| 2 | 70.1 req/s | 49.2 req/s |
+| 1 | 44.8 req/s | 30.8 req/s |
+
+Below four it costs real throughput; at four it costs the comparison read about
+7% and everything else nothing, and that 7% is the only thing given up here. It
+is given up on a single-worker deployment at sixteen concurrent clients, and it
+buys room for twenty-four processes where ten left room for nine. At four
+workers even that disappears: a pool of four and a pool of ten are the same
+throughput, on 16 connections against 40.
+
+Three things carry the decision so it does not have to be remembered:
+
+- **`DB_POOL_MAX_SIZE` and `DB_POOL_MIN_SIZE` are configuration**, because a
+  per-process share of a server-wide limit is exactly the kind of number that
+  depends on a deployment. `min_size` above `max_size` is refused at startup
+  rather than clamped.
+- **The startup log reports the arithmetic**: `database_pool_opened` carries the
+  pool size, the server's `max_connections` and `processes_that_fit` — how many
+  processes of this size the server it is pointed at has room for. A process
+  cannot know how many siblings uvicorn started, so it reports the division
+  rather than enforcing it. A pool too large to fit *even once* is impossible
+  rather than ambitious, and is refused the way 10.10 refuses
+  `RATE_LIMIT_BACKEND=database` with no `DATABASE_URL`.
+- **Connections say who holds them.** Every connection sets `application_name`
+  — `vocallens-api`, or `vocallens-maintenance` for the one-off jobs — so
+  `pg_stat_activity` on a server that has run out is a list of culprits rather
+  than a list of rows. The maintenance jobs also ask for **one** connection
+  each: they are sequential, and the moment they matter is the moment the API's
+  workers are holding everything else.
+
+**What is left.** The rate-limit counter must still be moved to `database` by
+hand when a deployment scales, exactly as 10.10 documented — this step changed
+nothing about that, and a multi-worker deployment left on `memory` still gets
+one counter per worker. The speech pipeline and the progress query have still
+not been measured at a hundred times the data. And every number above was taken
+on **one host**, with PostgreSQL sharing its four cores with the workers, so the
+point at which scaling flattens belongs to this rig rather than to the code.
 
 ### Concurrency belongs to the database
 
