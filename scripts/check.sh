@@ -14,10 +14,17 @@ fi
 
 # The PostgreSQL suites skip without TEST_DATABASE_URL. Point it at a scratch
 # database to run them — they TRUNCATE between tests, so never at a real one.
+#
+# What skipping them costs was measured in Step 10.20: 185 tests, which is every
+# test that touches SQL. A run without a database is worth having — it is fast
+# and it catches most things — but it is not a run that has checked the
+# repository's statements, and it should not be mistaken for one. A run that
+# must not skip them sets REQUIRE_DATABASE_TESTS=1, which turns a missing DSN
+# into a failure instead of 185 quiet skips; .github/workflows/checks.yml does.
 if [ -n "${TEST_DATABASE_URL:-}" ]; then
   echo "==> backend: pytest (with PostgreSQL)"
 else
-  echo "==> backend: pytest (PostgreSQL suites will skip; set TEST_DATABASE_URL to run them)"
+  echo "==> backend: pytest (185 PostgreSQL tests will skip; set TEST_DATABASE_URL to run them)"
 fi
 (cd "$ROOT/backend" && "$BACKEND_PY/pytest")
 
