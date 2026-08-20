@@ -29,10 +29,10 @@
  * - **a margin over the next candidate of any kind** — never a raw correlation,
  *   which a single held note takes to +0.684.
  *
- * What this module does **not** do: commit, hold or display anything. A verdict
- * per tick is not a readout — a label that changes twice a second is worse than
- * no label — and the hysteresis and dwell that turn one into the other live in
- * `live-practice.ts`, where the session state is.
+ * Estimating is not displaying. A verdict per tick is not a readout — a label
+ * that changes twice a second is worse than no label — so {@link LiveKeyTracker}
+ * at the end of this file holds one until the evidence has held still for a
+ * measured number of ticks. `live-practice.ts` owns the counts it folds.
  *
  * Pure and dependency-free apart from the note names, so `node --test` drives
  * all of it without a microphone.
@@ -117,9 +117,9 @@ export interface LiveKeyEstimate {
  *
  * `key` and `unmeasuredReason` are mutually exclusive: exactly one is non-null,
  * which is the invariant the backend's model enforces and a test asserts here.
- * `ranked` travels with both because the commitment rules need the correlation
- * of a key that is *not* winning — hysteresis is a comparison against the
- * incumbent, and the incumbent may have slipped to third.
+ * The evidence travels with both — a refusal that says nothing about what it
+ * saw is a shrug rather than a measurement — and every field of it is asserted
+ * against the backend by the shared parity table.
  */
 export interface LiveKeyVerdict {
   key: LiveKeyEstimate | null;
@@ -128,7 +128,6 @@ export interface LiveKeyVerdict {
   distinctPitchClasses: number;
   voicedSeconds: number;
   method: string;
-  ranked: readonly KeyCandidate[];
 }
 
 /**
@@ -170,7 +169,6 @@ export function estimateKey(
   const distinct = shares.filter(
     (share) => share.percentageOfVoicedTime >= MIN_PITCH_CLASS_SHARE,
   ).length;
-  const ranked = shares.length === SEMITONES ? rankedCandidates(shares, profiles) : [];
 
   const refuse = (reason: LiveKeyUnmeasuredReason): LiveKeyVerdict => ({
     key: null,
@@ -179,7 +177,6 @@ export function estimateKey(
     distinctPitchClasses: distinct,
     voicedSeconds,
     method: profiles.name,
-    ranked,
   });
 
   if (shares.length === 0 || voicedSeconds < MIN_VOICED_SECONDS) {
@@ -187,7 +184,7 @@ export function estimateKey(
   }
   if (distinct < MIN_DISTINCT_PITCH_CLASSES) return refuse("TOO_FEW_PITCH_CLASSES");
 
-  const [best, second, third] = ranked;
+  const [best, second, third] = rankedCandidates(shares, profiles);
   const confidence = best.correlation - second.correlation;
   if (confidence < MIN_KEY_CONFIDENCE) return refuse("AMBIGUOUS");
 
@@ -210,7 +207,6 @@ export function estimateKey(
     distinctPitchClasses: distinct,
     voicedSeconds,
     method: profiles.name,
-    ranked,
   };
 }
 
@@ -290,16 +286,193 @@ export function correlation(observed: readonly number[], expected: readonly numb
   return covariance / denominator;
 }
 
-/** The correlation a named key scored, for a comparison against an incumbent. */
-export function correlationOf(
-  ranked: readonly KeyCandidate[],
-  tonic: string,
-  mode: KeyMode,
-): number | null {
-  const pitchClass = NOTE_NAMES.indexOf(tonic as (typeof NOTE_NAMES)[number]);
-  if (pitchClass < 0) return null;
-  const found = ranked.find(
-    (candidate) => candidate.tonic === pitchClass && candidate.mode === mode,
-  );
-  return found ? found.correlation : null;
+/* --- Commitment ----------------------------------------------------------- */
+
+/**
+ * Consecutive ticks a candidate must hold before the readout changes to it.
+ *
+ * The problem is real and it is only in this runtime: the backend estimates
+ * once over a finished recording, while here the profile grows as somebody
+ * sings and the winning candidate changes with it. Measured on a scripted
+ * boundary session — a mode-neutral scaffold with the major and minor third
+ * alternating, 40 ticks of 15 frames — the raw per-tick verdict changes the
+ * displayed key **14 times in 20 seconds**. That is the input this constant is
+ * sized against, and `block` below is how many consecutive ticks each third
+ * holds the floor:
+ *
+ * ===========  ======  ======  ======  ======  ======
+ * changes      dwell1  dwell2  dwell3  dwell4  dwell6
+ * ===========  ======  ======  ======  ======  ======
+ * block 1          14       1       1       1       1
+ * block 2          19       3       1       1       1
+ * block 3          18       7       6       1       0
+ * block 4          15       9       6       3       0
+ * ===========  ======  ======  ======  ======  ======
+ *
+ * Dwell *n* absorbs an excursion shorter than *n* ticks and nothing longer, so
+ * no value settles every session — a side that holds the lead for three seconds
+ * is arguably singing something else rather than flickering. 4 is the smallest
+ * value that holds all four fixtures at or below 3 changes.
+ *
+ * The cost, measured on a clear C major melody rather than asserted: the first
+ * label appears at tick 5 instead of tick 2 — **3.0 s of singing instead of
+ * 1.5 s**. The evidence gates already require a second of voiced time and five
+ * distinct pitch classes, so this is the second-and-a-half after that, spent
+ * making the label mean something once it appears.
+ *
+ * `tests/live-practice.test.ts` runs the sweep above rather than quoting it.
+ */
+export const KEY_DWELL_TICKS = 4;
+
+/**
+ * **There is no hysteresis rule, and the reason is a measurement.**
+ *
+ * The plan for this feature called for one: *once a key is shown, replacing it
+ * requires the new candidate to lead the incumbent by some margin, not merely
+ * to lead* — otherwise the label was expected to alternate between relative
+ * major and minor near the boundary. Sweeping it alongside the dwell showed
+ * that a margin below {@link MIN_KEY_CONFIDENCE} never fires, and the reason is
+ * arithmetic rather than a property of the fixtures:
+ *
+ * > An answered key leads the *second* candidate by at least
+ * > `MIN_KEY_CONFIDENCE`. The incumbent is some candidate other than the
+ * > winner, so its correlation is at most the second's — and the winner
+ * > therefore already leads the incumbent by at least the gate.
+ *
+ * Every hysteresis margin from 0 to 0.05 produced byte-identical readouts on
+ * every fixture, and the smallest lead an answered key ever held over any other
+ * candidate, measured across 200 ticks of deliberately unstable material, was
+ * **0.1375** — nearly 3× the gate. A margin *above* the gate would fire, but it
+ * would only delay changes that no fixture produces: the relative-major
+ * boundary the rule was written for is refused outright by the confidence gate,
+ * which scores 0.002–0.04 there and reports no key at all.
+ *
+ * So the rule the plan asked for is not implemented, because implementing it
+ * would have been dead code with a plausible-looking constant in it. A test
+ * asserts the invariant above, so if `MIN_KEY_CONFIDENCE` is ever lowered far
+ * enough for hysteresis to matter, the reason it was left out fails first.
+ */
+
+/** What the readout shows this tick. `null` throughout is "Not enough yet". */
+export interface LiveKeyReadout {
+  tonic: string | null;
+  mode: KeyMode | null;
+  /** The margin behind the displayed key. Never a percentage. */
+  confidence: number | null;
+  /** Why nothing is shown, when nothing is shown. */
+  unmeasuredReason: LiveKeyUnmeasuredReason | null;
+}
+
+export const NO_KEY_YET: LiveKeyReadout = {
+  tonic: null,
+  mode: null,
+  confidence: null,
+  unmeasuredReason: null,
+};
+
+/**
+ * Turns a verdict per tick into a label a person can read.
+ *
+ * One rule: **whatever wants to be displayed — a key, or the absence of one —
+ * must want it for {@link KEY_DWELL_TICKS} consecutive ticks first.** A refusal
+ * is a challenger like any other, so a session that dips below a gate for a
+ * tick does not blink its label off and on again, and the hysteresis the plan
+ * also asked for is absent for the measured reason recorded above.
+ *
+ * It does not touch the estimate. What is displayed may lag the current
+ * verdict, but it is always a verdict this session actually produced, and the
+ * margin shown is the one that verdict carried.
+ */
+export class LiveKeyTracker {
+  private committed: { tonic: string; mode: KeyMode; confidence: number } | null = null;
+  private challenger: { tonic: string; mode: KeyMode } | null = null;
+  private challengerTicks = 0;
+
+  private readonly dwellTicks: number;
+
+  /**
+   * The dwell is settable so the fixture that *chose* it can sweep it.
+   *
+   * Nothing in the application passes anything: the default is the shipped
+   * value, and `tests/live-practice.test.ts` drives four boundary sessions
+   * through a range of dwells and asserts what each produces. That is what
+   * makes the constant measured rather than picked — the measurement is in the
+   * suite, not only in a paragraph.
+   *
+   * Written out rather than declared as a constructor parameter property:
+   * Node's type-stripping test runner cannot rewrite those, and these modules
+   * are tested directly under `node --test`.
+   */
+  constructor(dwellTicks: number = KEY_DWELL_TICKS) {
+    this.dwellTicks = dwellTicks;
+  }
+
+  /** Advance one publish tick and return what should be on screen. */
+  tick(verdict: LiveKeyVerdict): LiveKeyReadout {
+    const candidate = verdict.key;
+
+    if (candidate === null) {
+      // Losing the key is a change like any other and waits out the dwell.
+      this.challenge(null);
+      return this.readout(verdict.unmeasuredReason);
+    }
+
+    if (this.committed !== null) {
+      if (
+        this.committed.tonic === candidate.tonic &&
+        this.committed.mode === candidate.mode
+      ) {
+        // The incumbent is still winning: refresh its margin, forget whatever
+        // was challenging it, and show nothing new.
+        this.committed = { ...this.committed, confidence: candidate.confidence };
+        this.clearChallenge();
+        return this.readout(null);
+      }
+
+    }
+
+    this.challenge({ tonic: candidate.tonic, mode: candidate.mode }, candidate.confidence);
+    return this.readout(null);
+  }
+
+  reset(): void {
+    this.committed = null;
+    this.clearChallenge();
+  }
+
+  private challenge(
+    candidate: { tonic: string; mode: KeyMode } | null,
+    confidence = 0,
+  ): void {
+    const same =
+      (this.challenger === null && candidate === null) ||
+      (this.challenger !== null &&
+        candidate !== null &&
+        this.challenger.tonic === candidate.tonic &&
+        this.challenger.mode === candidate.mode);
+
+    this.challengerTicks = same ? this.challengerTicks + 1 : 1;
+    this.challenger = candidate;
+
+    if (this.challengerTicks < this.dwellTicks) return;
+    this.committed = candidate === null ? null : { ...candidate, confidence };
+    this.clearChallenge();
+  }
+
+  private clearChallenge(): void {
+    this.challenger = null;
+    this.challengerTicks = 0;
+  }
+
+  private readout(reason: LiveKeyUnmeasuredReason | null): LiveKeyReadout {
+    if (this.committed === null) {
+      return { tonic: null, mode: null, confidence: null, unmeasuredReason: reason };
+    }
+    return {
+      tonic: this.committed.tonic,
+      mode: this.committed.mode,
+      confidence: this.committed.confidence,
+      unmeasuredReason: null,
+    };
+  }
 }

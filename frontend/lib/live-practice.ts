@@ -6,13 +6,25 @@
  * `lib/live-pitch-engine.ts` already produces — NSDF detection, clarity gating
  * and median smoothing all happen upstream and are untouched. What this module
  * adds is the arithmetic a practice display needs: where a needle sits, whether
- * a pitch reads flat or sharp, how consistent the last few seconds were, and
- * what range the session has covered so far.
+ * a pitch reads flat or sharp, how consistent the last few seconds were, what
+ * range the session has covered so far, and which key it seems to be in.
+ *
+ * The key is the one figure here that is not arithmetic over the last few
+ * frames: it folds every voiced frame of the session into a pitch-class profile
+ * and hands it to `lib/live-key.ts`, which estimates and commits. See that
+ * module for why the mathematics exists twice in this repository.
  *
  * Pure and dependency-free apart from the note conversions, so `node --test`
  * can drive all of it with a scripted sequence instead of a microphone.
  */
 
+import {
+  LiveKeyTracker,
+  estimateKey,
+  pitchClassProfile,
+  type KeyMode,
+  type LiveKeyUnmeasuredReason,
+} from "./live-key.ts";
 import { midiToNoteName, NOTE_NAMES } from "./pitch.ts";
 import type { LivePitchSample } from "./pitch-stream.ts";
 
@@ -49,6 +61,26 @@ export const MIN_CONSISTENCY_FRAMES = 30;
  */
 export const MIN_RANGE_FRAMES = 5;
 export const RANGE_CONTINUITY_SEMITONES = 1;
+
+/**
+ * Seconds of audio one detected frame stands for.
+ *
+ * The engine detects at most once per `DETECTION_INTERVAL_MS` of *audio* time,
+ * so every voiced frame carries one of these — the browser's version of the
+ * rule the backend states for its hop: frames overlap, so each is charged once
+ * and the interval cancels out of any share.
+ *
+ * Deliberately a copy rather than an import: this module is pure arithmetic
+ * that `node --test` drives without a browser, and pulling the microphone
+ * engine in to read one number would drag an `AudioContext` behind it. A test
+ * imports both and asserts they are the same, so the copy cannot drift.
+ *
+ * The interval is a floor rather than a period — a detection that arrives late
+ * is not skipped — so a session's true voiced time is slightly *longer* than
+ * the frames say. The error runs towards refusing a key rather than towards
+ * announcing one, which is the direction this feature errs everywhere else.
+ */
+export const LIVE_FRAME_SECONDS = 0.033;
 
 /** Where the needle sits, and whether the real value ran off the end. */
 export interface MeterReading {
@@ -115,6 +147,30 @@ export interface LiveStats {
   highestMidi: number | null;
   /** Whole semitones between them. `null` when there is no range yet. */
   semitoneSpan: number | null;
+
+  /**
+   * The key this session seems to be in, once the evidence supports one.
+   *
+   * A **different measurement** from the key the backend reports for an
+   * uploaded recording: different frames survive two different clarity gates,
+   * so the two profiles differ and the answers sometimes will too. They are
+   * never shown together and neither validates the other — the rule this
+   * repository already applies to live pitch against analysed pitch.
+   *
+   * `null` is "not enough yet", never a blank label and never 0%. Every one of
+   * these three is `null` together or none of them is.
+   */
+  keyTonic: string | null;
+  keyMode: KeyMode | null;
+  /** Margin over the next-best candidate. Not a percentage, not a grade. */
+  keyConfidence: number | null;
+  /**
+   * What the readout is still waiting for, while it is waiting.
+   *
+   * `null` once a key is displayed. It is the same vocabulary the uploaded
+   * analysis uses for the same three refusals, so one set of words serves both.
+   */
+  keyUnmeasuredReason: LiveKeyUnmeasuredReason | null;
 }
 
 export const EMPTY_STATS: LiveStats = {
@@ -127,6 +183,13 @@ export const EMPTY_STATS: LiveStats = {
   lowestMidi: null,
   highestMidi: null,
   semitoneSpan: null,
+  keyTonic: null,
+  keyMode: null,
+  keyConfidence: null,
+  // What a session with nothing sung into it is waiting for, so this constant
+  // is exactly what a fresh accumulator's first snapshot produces rather than a
+  // second, emptier description of the same state.
+  keyUnmeasuredReason: "TOO_LITTLE_VOICED_TIME",
 };
 
 /**
@@ -148,6 +211,27 @@ export class LivePracticeStats {
   /** The run of consecutive, continuous voiced frames being accumulated. */
   private run: number[] = [];
 
+  /**
+   * Voiced frames per pitch class, cumulative over the session.
+   *
+   * **Every voiced frame is counted, not only held ones.** The range uses
+   * {@link MIN_RANGE_FRAMES} because a frequency touched while crossing between
+   * two notes is not a note anyone sang; a key is a property of a passage, and
+   * the backend folds every point of a stored timeline into it. Reusing the
+   * held-pitch rule here would quietly give the live key a different definition
+   * from the uploaded one, which is the whole failure this feature has to avoid.
+   *
+   * Cumulative rather than windowed, for the same reason: four seconds of
+   * singing rarely contains five distinct pitch classes, so a windowed key would
+   * answer "not enough yet" almost always. The cost is stated rather than
+   * hidden — a session that modulates reports the average of both keys, and the
+   * longer it runs the less responsive the estimate becomes.
+   */
+  private readonly pitchClassCounts: number[] = new Array(12).fill(0);
+
+  /** Turns a verdict per tick into a label that does not flicker. */
+  private readonly keyTracker = new LiveKeyTracker();
+
   push(sample: LivePitchSample): void {
     this.total += 1;
 
@@ -161,6 +245,10 @@ export class LivePracticeStats {
     this.voiced += 1;
     this.window.push(Math.abs(sample.cents) <= IN_TUNE_CENTS);
     if (this.window.length > CONSISTENCY_WINDOW) this.window.shift();
+
+    // The nearest semitone, with the octave discarded: A2, A4 and A5 are three
+    // pitches and one pitch class. One array increment, ~30 times a second.
+    this.pitchClassCounts[((Math.round(sample.midi) % 12) + 12) % 12] += 1;
 
     this.trackRange(sample.midi);
   }
@@ -194,8 +282,23 @@ export class LivePracticeStats {
     if (this.highest === null || midi > this.highest) this.highest = midi;
   }
 
+  /**
+   * The figures to publish, and one tick of the key readout.
+   *
+   * **Not a pure read.** The key's dwell and hysteresis are counted in ticks,
+   * and this is the tick: `hooks/use-live-stats.ts` calls it on the 500 ms
+   * publish interval and nothing else calls it in the running app. Calling it
+   * twice therefore advances the key by two ticks — every other figure here is
+   * unaffected, and a test asserts the commitment schedule in those terms.
+   */
   snapshot(): LiveStats {
     const inTune = this.window.reduce((count, value) => count + (value ? 1 : 0), 0);
+    const key = this.keyTracker.tick(
+      estimateKey(
+        pitchClassProfile(this.pitchClassCounts),
+        this.voiced * LIVE_FRAME_SECONDS,
+      ),
+    );
     return {
       consistency:
         this.window.length >= MIN_CONSISTENCY_FRAMES ? inTune / this.window.length : null,
@@ -210,6 +313,10 @@ export class LivePracticeStats {
         this.lowest !== null && this.highest !== null
           ? Math.round(this.highest - this.lowest)
           : null,
+      keyTonic: key.tonic,
+      keyMode: key.mode,
+      keyConfidence: key.confidence,
+      keyUnmeasuredReason: key.unmeasuredReason,
     };
   }
 
@@ -220,6 +327,8 @@ export class LivePracticeStats {
     this.total = 0;
     this.lowest = null;
     this.highest = null;
+    this.pitchClassCounts.fill(0);
+    this.keyTracker.reset();
   }
 }
 

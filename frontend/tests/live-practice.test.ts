@@ -21,6 +21,7 @@ import {
   CONSISTENCY_WINDOW,
   EMPTY_STATS,
   IN_TUNE_CENTS,
+  LIVE_FRAME_SECONDS,
   LivePracticeStats,
   METER_RANGE_CENTS,
   MIN_CONSISTENCY_FRAMES,
@@ -33,6 +34,13 @@ import {
   tuningDirection,
   tuningLabel,
 } from "../lib/live-practice.ts";
+import {
+  KEY_DWELL_TICKS,
+  LiveKeyTracker,
+  estimateKey,
+  pitchClassProfile,
+} from "../lib/live-key.ts";
+import { DETECTION_INTERVAL_MS } from "../lib/live-pitch-engine.ts";
 import { formatClock } from "../lib/format.ts";
 import { describeFrequency, midiToFrequency } from "../lib/pitch.ts";
 import type { LivePitchSample } from "../lib/pitch-stream.ts";
@@ -392,4 +400,331 @@ test("the clock refuses impossible values rather than rendering NaN", () => {
   assert.equal(formatClock(-1), "0:00");
   assert.equal(formatClock(Number.NaN), "0:00");
   assert.equal(formatClock(Number.POSITIVE_INFINITY), "0:00");
+});
+
+// --- The live key ----------------------------------------------------------
+//
+// Two things are being tested here and they are different in kind.
+//
+// The estimator itself is `live-key.test.ts`'s job, and its agreement with the
+// backend is the shared parity table's. What is tested *here* is everything the
+// backend has no equivalent of: which frames are counted, how long the evidence
+// must hold still before a label appears, and what a session that sits on the
+// major/minor boundary does to it. The dwell constant was chosen by the sweep
+// below rather than picked, so the sweep is run rather than quoted.
+
+/** A tick's worth of frames at the detector's rate: 500 ms of publishing. */
+const FRAMES_PER_TICK = 15;
+
+/** Sing a sequence of pitch classes, then publish. */
+function sing(stats: LivePracticeStats, pitchClasses: number[]): void {
+  for (const pitchClass of pitchClasses) stats.push(voiced(60 + pitchClass));
+}
+
+/** The C major melody the backend fixtures use, as something to sing. */
+const MAJOR_MELODY_FRAMES = [0, 0, 2, 4, 4, 5, 7, 7, 9, 11, 0, 7, 4, 5, 2];
+
+test("the frame duration is the interval the detector actually runs at", () => {
+  // The one number this module copies from the microphone engine. A test owns
+  // the copy so it cannot drift; the module stays free of `AudioContext`.
+  assert.equal(LIVE_FRAME_SECONDS, DETECTION_INTERVAL_MS / 1000);
+});
+
+test("a session with nothing sung has no key, and does not have a blank one", () => {
+  const stats = new LivePracticeStats();
+  feed(stats, unvoiced(), 200);
+  const snapshot = stats.snapshot();
+
+  assert.equal(snapshot.keyTonic, null);
+  assert.equal(snapshot.keyMode, null);
+  assert.equal(snapshot.keyConfidence, null);
+  assert.equal(snapshot.keyUnmeasuredReason, "TOO_LITTLE_VOICED_TIME");
+});
+
+test("a hum is not a key, however long it is held", () => {
+  const stats = new LivePracticeStats();
+  for (let tick = 0; tick < 20; tick++) {
+    sing(stats, new Array(FRAMES_PER_TICK).fill(0));
+    stats.snapshot();
+  }
+  const snapshot = stats.snapshot();
+  assert.equal(snapshot.keyTonic, null);
+  assert.equal(snapshot.keyUnmeasuredReason, "TOO_FEW_PITCH_CLASSES");
+});
+
+test("a melody commits, and the tick it commits on is asserted", () => {
+  const stats = new LivePracticeStats();
+  const labels: (string | null)[] = [];
+  for (let tick = 0; tick < 10; tick++) {
+    sing(stats, MAJOR_MELODY_FRAMES);
+    const snapshot = stats.snapshot();
+    labels.push(snapshot.keyTonic === null ? null : `${snapshot.keyTonic} ${snapshot.keyMode}`);
+  }
+
+  // Ticks 0 and 1 are refused on voiced time — 15 frames is 0.495 s, and the
+  // gate is a second. The verdict is C major from tick 2; the dwell holds the
+  // label back until it has said so KEY_DWELL_TICKS times running, which is
+  // tick 5 — three seconds of singing.
+  assert.deepEqual(labels.slice(0, 5), new Array(5).fill(null));
+  assert.deepEqual(labels.slice(5), new Array(5).fill("C major"));
+
+  const settled = stats.snapshot();
+  assert.equal(settled.keyMode, "major");
+  assert.ok(settled.keyConfidence !== null && settled.keyConfidence >= 0.05);
+  assert.equal(settled.keyUnmeasuredReason, null, "a displayed key is not also waiting");
+});
+
+test("every voiced frame counts towards the key, not only held ones", () => {
+  // The range admits a pitch only after MIN_RANGE_FRAMES; the key must not.
+  // A melody sung with every note shorter than a held note still has a key,
+  // and it is the same one the backend would fold from the same frames.
+  const stats = new LivePracticeStats();
+  const quick = [0, 2, 4, 5, 7, 9, 11, 0, 7, 4, 5, 2, 0, 7, 4];
+  for (let tick = 0; tick < 6; tick++) {
+    sing(stats, quick);
+    stats.snapshot();
+  }
+  const snapshot = stats.snapshot();
+
+  assert.equal(snapshot.keyTonic, "C");
+  assert.equal(snapshot.keyMode, "major");
+  // Nothing was held long enough to widen the range, which is the whole point:
+  // the two measurements read the same frames under different rules.
+  assert.equal(snapshot.lowestNote, null);
+  assert.equal(snapshot.highestNote, null);
+});
+
+test("the key is cumulative over the session, not a rolling window", () => {
+  // Four seconds rarely contains five distinct pitch classes, so a windowed key
+  // would answer "not enough yet" almost always. The cost of the choice is
+  // asserted with it: the earlier singing still counts.
+  const stats = new LivePracticeStats();
+  for (let tick = 0; tick < 6; tick++) {
+    sing(stats, MAJOR_MELODY_FRAMES);
+    stats.snapshot();
+  }
+  assert.equal(stats.snapshot().keyTonic, "C");
+
+  // A long hum afterwards does not erase what was sung before it.
+  for (let tick = 0; tick < 8; tick++) {
+    sing(stats, new Array(FRAMES_PER_TICK).fill(0));
+    stats.snapshot();
+  }
+  assert.equal(stats.snapshot().keyTonic, "C");
+});
+
+test("a new take starts with no key at all", () => {
+  const stats = new LivePracticeStats();
+  for (let tick = 0; tick < 8; tick++) {
+    sing(stats, MAJOR_MELODY_FRAMES);
+    stats.snapshot();
+  }
+  assert.equal(stats.snapshot().keyTonic, "C");
+
+  stats.reset();
+  assert.deepEqual(stats.snapshot(), EMPTY_STATS);
+});
+
+test("the empty stats carry no key, which is what a new take starts from", () => {
+  // No tonic, no mode, no margin — and the reason a fresh accumulator gives for
+  // having none, so the two are one state rather than two.
+  assert.equal(EMPTY_STATS.keyTonic, null);
+  assert.equal(EMPTY_STATS.keyMode, null);
+  assert.equal(EMPTY_STATS.keyConfidence, null);
+  assert.equal(EMPTY_STATS.keyUnmeasuredReason, "TOO_LITTLE_VOICED_TIME");
+  assert.deepEqual(new LivePracticeStats().snapshot(), EMPTY_STATS);
+});
+
+// --- The boundary session, and the constant it chose ------------------------
+
+/**
+ * A session that sits on the major/minor boundary.
+ *
+ * A mode-neutral scaffold — C, D, F, G — with the major and the minor third
+ * taking it in turns to be the more-sung one, `block` ticks at a time. The
+ * cumulative profile crosses back and forth over the boundary, which is the
+ * input that makes a raw per-tick verdict unreadable.
+ */
+function boundarySession(ticks: number, block: number): number[][] {
+  const scaffold = [0, 0, 0, 2, 2, 5, 5, 7, 7, 7];
+  return Array.from({ length: ticks }, (_, tick) => {
+    const major = Math.floor(tick / block) % 2 === 0;
+    const thirds = major ? 5 : 7;
+    return Array.from({ length: FRAMES_PER_TICK }, (_, index) =>
+      index < FRAMES_PER_TICK - thirds ? scaffold[index % scaffold.length] : major ? 4 : 3,
+    );
+  });
+}
+
+/** Drive a session through one dwell setting and count what the reader sees. */
+function displayedChanges(session: number[][], dwellTicks: number): number {
+  const counts = new Array(12).fill(0);
+  const tracker = new LiveKeyTracker(dwellTicks);
+  let voicedFrames = 0;
+  let previous: string | null = null;
+  let changes = 0;
+
+  for (const frames of session) {
+    for (const pitchClass of frames) {
+      counts[pitchClass] += 1;
+      voicedFrames += 1;
+    }
+    const readout = tracker.tick(
+      estimateKey(pitchClassProfile(counts), voicedFrames * LIVE_FRAME_SECONDS),
+    );
+    const label = readout.tonic === null ? null : `${readout.tonic} ${readout.mode}`;
+    if (label !== previous) changes += 1;
+    previous = label;
+  }
+  return changes;
+}
+
+test("the raw per-tick verdict flickers, which is why a dwell exists", () => {
+  // 14 changes in 40 ticks — a label rewriting itself every second and a half.
+  assert.equal(displayedChanges(boundarySession(40, 1), 1), 14);
+});
+
+test("the dwell is the value the sweep chose, and the sweep runs here", () => {
+  // Rows are how many consecutive ticks each third holds the floor; columns are
+  // the dwell. Dwell n absorbs an excursion shorter than n ticks and nothing
+  // longer, so no value settles every session — 4 is the smallest that holds
+  // all four fixtures at or below 3 changes. Every number below is measured by
+  // this assertion, not copied from a note.
+  const measured = [1, 2, 3, 4].map((block) =>
+    [1, 2, 3, 4, 6].map((dwell) => displayedChanges(boundarySession(40, block), dwell)),
+  );
+
+  assert.deepEqual(measured, [
+    [14, 1, 1, 1, 1],
+    [19, 3, 1, 1, 1],
+    [18, 7, 6, 1, 0],
+    [15, 9, 6, 3, 0],
+  ]);
+
+  assert.equal(KEY_DWELL_TICKS, 4);
+  for (const row of measured) {
+    assert.ok(
+      row[3] <= 3,
+      "the shipped dwell must hold every boundary fixture at or below 3 changes",
+    );
+  }
+});
+
+test("what the dwell costs is a second and a half, and it is asserted too", () => {
+  // The other half of the trade. A clear melody's label appears at tick 5
+  // rather than tick 2: 3.0 s of singing instead of 1.5 s, on top of the
+  // evidence gates rather than instead of them.
+  const commitTick = (dwellTicks: number): number | null => {
+    const counts = new Array(12).fill(0);
+    const tracker = new LiveKeyTracker(dwellTicks);
+    let voicedFrames = 0;
+    for (let tick = 0; tick < 20; tick++) {
+      for (const pitchClass of MAJOR_MELODY_FRAMES) {
+        counts[pitchClass] += 1;
+        voicedFrames += 1;
+      }
+      const readout = tracker.tick(
+        estimateKey(pitchClassProfile(counts), voicedFrames * LIVE_FRAME_SECONDS),
+      );
+      if (readout.tonic !== null) return tick;
+    }
+    return null;
+  };
+
+  assert.equal(commitTick(1), 2);
+  assert.equal(commitTick(KEY_DWELL_TICKS), 5);
+});
+
+test("a single tick of another key never reaches the screen", () => {
+  const tracker = new LiveKeyTracker();
+  const counts = new Array(12).fill(0);
+  let voicedFrames = 0;
+  const tick = (pitchClasses: number[]) => {
+    for (const pitchClass of pitchClasses) {
+      counts[pitchClass] += 1;
+      voicedFrames += 1;
+    }
+    return tracker.tick(estimateKey(pitchClassProfile(counts), voicedFrames * LIVE_FRAME_SECONDS));
+  };
+
+  let readout = { tonic: null as string | null };
+  for (let index = 0; index < 8; index++) readout = tick(MAJOR_MELODY_FRAMES);
+  assert.equal(readout.tonic, "C");
+
+  // One tick of something else, then back. The label never moved.
+  assert.equal(tick(MAJOR_MELODY_FRAMES.map((pc) => (pc + 6) % 12)).tonic, "C");
+  assert.equal(tick(MAJOR_MELODY_FRAMES).tonic, "C");
+});
+
+test("losing the evidence waits out the dwell too, so the label does not blink", () => {
+  // A refusal is a challenger like any other. Only a sustained one clears the
+  // label — and with a cumulative profile a settled session does not lose it.
+  const tracker = new LiveKeyTracker(2);
+  const shares = pitchClassProfile(MAJOR_MELODY_FRAMES.reduce(
+    (counts, pitchClass) => {
+      counts[pitchClass] += 10;
+      return counts;
+    },
+    new Array(12).fill(0),
+  ));
+  const answered = estimateKey(shares, 60);
+  const refused = estimateKey(pitchClassProfile(new Array(12).fill(0)), 0);
+
+  tracker.tick(answered);
+  assert.equal(tracker.tick(answered).tonic, "C");
+  assert.equal(tracker.tick(refused).tonic, "C", "one refused tick must not clear it");
+  assert.equal(tracker.tick(refused).tonic, null, "two must");
+});
+
+test("the margin travels with the label and is the one the verdict carried", () => {
+  const stats = new LivePracticeStats();
+  for (let tick = 0; tick < 8; tick++) {
+    sing(stats, MAJOR_MELODY_FRAMES);
+    stats.snapshot();
+  }
+  const snapshot = stats.snapshot();
+  assert.ok(snapshot.keyConfidence !== null);
+
+  const counts = new Array(12).fill(0);
+  for (let tick = 0; tick < 9; tick++) {
+    for (const pitchClass of MAJOR_MELODY_FRAMES) counts[pitchClass] += 1;
+  }
+  const direct = estimateKey(
+    pitchClassProfile(counts),
+    9 * FRAMES_PER_TICK * LIVE_FRAME_SECONDS,
+  );
+  assert.equal(snapshot.keyConfidence, direct.key?.confidence);
+});
+
+// --- Cost ------------------------------------------------------------------
+
+test("the fold and the estimate are far inside the publish budget", () => {
+  // The rule this feature has to live under: the fold runs per frame at ~30 Hz
+  // and the estimate on the 500 ms publish tick. Both are measured rather than
+  // assumed, with generous ceilings — this asserts the shape of the cost, not
+  // the speed of the machine it runs on.
+  const stats = new LivePracticeStats();
+  const sample = voiced(60);
+
+  const frames = 30000;
+  const startFold = performance.now();
+  for (let index = 0; index < frames; index++) stats.push(sample);
+  const perFrame = (performance.now() - startFold) / frames;
+
+  const shares = pitchClassProfile(
+    MAJOR_MELODY_FRAMES.reduce((counts, pitchClass) => {
+      counts[pitchClass] += 40;
+      return counts;
+    }, new Array(12).fill(0)),
+  );
+  const estimates = 2000;
+  const startEstimate = performance.now();
+  for (let index = 0; index < estimates; index++) estimateKey(shares, 60);
+  const perEstimate = (performance.now() - startEstimate) / estimates;
+
+  assert.ok(perFrame < 0.01, `${perFrame} ms per frame`);
+  assert.ok(perEstimate < 1, `${perEstimate} ms per estimate`);
+  // The cost of an estimate does not grow with the session: the fold is
+  // incremental and the correlation is always over twelve numbers.
+  assert.equal(shares.length, 12);
 });

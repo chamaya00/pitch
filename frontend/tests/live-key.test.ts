@@ -33,7 +33,6 @@ import {
   MIN_VOICED_SECONDS,
   TEMPERLEY,
   correlation,
-  correlationOf,
   estimateKey,
   pitchClassProfile,
   rankedCandidates,
@@ -300,10 +299,23 @@ test("the ranking is total, and every key appears in it exactly once", () => {
   }
 });
 
-test("a named key's correlation can be read back out of the ranking", () => {
-  const ranked = rankedCandidates(pitchClassProfile(MAJOR_MELODY));
-  assert.equal(correlationOf(ranked, "C", "major"), ranked[0].correlation);
-  assert.equal(correlationOf(ranked, "H", "major"), null);
+test("an answered key always leads every other candidate by the confidence gate", () => {
+  // The invariant that makes a hysteresis rule below the gate unreachable, and
+  // therefore the reason `live-key.ts` does not ship one. If MIN_KEY_CONFIDENCE
+  // is ever lowered far enough for hysteresis to matter, this fails first.
+  for (const frames of [MAJOR_MELODY, MINOR_MELODY, PENTATONIC]) {
+    const shares = pitchClassProfile(frames);
+    const result = estimateKey(shares, frames.reduce((a, b) => a + b, 0) * PARITY.frame_seconds);
+    assert.ok(result.key !== null);
+
+    const ranked = rankedCandidates(shares);
+    for (const candidate of ranked.slice(1)) {
+      assert.ok(
+        ranked[0].correlation - candidate.correlation >= MIN_KEY_CONFIDENCE,
+        `${candidate.tonic} ${candidate.mode} sits within the gate of the winner`,
+      );
+    }
+  }
 });
 
 test("the same profile always produces the same answer", () => {
