@@ -201,6 +201,28 @@ and `reference` never once means a reference recording.
 does not contain — tempo, beats, melody transcription, note events, a reference
 song, transposition and compatibility — is unchanged and still out of scope.
 
+### Planned extension — a live key readout
+
+Slices 7–9 in
+[phase-8-specification.md §13](phase-8-specification.md#13-extension--live-key-estimation-slices-79):
+the key updating **while somebody sings**, in Live Vocal Practice, instead of
+only after an upload. Planned, not built, and deliberately numbered after the
+phase so the agreed scope does not widen by accident.
+
+It reuses the pitch stream Steps 7H/7J already run in the page, so nothing new is
+captured and **microphone audio still never leaves the browser** — which is also
+what forces the estimator to be implemented a second time in TypeScript, under
+the same "one mathematics, two implementations" rule `pitch.py` and `pitch.ts`
+already follow.
+
+Three problems the uploaded version does not have, all recorded in the plan: a
+second implementation to keep in step, two numbers of the same kind from two
+pipelines that will sometimes disagree (the answer is the existing one — label
+them apart and never show them side by side), and flicker, which needs hysteresis
+and dwell rules set by measurement rather than picked. Cost is not one of them:
+measured at **0.008 ms per estimate**, 0.003% of one publish tick.
+
+
 ## Phase 9 — audited, specified, blocked
 
 Phase 9 was audited after Phase 8 closed, in the same way 10.7 audited Phase 8:
