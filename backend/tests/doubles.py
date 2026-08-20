@@ -207,7 +207,17 @@ class InMemoryOwnerRepository:
         return any(owner == owner_id for owner, _ in self._recordings.records())
 
     async def data_summary(self, owner_id: uuid.UUID) -> OwnerDataSummary:
-        """Counts, taken from the sibling doubles rather than a second store."""
+        """Counts, taken from the sibling doubles rather than a second store.
+
+        **Every** analysis of a recording is considered, not the latest one.
+        Until Step 10.19 this asked ``latest_audio_analysis`` and counted what
+        that one said, which is a different question: a recording measured
+        yesterday and re-analysed a minute ago counted as unmeasured while the
+        new run was pending, and one whose feedback was generated on an earlier
+        analysis counted as having none. SQL had always looked at every
+        analysis, so the two stores disagreed and the contract suite had never
+        asked.
+        """
         recordings = self._recordings
         if recordings is None:
             return OwnerDataSummary(recordings=0, analysed_recordings=0, ai_feedback=0)
@@ -215,12 +225,10 @@ class InMemoryOwnerRepository:
         analysed = 0
         feedback = 0
         for record in owned:
-            analysis = await recordings.latest_audio_analysis(record.recording_id)
-            if analysis is None:
-                continue
-            if analysis.status is AudioAnalysisStatus.COMPLETED:
+            analyses = await recordings.audio_analyses_of(record.recording_id)
+            if any(one.status is AudioAnalysisStatus.COMPLETED for one in analyses):
                 analysed += 1
-            if analysis.feedback_status is AudioFeedbackStatus.COMPLETED:
+            if any(one.feedback_status is AudioFeedbackStatus.COMPLETED for one in analyses):
                 feedback += 1
         return OwnerDataSummary(
             recordings=len(owned), analysed_recordings=analysed, ai_feedback=feedback
@@ -433,6 +441,18 @@ class InMemoryRecordingRepository:
         if self._audio_analyses is None:
             return None
         return await self._audio_analyses.latest_for_recording(recording_id)
+
+    async def audio_analyses_of(self, recording_id: str) -> list[AudioAnalysisSummary]:
+        """Every analysis of a recording, which is what the owner summary counts.
+
+        A recording can be analysed more than once, and "has this been
+        measured?" is a question about all of them rather than about the newest.
+        Summaries, because the counts read status and feedback status and
+        nothing else.
+        """
+        if self._audio_analyses is None:
+            return []
+        return await self._audio_analyses.list_summaries_for_recording(recording_id)
 
     def delete_for_owner(self, owner_id: uuid.UUID) -> None:
         """What ``ON DELETE CASCADE`` does in the real schema.
