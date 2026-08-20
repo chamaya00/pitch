@@ -324,7 +324,7 @@ export function correlation(observed: readonly number[], expected: readonly numb
  */
 export const KEY_DWELL_TICKS = 4;
 
-/**
+/*
  * **There is no hysteresis rule, and the reason is a measurement.**
  *
  * The plan for this feature called for one: *once a key is shown, replacing it
@@ -362,13 +362,6 @@ export interface LiveKeyReadout {
   /** Why nothing is shown, when nothing is shown. */
   unmeasuredReason: LiveKeyUnmeasuredReason | null;
 }
-
-export const NO_KEY_YET: LiveKeyReadout = {
-  tonic: null,
-  mode: null,
-  confidence: null,
-  unmeasuredReason: null,
-};
 
 /**
  * Turns a verdict per tick into a label a person can read.
