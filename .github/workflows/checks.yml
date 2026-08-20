@@ -1,0 +1,90 @@
+# Every check in scripts/check.sh, on every push and pull request.
+#
+# The point of this workflow is not that checks exist — scripts/check.sh has run
+# them since Phase 0 — but that they run *with a database*. Measured in Step
+# 10.20: without TEST_DATABASE_URL the suite reports 1 584 passed and 187
+# skipped, in green, and 185 of those skips are every test that touches SQL.
+# A CI job that did not set it would prove nothing about any statement in the
+# repository while looking exactly like one that did. REQUIRE_DATABASE_TESTS
+# makes that impossible: with it set, a missing DSN fails the run before
+# collection instead of skipping.
+name: checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Nothing here writes to the repository, comments, or reads a secret.
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    services:
+      # The version docker-compose.yml runs, so CI is not proving a property of
+      # a different PostgreSQL from the one a deployment has.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vocallens
+          POSTGRES_PASSWORD: vocallens
+          POSTGRES_DB: vocallens_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vocallens"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # A scratch database, created above and thrown away with the runner. The
+      # suites TRUNCATE between tests, which is why it must never be a real one.
+      TEST_DATABASE_URL: postgresql://vocallens:vocallens@localhost:5432/vocallens_test
+      # "This run is meant to be complete." Without it a missing DSN would skip
+      # 185 tests and still be green; with it the run fails instead.
+      REQUIRE_DATABASE_TESTS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # The version backend/Dockerfile and pyproject.toml both name.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # 22 for `node --experimental-strip-types`, which the frontend test
+          # script uses to run its TypeScript tests without a build step.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements-dev.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # One command, and deliberately the same one a contributor runs. A
+      # workflow that listed the checks itself would be a second definition of
+      # "the checks" to keep in step with the first.
+      - name: Run every check
+        run: ./scripts/check.sh
