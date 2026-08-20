@@ -53,10 +53,10 @@ jobs:
       REQUIRE_DATABASE_TESTS: "1"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           # The version backend/Dockerfile and pyproject.toml both name.
           python-version: "3.11"
@@ -64,7 +64,7 @@ jobs:
           cache-dependency-path: backend/requirements-dev.txt
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # 22 for `node --experimental-strip-types`, which the frontend test
           # script uses to run its TypeScript tests without a build step.
