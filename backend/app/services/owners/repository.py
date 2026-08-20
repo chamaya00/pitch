@@ -57,7 +57,12 @@ class OwnerRepository(Protocol):
         """Return the owner, or ``None`` if it is unknown."""
 
     async def data_summary(self, owner_id: uuid.UUID) -> OwnerDataSummary:
-        """What this owner has accumulated. Counts only — never the content."""
+        """What this owner has accumulated. Counts only — never the content.
+
+        All three numbers are counts of **recordings**, so neither of the last
+        two can exceed the first — see the implementation for what that cost
+        the sentence the deletion confirmation renders before Step 10.19.
+        """
 
     async def recording_ids(self, owner_id: uuid.UUID) -> list[str]:
         """Every recording id this owner has, so the stored audio can be removed."""
@@ -141,18 +146,56 @@ class PostgresOwnerRepository:
         Counts, never content: this answers "what would I lose?" and nothing
         that could stand in for reading the recordings themselves. Scoped by
         ``owner_id`` in the ``WHERE`` clause like every other read.
+
+        **All three numbers count recordings**, and the lateral is what makes
+        that a property of the statement rather than of a ``DISTINCT`` cleaning
+        up afterwards. A recording may be analysed more than once, so joining
+        recordings to analyses multiplies rows; folding each recording's
+        analyses down to two booleans *first* leaves the outer query one row per
+        recording to count. An aggregate with no ``GROUP BY`` always returns a
+        row, so a recording with no analyses is a row of two nulls rather than
+        no row at all.
+
+        **The third number changed meaning in Step 10.19, because it was
+        wrong.** It counted *analyses* whose feedback had completed, and both
+        places it is rendered are sentences about recordings — "this key holds 5
+        recordings, 3 measured, 2 with generated feedback", and "2 of them carry
+        generated feedback, which cannot be recovered". A recording analysed
+        twice with feedback both times made those sentences say that one
+        recording included two of them. The two stores disagreed about it as
+        well, in different ways, and nothing had asked either of them.
+
+        It is also the fastest of the four forms measured — but only when it is
+        measured the way production runs it. Through a pooled connection, which
+        psycopg prepares after five uses, against an owner holding 5 000
+        recordings in a database of 201 owners:
+
+        ======================================  ================  =============
+        form                                    5 000 recordings  25 recordings
+        ======================================  ================  =============
+        join, three ``count(DISTINCT …)``            16.1 ms         0.32 ms
+        this lateral                               **11.7 ms**       0.31 ms
+        three counts with ``EXISTS``                 20.1 ms         0.71 ms
+        ======================================  ================  =============
+
+        ``psql`` ranks them differently, and it is ``psql`` that is misleading:
+        with the owner written in as a literal it plans afresh every time, which
+        is not what a prepared statement gets. See ``docs/architecture.md``.
         """
         async with self._db.connection() as connection:
             row = await fetch_one(
                 connection,
                 """
-                SELECT count(DISTINCT r.id) AS recordings,
-                       count(DISTINCT a.recording_id)
-                           FILTER (WHERE a.status = 'completed')          AS analysed,
-                       count(DISTINCT a.id)
-                           FILTER (WHERE a.feedback_status = 'completed') AS feedback
+                SELECT count(*)                                   AS recordings,
+                       count(*) FILTER (WHERE a.analysed)         AS analysed,
+                       count(*) FILTER (WHERE a.carries_feedback) AS feedback
                   FROM recordings r
-                  LEFT JOIN audio_analyses a ON a.recording_id = r.id
+                  LEFT JOIN LATERAL (
+                      SELECT bool_or(status = 'completed')          AS analysed,
+                             bool_or(feedback_status = 'completed') AS carries_feedback
+                        FROM audio_analyses a
+                       WHERE a.recording_id = r.id
+                  ) a ON TRUE
                  WHERE r.owner_id = %s
                 """,
                 (owner_id,),

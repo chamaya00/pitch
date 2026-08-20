@@ -98,9 +98,13 @@ class IdentityResponse(BaseModel):
     )
     ai_feedback: int = Field(
         description=(
-            "How many analyses carry generated feedback. Counted separately "
-            "because producing it costs a provider call, so it is the part of a "
-            "lost identity that cannot simply be recomputed."
+            "How many of them have generated feedback on at least one analysis. "
+            "Counted separately because producing it costs a provider call, so "
+            "it is the part of a lost identity that cannot simply be recomputed. "
+            "A count of **recordings**, like the two above it, and never more "
+            "than `recordings`: until Step 10.19 it counted feedback *runs*, so "
+            "a recording analysed twice could make the deletion warning say that "
+            "one recording included two of them."
         )
     )
     credentials: list[CredentialResponse] = Field(
