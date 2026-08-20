@@ -20,12 +20,14 @@ from app.services.audio_analysis.pitch import (
     cents_from_nearest_note,
     frequency_to_midi,
     is_usable_frequency,
+    midi_for_note_name,
     midi_to_frequency,
     midi_to_note_name,
     nearest_midi,
     note_name_for_frequency,
     note_name_for_midi,
     semitones_between,
+    semitones_between_notes,
 )
 
 #: Cents. Tight enough to catch a wrong formula, loose enough for binary floats.
@@ -181,3 +183,51 @@ def test_note_names_use_sharps_only() -> None:
     names = {midi_to_note_name(midi) for midi in range(60, 72)}
     assert names == {"C4", "C#4", "D4", "D#4", "E4", "F4", "F#4", "G4", "G#4", "A4", "A#4", "B4"}
     assert not any("b" in (name or "") for name in names)
+
+
+# --- Reading a written note back --------------------------------------------
+
+
+def test_every_midi_note_survives_a_round_trip_through_its_name() -> None:
+    """The property that makes :func:`midi_for_note_name` an inverse rather than a parser.
+
+    Phase 9 compares a measured range against two note names somebody typed, so
+    a name has to become a number again exactly. Asserted over the whole MIDI
+    range rather than on examples: an octave-boundary error would show up on
+    twelve notes out of 128 and on none of the obvious ones.
+    """
+    for midi in range(128):
+        assert midi_for_note_name(note_name_for_midi(midi)) == midi
+
+
+def test_reading_a_note_accepts_what_this_project_writes_and_nothing_more() -> None:
+    assert midi_for_note_name("A4") == 69
+    assert midi_for_note_name("C-1") == 0
+    assert midi_for_note_name("G9") == 127
+    # Real notes this project never writes, and things that are not notes.
+    assert midi_for_note_name("Db4") is None
+    assert midi_for_note_name("H4") is None
+    assert midi_for_note_name("C") is None
+    assert midi_for_note_name("C10") is None
+    assert midi_for_note_name(" A4") is None
+    assert midi_for_note_name("") is None
+
+
+def test_a_well_formed_note_above_the_midi_range_is_refused_not_clamped() -> None:
+    """``B9`` is spelled correctly and is not a MIDI note.
+
+    Returning 127 for it would be inventing a value the caller did not ask for —
+    and 127 is ``G9``, four semitones away from what they wrote.
+    """
+    assert midi_for_note_name("B9") is None
+
+
+def test_the_interval_between_two_written_notes_is_signed() -> None:
+    assert semitones_between_notes("C4", "C5") == 12
+    assert semitones_between_notes("C5", "C4") == -12
+    assert semitones_between_notes("A4", "A4") == 0
+
+
+def test_an_interval_from_a_note_that_cannot_be_read_is_absent_not_zero() -> None:
+    assert semitones_between_notes("C4", "Db5") is None
+    assert semitones_between_notes("Bb3", "C5") is None

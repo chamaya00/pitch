@@ -30,6 +30,7 @@ Pure arithmetic. No numpy, no audio, no I/O.
 """
 
 import math
+import re
 from typing import Final
 
 A4_FREQUENCY_HZ: Final = 440.0
@@ -58,6 +59,17 @@ NOTE_NAMES: Final[tuple[str, ...]] = (
 #: detector's own search range, which is a separate and narrower decision.
 MIN_FREQUENCY_HZ: Final = 20.0
 MAX_FREQUENCY_HZ: Final = 5000.0
+
+#: The MIDI range, which is the range of things :func:`note_name_for_midi` can
+#: be asked about. Not a musical statement — a note below 0 or above 127 is
+#: simply not a MIDI note.
+_MIN_MIDI: Final = 0
+_MAX_MIDI: Final = 127
+
+#: Scientific pitch notation, as this project writes it. The same shape as
+#: ``_NOTE_PATTERN`` in ``models.py``, which validates the strings this parses;
+#: the groups are what makes it a parser rather than a second copy of the check.
+_NOTE_NAME_PATTERN: Final = re.compile(r"\A(?P<pitch_class>[A-G]#?)(?P<octave>-?[0-9])\Z")
 
 
 def is_usable_frequency(frequency: float | None) -> bool:
@@ -143,3 +155,48 @@ def note_name_for_frequency(frequency: float | None) -> str | None:
 def semitones_between(low_hz: float, high_hz: float) -> float:
     """Interval between two frequencies, in semitones. Fractional."""
     return _SEMITONES_PER_OCTAVE * math.log2(high_hz / low_hz)
+
+
+def midi_for_note_name(name: str) -> int | None:
+    """MIDI number for scientific pitch notation, e.g. ``A4`` → 69.
+
+    The exact inverse of :func:`note_name_for_midi`, and deliberately no wider
+    than that. It accepts what this project *writes* — a letter, an optional
+    ``#``, and an octave from -1 to 9 — and returns ``None`` for everything
+    else, including well-formed music that this project never writes:
+
+    **Flats are not accepted.** ``Db4`` is a real note and ``NOTE_NAMES`` cannot
+    produce it, for the reason stated there: enharmonic spelling needs a key,
+    and this project spells with sharps everywhere. Accepting a flat would mean
+    echoing a value back to the caller under a different name than they sent,
+    which is worse than refusing it — and every place a note is chosen in the
+    UI is a picker over the names above, so the flat never arrives.
+
+    Out-of-range octaves are refused rather than clamped: ``B9`` parses to 131,
+    which is not a MIDI note, and returning 127 for it would be inventing a
+    value the caller did not ask for.
+    """
+    if not isinstance(name, str):
+        return None
+    match = _NOTE_NAME_PATTERN.match(name)
+    if match is None:
+        return None
+    pitch_class = NOTE_NAMES.index(match.group("pitch_class"))
+    octave = int(match.group("octave"))
+    midi = (octave + 1) * _SEMITONES_PER_OCTAVE + pitch_class
+    return midi if _MIN_MIDI <= midi <= _MAX_MIDI else None
+
+
+def semitones_between_notes(low: str, high: str) -> int | None:
+    """Whole semitones from one written note to another, or ``None``.
+
+    Signed: ``semitones_between_notes("C4", "C5")`` is 12 and the reverse is
+    -12. Named apart from :func:`semitones_between`, which takes frequencies and
+    returns a fraction, because confusing the two would silently change a
+    measurement into an interval between two spellings.
+    """
+    low_midi = midi_for_note_name(low)
+    high_midi = midi_for_note_name(high)
+    if low_midi is None or high_midi is None:
+        return None
+    return high_midi - low_midi
