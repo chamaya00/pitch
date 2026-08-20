@@ -113,9 +113,14 @@ recording estimate" wherever it appears. Specifically:
 - **Target-note mode does not grade you.** It reports the note you actually
   sang and its distance from the target. Singing a semitone or an octave away
   is reported as exactly that, never as the target note slightly out of tune.
+- **The live key is the key you seem to be singing in**, never the key of a
+  song and never a claim it was the right one. It is folded from every voiced
+  frame of the session, so it settles slowly and averages a session that changes
+  key. See "The live key, in the practice card" under [Musical key](#musical-key).
 - **The live figures will not match the audio analysis of the same recording.**
   Different window, different thresholds, different aggregation. Neither
-  validates the other.
+  validates the other. That now includes two keys as well as two pitch readouts,
+  and they are never shown side by side.
 
 Microphone audio is never uploaded while recording, and no recording is sent
 anywhere unless it is explicitly submitted for analysis.
@@ -490,6 +495,30 @@ microphone**. What that does and does not entitle a reader to conclude:
 One threshold is presentational: the UI states in words when an answered key
 rests on thin evidence. It never decides whether a key is shown at all — that is
 the backend's gate, and a refused key is refused with its reason visible.
+
+### The live key, in the practice card
+
+Live Vocal Practice shows a key too, while you sing. Everything above applies to
+it, and four things are true only of it:
+
+- **It is a different measurement from the uploaded recording's key, and the two
+  may disagree.** They read different frames — the browser admits a frame at
+  clarity 0.90 over a 2048-sample window, the backend at 0.80 over 0.0929 s with
+  octave-outlier rejection — so the profiles differ and the answers sometimes
+  will. Neither is wrong and neither is the real one. They are labelled apart,
+  never shown side by side, and neither validates the other.
+- **It reports one key for the whole session**, folded from every voiced frame
+  since the take began. A session that changes key reports the average of both,
+  and the longer it runs the less a change moves it.
+- **It appears late on purpose.** Nothing is shown until a second of pitched
+  audio and five distinct pitch classes exist, and then only after the same
+  answer has held for four consecutive half-second ticks. A label that rewrites
+  itself while you sing is worse than no label; the cost is about three seconds
+  of singing before the first one appears.
+- **It is browser-local and unverifiable after the fact.** Nothing about it is
+  sent anywhere or stored, so a disagreement with the uploaded key cannot be
+  investigated later. That is the price of the guarantee it is built on:
+  microphone audio never leaves the page.
 
 ## Song compatibility (Phase 9+)
 

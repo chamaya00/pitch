@@ -39,6 +39,7 @@
 | 10.8 (Slice 5) | The performance ceiling and the mutation run. The endpoint stopped loading the analysis document twice. One mutation survived the first run and exposed an untested property — the definition of the confidence margin — which `AMBIGUOUS_MODE` now pins. |
 | 10.8 (Slice 6) | The documentation sweep, and this file marked superseded. **Phase 8 complete.** |
 | Live key (planning) | A live, in-browser key readout added as **§13, Slices 7–9** — an extension after this phase, not a widening of it. Planned only; nothing implemented. |
+| Live key (Slices 7–9) | Built. The estimator in TypeScript, held to `key.py` by a shared parity table; cumulative accumulation over every voiced frame; the readout in the practice card. **The plan's two commitment rules became one**: the dwell was set by the sweep the plan asked for, and hysteresis was measured to be unreachable below the confidence gate — see §13. |
 
 ### What the Slice 1 sweep settled
 
@@ -828,7 +829,11 @@ after this phase, not part of the definition of done above.
 > The decision in §4 covered one uploaded recording. This is a second pipeline in
 > a second runtime, so folding it into Slices 4–6 would have widened an agreed
 > scope silently. **Phase 8 closed at Slice 6 without it**, and §12's definition
-> of done neither includes nor depends on anything below. Nothing here is built.
+> of done neither includes nor depends on anything below.
+>
+> **Slices 7–9 are now built.** This section is kept as written, with the two
+> places the measurements contradicted it marked in place rather than edited
+> away — the commitment rules below, and the flicker fixture that set them.
 
 ### What it is
 
@@ -943,6 +948,30 @@ Neither exists in the backend and neither may be invented at implementation time
 with a plausible-looking constant. The fixture in §"Fixtures" below is what sets
 them.
 
+> **What the measurement found — one rule, not two.**
+>
+> The dwell was set as required: the boundary fixture moves the raw per-tick
+> label **14 times in 20 seconds**, and sweeping the dwell across four such
+> sessions (differing in how many consecutive ticks each third holds the floor)
+> gives 4 ticks as the smallest value holding all of them at or below three
+> changes, costing 3.0 s before a clear melody is labelled instead of 1.5 s.
+>
+> **Hysteresis was measured to be unreachable, and was not implemented.** A
+> margin below `MIN_KEY_CONFIDENCE` cannot fire: an answered key leads the
+> *second* candidate by at least the gate, and an incumbent is never above the
+> second, so the winner already leads it by at least the gate. Every margin from
+> 0 to 0.05 produced identical readouts on every fixture, and the smallest lead
+> an answered key held over any other candidate across 200 ticks of unstable
+> material was 0.1375. The relative major/minor alternation the rule was written
+> for does not reach the display at all: it scores 0.002–0.04 there and the
+> confidence gate refuses it outright. A margin *above* the gate would fire, but
+> only to delay changes no fixture produces.
+>
+> The paragraph above is left standing because it is what a reader would
+> reasonably predict, and because the prediction being wrong is the finding. A
+> test asserts the invariant, so if `MIN_KEY_CONFIDENCE` is ever lowered far
+> enough for hysteresis to matter, the reason it was left out fails first.
+
 ### Outputs
 
 Three fields added to `LiveStats`, published on the existing tick:
@@ -952,6 +981,7 @@ Three fields added to `LiveStats`, published on the existing tick:
 | `keyTonic: string \| null` | Pitch class, or `null` while the evidence gates are unmet |
 | `keyMode: "major" \| "minor" \| null` | |
 | `keyConfidence: number \| null` | The same margin the backend reports |
+| `keyUnmeasuredReason` (as built) | A fourth field, added in Slice 8. The card has to say *what it is waiting for*, and the three refusal reasons are the vocabulary the uploaded analysis already uses for exactly that. `null` once a key is displayed |
 
 `null` is **"Not enough yet"**, never 0% and never a blank label — the rule
 `consistency` already follows.
@@ -1009,12 +1039,17 @@ statement §10 makes, for the same reason.
 
 Measured in Node, the target runtime, before any of this was planned:
 
-| Operation | Cost |
-| --- | --- |
-| One frame folded into the histogram | **0.00006 ms** |
-| 24 correlations over 12 values (per tick) | **0.0081 ms** |
-| Total, at 30 frames/s plus 2 estimates/s | **0.018 ms per second** |
-| Share of one 500 ms publish budget | **0.003 %** |
+| Operation | Planned (measured before) | As built |
+| --- | --- | --- |
+| One frame folded into the histogram | **0.00006 ms** | **0.00012 ms** |
+| 24 correlations over 12 values (per tick) | **0.0081 ms** | **0.0049 ms** |
+| Total, at 30 frames/s plus 2 estimates/s | **0.018 ms per second** | **0.013 ms per second** |
+| Share of one 500 ms publish budget | **0.003 %** | **0.002 %** |
+
+The right-hand column is the shipped implementation, best of seven runs of
+200 000 folds and 20 000 estimates. The suite asserts ceilings roughly 80× and
+200× the measurements — deliberately loose, because what a test can usefully
+defend here is the *shape* of the cost, not the speed of one machine.
 
 The cost is independent of session length, because the fold is incremental and
 the correlation is always over twelve numbers. Performance is not a constraint
@@ -1037,9 +1072,9 @@ Everything in §12 applies, plus:
 
 | # | Purpose | Files | Tests | Browser | Acceptance | Depends on |
 | --- | --- | --- | --- | --- | --- | --- |
-| 7 | The estimator in TypeScript | `frontend/lib/live-key.ts`, `frontend/tests/` | Parity table, 24 keys, transposition invariance, every adversarial fixture | — | Byte-comparable verdicts against the backend on the shared table; constants identical to `key.py` | Slices 1–6 |
-| 8 | Accumulation and commitment | `frontend/lib/live-practice.ts` (`LiveStats`, the accumulator) | Scripted sessions; the flicker fixture, with hysteresis and dwell set from its measurements | — | `null` until the gates pass; bounded changes on a boundary session; every voiced frame counted, not only held ones | 7 |
-| 9 | The readout | `components/record/`, `hooks/use-live-stats.ts` | Presentation logic under `node --test`, including that `null` renders no tonic | Sing into it: hum → "Not enough yet"; melody → a key; stop → cleared | Never rendered beside the uploaded analysis's key, asserted by a test | 8 |
+| 7 ✅ | **Delivered.** The estimator in TypeScript | `frontend/lib/live-key.ts`, `fixtures/key-parity.json`, `frontend/tests/live-key.test.ts`, `backend/tests/test_audio_key.py` | 59 in the browser suite; 26 new on the backend, which asserts the same table | — | Met. All fifteen shared verdicts identical and every margin within 1e-9; all 24 keys, transposition invariance, every adversarial fixture refused; constants copied from `key.py` and pinned on both sides. `AMBIGUOUS_MODE` is in the table, so the definition of the margin is asserted in both runtimes | Slices 1–6 |
+| 8 ✅ | **Delivered.** Accumulation and commitment | `frontend/lib/live-practice.ts`, `frontend/lib/live-key.ts` (`LiveKeyTracker`) | Scripted sessions; the boundary fixture, run as a sweep rather than quoted | — | Met, with one deviation recorded above: the dwell is 4 ticks, set by the sweep; **hysteresis is not implemented**, because the measurement showed it cannot fire below the confidence gate. `null` until the gates pass, ≤3 changes on every boundary fixture, every voiced frame counted and not only held ones | 7 |
+| 9 ✅ | **Delivered.** The readout | `components/record/live-stats-card.tsx`, `lib/live-practice.ts` | Presentation under `node --test`: `null` renders no tonic, half a key is not a label, a margin without a key is nothing, and a structural sweep of `components/` and `app/` | Chromium with a synthesised voice on the fake capture device: melody → C major within ~4 s, hum → "Not enough yet" throughout, stop → cleared. 390 px and 1280 px, both colour schemes, no horizontal overflow | Met. The only console errors are the three database-backed endpoints failing in a container with no PostgreSQL; the live key makes no request at all | 8 |
 
 ### What this extension does **not** add
 

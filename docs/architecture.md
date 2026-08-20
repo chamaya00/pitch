@@ -1463,6 +1463,7 @@ category errors, and this table exists to make them visible.
 | Audio feedback | `services/ai/claude.py` via `AudioFeedbackProvider` | Provider | Never invoked on `INSUFFICIENT_PITCH_SIGNAL`; no timbre labels, no score |
 | Live pitch readout | `frontend/lib/pitch-detector.ts` | Browser-local | Never uploaded; never compared with the backend result |
 | Live Vocal Practice | `frontend/lib/live-practice.ts`, `hooks/use-live-stats.ts` | Browser-local | "Not enough yet" ≠ 0%; not a singing-ability score |
+| Live musical key | `frontend/lib/live-key.ts` | Browser-local | The same mathematics as `key.py`, held to it by `fixtures/key-parity.json`; a second measurement, never shown beside the uploaded one; committed only after four consecutive ticks agree |
 | Microphone recording | `frontend/lib/live-pitch-engine.ts`, `lib/wav.ts` | Browser-local | Uploaded only on an explicit action |
 | One-analysis-at-a-time | Partial unique indexes | PostgreSQL | Not an `asyncio.Lock` — that was removed in 7M |
 | One feedback run | `claim_feedback`, a single conditional `UPDATE` | PostgreSQL | Not a read-then-write |
@@ -1581,6 +1582,24 @@ record's key.
 **No model sees the key**, structurally: it is absent from the feedback payload,
 the comparison service and the progress series, none of which gained a field that
 could hold it.
+
+**The extension after it — the live readout — is built too, and it is the one
+place this repository deliberately implements the same measurement twice.**
+`frontend/lib/live-key.ts` estimates the key of a practice session in the
+browser, folding the pitch stream Steps 7H/7J already run in the page. It has to
+exist in TypeScript because microphone audio never leaves the tab: sending
+frames to `key.py` would break the guarantee Live Vocal Practice is built on.
+The duplication is held together by `fixtures/key-parity.json`, one table of
+profiles and verdicts asserted by both suites, generated from the Python side —
+the same discipline `pitch.py` and `lib/pitch.ts` already follow.
+
+Architecturally it adds nothing at all: no endpoint, no request, no schema, no
+storage, no telemetry, and nothing on the server knows the feature exists. The
+live key is computed on the publish tick that already runs, displayed, and
+discarded when the take ends. It is never rendered beside the uploaded
+recording's key — a test sweeps the component tree to keep it that way — because
+the two read different frames through different gates and are two measurements
+rather than one measurement checked twice.
 
 ### Not built in Phase 9
 

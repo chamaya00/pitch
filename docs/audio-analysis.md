@@ -725,6 +725,100 @@ algorithm is unchanged and so is every number it produces.
 **Nothing here has been validated against human singing**: every fixture is
 synthetic, and this repository holds no annotated corpus to do it with.
 
+### The same key, live in the browser
+
+The key also updates while somebody sings, in Live Vocal Practice, and that
+readout is a **second implementation of this measurement** —
+`frontend/lib/live-key.ts`, folding the `LivePitchSample` stream that Steps
+7H/7J already run in the page.
+
+It exists twice because of a guarantee rather than a preference: microphone audio
+never leaves the browser, so the estimate cannot be computed on the server
+without breaking the thing Live Vocal Practice is built on. That is the rule
+`pitch.py` and `lib/pitch.ts` already follow — *the implementations are separate
+on purpose and the mathematics is not*.
+
+**`fixtures/key-parity.json` is what stops them drifting.** Fifteen pitch-class
+profiles with the verdict each must produce — tonic, mode, margin, runner-up,
+refusal reason and distinct-class count — generated from `key.py`, which is the
+authoritative implementation, and asserted by `backend/tests/test_audio_key.py`
+and `frontend/tests/live-key.test.ts` alike. Every margin agrees to within
+1e-9: both sides perform the same operations in the same order over the same
+doubles, so the tolerance is floating-point noise rather than a licence to
+differ. The table includes `AMBIGUOUS_MODE`, which is the only fixture that can
+see how confidence is defined — everything else is stopped by the pitch-class
+gate before the correlation is reached, and a second implementation is exactly
+where that definition would be got wrong again.
+
+Two definitions had to be chosen for the live version, and neither is free:
+
+- **Every voiced frame counts, not only held ones.** `MIN_RANGE_FRAMES` belongs
+  to the *range*, where a pitch touched in passing must not become the bottom of
+  a voice. The backend folds every point of a stored timeline into its key, so
+  reusing the held-pitch rule here would have given the live key a different
+  definition from the uploaded one.
+- **The profile is cumulative over the session, not a rolling window.** Four
+  seconds of singing rarely contains five distinct pitch classes, so a windowed
+  key would answer "not enough yet" almost always. The consequence is stated
+  rather than hidden: a session that modulates reports the average of both keys,
+  and the estimate gets less responsive the longer the session runs.
+
+**Commitment: one rule, and the plan asked for two.** A verdict per tick is not
+a readout. Measured against a scripted boundary session — a mode-neutral
+scaffold with the major and minor third taking turns, 40 ticks of 15 frames —
+the raw per-tick label changes **14 times in 20 seconds**. `block` is how many
+consecutive ticks each third holds the floor:
+
+| displayed-key changes | dwell 1 | dwell 2 | dwell 3 | dwell 4 | dwell 6 |
+| --- | --- | --- | --- | --- | --- |
+| block 1 | 14 | 1 | 1 | 1 | 1 |
+| block 2 | 19 | 3 | 1 | 1 | 1 |
+| block 3 | 18 | 7 | 6 | 1 | 0 |
+| block 4 | 15 | 9 | 6 | 3 | 0 |
+
+Dwell *n* absorbs an excursion shorter than *n* ticks and nothing longer, so no
+value settles every session — a side holding the lead for three seconds is
+arguably singing something else rather than flickering. **`KEY_DWELL_TICKS = 4`**
+is the smallest value that holds all four fixtures at or below three changes,
+and it costs the first label appearing after 3.0 s of singing instead of 1.5 s.
+The sweep is run by the suite, not quoted at it.
+
+**Hysteresis is not implemented, and that is a measurement rather than an
+omission.** The plan called for one — *replacing a shown key requires the
+challenger to lead the incumbent by a margin, not merely to lead* — to stop the
+label alternating between relative major and minor. A margin below
+`MIN_KEY_CONFIDENCE` cannot fire, for a reason that is arithmetic rather than a
+property of the fixtures: an answered key leads the *second* candidate by at
+least the gate, and the incumbent is never above the second, so the winner
+already leads the incumbent by at least the gate. Every margin from 0 to 0.05
+produced identical readouts on every fixture, and the smallest lead an answered
+key held over any other candidate, across 200 ticks of deliberately unstable
+material, was **0.1375** — nearly 3× the gate. A margin *above* the gate would
+fire, but only to delay changes no fixture produces: the relative-major boundary
+the rule was written for scores 0.002–0.04 there and is refused outright by the
+confidence gate. A test asserts the invariant, so if the gate is ever lowered
+far enough for hysteresis to matter, the reason it was left out fails first.
+
+**Cost.** The fold is one array increment per frame at ~30 Hz; the 24
+correlations run on the existing 500 ms publish tick and are twelve-element
+arithmetic at any session length. Measured in Node: under 0.01 ms per folded
+frame and under 1 ms per estimate, against a 500 ms budget — both asserted with
+ceilings loose enough to describe the shape of the cost rather than the speed of
+one machine. No storage, no endpoint, no request, no telemetry: the live key is
+computed, displayed, and discarded when the session ends.
+
+**The two numbers are different measurements and are never shown together.** The
+browser gates at clarity 0.90 over a 2048-sample window with median-of-5
+smoothing; the backend gates at 0.80 over 0.0929 s with octave-outlier
+rejection. Different frames survive, so different profiles come out and the
+answers will sometimes disagree. Neither validates the other, neither is the
+real one, and a test sweeps every component to make sure no single one of them
+can put both on the screen — the same rule this document's status banner already
+states for live pitch against analysed pitch.
+
+**This is not validated against human singing either.** Every fixture is
+synthetic, on both sides.
+
 ## Pitch accuracy
 
 "Pitch accuracy" here means **consistency relative to the nearest equal-tempered
