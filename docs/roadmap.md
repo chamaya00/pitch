@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18) |
 
 ## Phase 0 — delivered
 
@@ -753,6 +753,56 @@ Delivered in 10.17 — *what several workers do to a read*:
   measured on one host with PostgreSQL sharing the workers' four cores, so where
   the scaling flattens belongs to the rig, not the code.
 
+Delivered in 10.18 — *what a hundred times the data does to a read*:
+
+- The other gap every step from 10.11 to 10.17 declared: the speech pipeline and
+  the progress query had never been measured at scale. Measured here against one
+  owner holding **5 000 five-minute recordings**, each with a completed audio
+  analysis of 12 931 points and a completed speech analysis — a 1 131 MB
+  `audio_analyses` table — beside the 50-recording rig 10.12 used.
+- **Both are flat, and so is every other read**: the speech read 6.2 → 6.1 ms,
+  the history list 6.4 → 6.8 ms, `GET /audio-analysis` 7.3 → 7.7 ms, the
+  progress query 28.9 → 28.0 ms. A hundred times the rows changes nothing about
+  how many rows a query bounded by an index actually touches.
+- **What is not flat is the window, and the window is a documented parameter.**
+  `GET /recordings/progress` takes `limit` up to 200, and at 200 it cost
+  155.5 ms — 200 rows each decompressing a 253 kB document to read ~600 bytes of
+  metrics out of it. That is precisely the one decompression per row 10.12 had
+  left, having written that denormalising was "a schema change worth making only
+  when a measurement demands it". This is the measurement.
+- Migration 0006 makes the projection a stored generated column —
+  `metrics JSONB GENERATED ALWAYS AS (document -> 'metrics') STORED` — and the
+  lateral selects it. **The statement no longer mentions `document` at all**,
+  which is the strongest form of 10.12's rule: not "touch it once per row" but
+  "do not touch it". In PostgreSQL, a window of 200: **141.1 ms and 7 127 TOAST
+  reads → 1.7 ms and 262**.
+- End to end over HTTP, the previous build running beside this one on the same
+  database: the default window **28.7 → 7.7 ms** and 95.6 → 161.9 requests a
+  second at sixteen clients; `limit=200` **155.5 → 19.4 ms** and 21.6 → 53.4.
+  The progress query is no longer the slowest read that never touches a
+  timeline — it now sits in the same 6–8 ms band as the history list and the
+  speech read. **The response is identical, checked byte for byte** across both
+  builds.
+- **Generated rather than written, and that is the point.** `pitch_point_count`
+  (10.12) is a column the repository fills, honest only because a rule is stated
+  in three places and followed — and that rule had already been got wrong once,
+  by a `model_copy(update=…)` that skipped the validator deriving it. This column
+  has no rule to break: PostgreSQL computes it in the same write, no INSERT
+  mentions it, there is no backfill, and an INSERT that tries to supply one is
+  refused by the server. Three tests, one per clause.
+- Two costs recorded rather than glossed: the migration **rewrites the table**
+  (18 s for 1 131 MB, under the startup advisory lock, once), and the column is a
+  second copy of ~600 bytes per row (4 MB across 5 000 recordings). It is a
+  physical projection the database maintains, not a stored *measurement* —
+  nothing derives a number and keeps it, so 10.8's rule that every analysis ever
+  completed stays answerable from its document is untouched.
+- **What is left was measured, not assumed.** `GET /identity` is now the only
+  read whose cost grows with how much one owner holds — 6.1 ms at 50 recordings
+  and 12.0 ms at 5 000 — because it answers "what would I lose?" by joining every
+  recording to every analysis and sorting the result for three `count(DISTINCT)`s.
+  Nine of those twelve milliseconds are the sort. Recorded here rather than
+  fixed, the way 10.15 recorded the comparison read.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -770,8 +820,7 @@ and found nothing worth changing, and measured the history read at 5 000
 recordings, where paging is flat with depth. 10.14 took every read under
 concurrent load — the gap 10.11–10.13 left — found that only the timeline reads
 fail to scale, and fixed the one of the three that was building points it threw
-away. What is still unmeasured: the speech pipeline and the progress query at a
-hundred times the data. 10.15 took the first of the two
+away. 10.15 took the first of the two
 options 10.14 left open for `/notes` and `/key` — the fields a fold reads rather
 than the frames — which took them from ~135 ms to ~38 ms and from ~8 to ~65
 requests a second at c=16, and found the read that was then slowest:
@@ -783,8 +832,13 @@ one of those steps had declared — they were all measured on one worker — by
 taking the same reads across 1, 2 and 4 of them: they scale until the cores run
 out, no read needed changing, and what several workers did expose was a pool
 sized per process for a deployment that had one, which at twelve workers took
-every connection the server had. The shared rate-limit counter landed in 10.10,
-and a deployment scaling workers must still turn it on by hand. Error pages landed
+every connection the server had. 10.18 answered the other question those steps
+kept leaving — the speech pipeline and the progress query at a hundred times the
+data — and found both flat: what was not flat was the progress *window*, whose
+maximum spent 155 ms decompressing a document per row for 600 bytes of metrics,
+which migration 0006 makes a generated column and 10.12 had said it would take a
+measurement to justify. The shared rate-limit counter landed in 10.10, and a
+deployment scaling workers must still turn it on by hand. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
 hold recordings remains unspecified and unbuilt. The Content-Security-Policy

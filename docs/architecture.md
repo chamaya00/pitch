@@ -593,10 +593,107 @@ Three things carry the decision so it does not have to be remembered:
 **What is left.** The rate-limit counter must still be moved to `database` by
 hand when a deployment scales, exactly as 10.10 documented — this step changed
 nothing about that, and a multi-worker deployment left on `memory` still gets
-one counter per worker. The speech pipeline and the progress query have still
-not been measured at a hundred times the data. And every number above was taken
-on **one host**, with PostgreSQL sharing its four cores with the workers, so the
-point at which scaling flattens belongs to this rig rather than to the code.
+one counter per worker. The speech pipeline and the progress query at a hundred
+times the data were still unmeasured here; 10.18 measured them. And every number
+above was taken on **one host**, with PostgreSQL sharing its four cores with the
+workers, so the point at which scaling flattens belongs to this rig rather than
+to the code.
+
+### What a hundred times the data does to a read (10.18)
+
+Every step from 10.11 to 10.17 closed by naming the same two unmeasured things:
+the speech pipeline and the progress query at a hundred times the data. This
+step measured them, against one owner holding **5 000 five-minute recordings** —
+each with a completed audio analysis of 12 931 points and a completed speech
+analysis, a 1 131 MB `audio_analyses` table — beside the 50-recording rig
+10.12 used.
+
+**Both are flat, and so is everything else that was worried about:**
+
+| read, one client | 50 recordings | 5 000 recordings |
+| --- | --- | --- |
+| `GET …/analysis` (the speech read) | 6.2 ms | 6.1 ms |
+| `GET /recordings` | 6.4 ms | 6.8 ms |
+| `GET …/audio-analysis` | 7.3 ms | 7.7 ms |
+| `GET /recordings/progress` | 28.9 ms | 28.0 ms |
+| `GET /identity` | 6.1 ms | **12.0 ms** |
+
+Flat is the expected answer and it is worth stating why it is not luck: every
+one of those reads is bounded by an index on `(owner_id, …)` or by a primary
+key, and 10.13 had already shown the history list flat with *depth* at 5 000
+recordings. A hundred times the rows changes nothing about how many of them a
+query touches.
+
+**What is not flat is the window, and the window is a parameter.**
+`GET /recordings/progress` takes `limit` up to 200, and at 200 it cost
+**155.5 ms**. That is not the database being large; it is 200 rows each
+decompressing a 253 kB document to read about 600 bytes of metrics out of it.
+10.12 had left exactly this and said so in the module and in the migration:
+
+> What remains is one unavoidable decompression per row, which is the cost of
+> keeping the metrics in the same document as the timeline. Denormalising them
+> into columns would remove that too, and is still a schema change worth making
+> only when a measurement demands it — this one did not.
+
+This one does. Migration 0006 adds
+
+```sql
+ALTER TABLE audio_analyses
+    ADD COLUMN metrics JSONB GENERATED ALWAYS AS (document -> 'metrics') STORED;
+```
+
+and the lateral selects that column instead of computing the projection. The
+statement no longer mentions `document` at all, which is the strongest form of
+the rule 10.12 introduced — not "touch it once per row" but "do not touch it".
+
+| in PostgreSQL, window of 200 | time | TOAST reads |
+| --- | --- | --- |
+| `document->'metrics'` | 141.1 ms | 7 127 |
+| the `metrics` column | **1.7 ms** | **262** |
+
+End to end over HTTP, the previous build running beside this one against the
+same 5 000-recording database:
+
+| `GET /recordings/progress` | before | after |
+| --- | --- | --- |
+| default window (30), one client | 28.7 ms | **7.7 ms** |
+| `limit=200`, one client | 155.5 ms | **19.4 ms** |
+| default window, p50 at sixteen clients | 152.1 ms | **87.2 ms** |
+| default window, requests a second at sixteen | 95.6 | **161.9** |
+| `limit=200`, p50 at sixteen clients | 731.5 ms | **303.4 ms** |
+| `limit=200`, requests a second at sixteen | 21.6 | **53.4** |
+
+**The response is identical, and that was checked rather than reasoned about**:
+both builds were asked for the same 200-recording window and returned the same
+bytes.
+
+**Generated, not written.** `pitch_point_count` (10.12) is a column the
+repository fills, and it stays honest only because a rule — *write it from the
+same object in the same statement* — is stated in three places and followed. It
+had already been got wrong once, by a `model_copy(update=…)` that skipped the
+validator deriving it. This column has no such rule to break: PostgreSQL
+computes it from the document in the same write, no INSERT mentions it, there is
+no backfill, and an INSERT that tries to give it a value of its own is rejected
+by the server. A test asserts each of those.
+
+Two costs are real and are recorded rather than glossed:
+
+- **The migration rewrites the table.** A generated column cannot be added with
+  a default, so every row is rewritten: **18 seconds** for the 1 131 MB table
+  here. Migrations run at startup under an advisory lock, so a deployment with a
+  large `audio_analyses` should expect one boot to take that long.
+- **The column is a second copy of ~600 bytes per row** — 4 MB across 5 000
+  recordings, against the 1 131 MB the documents already occupy. It is a
+  physical projection maintained by the database, not a denormalised
+  *measurement*: nothing derives a number and stores it, so 10.8's rule that
+  every analysis ever completed stays answerable from its document is untouched.
+
+**What is left.** `GET /identity` is now the only read whose cost grows with how
+much one owner has: 6.1 ms at 50 recordings and 12.0 ms at 5 000. It answers
+"what would I lose?" with three counts, and it gets them by joining every
+recording to every analysis and sorting the result for three `count(DISTINCT)`s —
+9 ms of the 12 is that sort. It is recorded here rather than fixed, exactly as
+10.15 recorded the comparison read.
 
 ### Concurrency belongs to the database
 
