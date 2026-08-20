@@ -15,6 +15,8 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -22,11 +24,16 @@ import {
   EMPTY_STATS,
   IN_TUNE_CENTS,
   LIVE_FRAME_SECONDS,
+  LIVE_KEY_WAITING_MESSAGES,
   LivePracticeStats,
   METER_RANGE_CENTS,
   MIN_CONSISTENCY_FRAMES,
   MIN_RANGE_FRAMES,
   compareToTarget,
+  liveKeyLabel,
+  liveKeyMarginLabel,
+  liveKeyWaitingMessage,
+  type LiveStats,
   meterReading,
   pitchClass,
   targetLabel,
@@ -727,4 +734,95 @@ test("the fold and the estimate are far inside the publish budget", () => {
   // The cost of an estimate does not grow with the session: the fold is
   // incremental and the correlation is always over twelve numbers.
   assert.equal(shares.length, 12);
+});
+
+// --- The readout -----------------------------------------------------------
+//
+// Presentation only: what a reader sees for each state the accumulator can be
+// in. The component is a few lines of markup around these functions, so this is
+// where the rules that matter are enforced — and the last test in the file is
+// structural, because "never shown beside the uploaded key" is a fact about the
+// component tree rather than about a string.
+
+test("no key renders no tonic, and no empty label either", () => {
+  assert.equal(liveKeyLabel(EMPTY_STATS), null);
+  assert.equal(liveKeyMarginLabel(EMPTY_STATS), null);
+});
+
+test("a committed key renders as a tonic and a mode, and nothing else", () => {
+  const stats: LiveStats = {
+    ...EMPTY_STATS,
+    keyTonic: "G",
+    keyMode: "major",
+    keyConfidence: 0.2621,
+    keyUnmeasuredReason: null,
+  };
+  assert.equal(liveKeyLabel(stats), "G major");
+  // Not a percentage, not a grade, not a mark out of anything.
+  assert.equal(liveKeyMarginLabel(stats), "Margin 0.262 over the next-best key");
+});
+
+test("half a key is not a label", () => {
+  // Tonic and mode arrive together or not at all; neither alone is renderable.
+  assert.equal(liveKeyLabel({ ...EMPTY_STATS, keyTonic: "G" }), null);
+  assert.equal(liveKeyLabel({ ...EMPTY_STATS, keyMode: "minor" }), null);
+});
+
+test("a margin without a key is a number about nothing", () => {
+  assert.equal(liveKeyMarginLabel({ ...EMPTY_STATS, keyConfidence: 0.3 }), null);
+});
+
+test("each way of having no key says what it is waiting for", () => {
+  assert.match(liveKeyWaitingMessage("TOO_LITTLE_VOICED_TIME"), /Keep singing/);
+  assert.match(liveKeyWaitingMessage("TOO_FEW_PITCH_CLASSES"), /more different notes/);
+  assert.match(liveKeyWaitingMessage("AMBIGUOUS"), /several keys/);
+  // An unrecognised reason falls back to the same voice, never to an error.
+  assert.match(liveKeyWaitingMessage(null), /Keep singing/);
+});
+
+test("nothing in the waiting copy reads as a fault or a score", () => {
+  const forbidden = /\b(fail|failed|error|bad|wrong|poor|score|grade|out of \d)\b/i;
+  for (const message of Object.values(LIVE_KEY_WAITING_MESSAGES)) {
+    assert.ok(!forbidden.test(message), message);
+  }
+});
+
+test("the live key never claims to be a song's key or a correct one", () => {
+  const card = readFileSync(
+    join(import.meta.dirname, "..", "components", "record", "live-stats-card.tsx"),
+    "utf8",
+  );
+  assert.match(card, /Key you seem to be singing in/);
+  assert.ok(!/key of (the|this) song/i.test(card), "there is no song here");
+  assert.ok(!/correct key|right key|in the correct/i.test(card));
+});
+
+test("no component renders the live key beside the uploaded recording's key", () => {
+  // The two are different measurements over different frames and will sometimes
+  // disagree. The repository's answer to that is not to reconcile them: they
+  // are labelled apart and never placed side by side. This asserts the second
+  // half — that no single component can put both on the screen.
+  const roots = ["components", "app"].map((directory) =>
+    join(import.meta.dirname, "..", directory),
+  );
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.name.endsWith(".tsx") || entry.name.endsWith(".ts")) files.push(path);
+    }
+  };
+  for (const root of roots) walk(root);
+  assert.ok(files.length > 20, "the component sweep found almost nothing");
+
+  const rendersLiveKey = /liveKeyLabel|keyTonic/;
+  const rendersUploadedKey = /MusicalKeyCard|musicalKey/;
+  for (const path of files) {
+    const source = readFileSync(path, "utf8");
+    assert.ok(
+      !(rendersLiveKey.test(source) && rendersUploadedKey.test(source)),
+      `${path} reaches for both keys`,
+    );
+  }
 });

@@ -332,6 +332,58 @@ export class LivePracticeStats {
   }
 }
 
+/* --- The live key --------------------------------------------------------- */
+
+/**
+ * The key this session seems to be in, as a label — or `null` for no label.
+ *
+ * `null` is the whole point of the function: a session without enough evidence
+ * has **no** key, and the caller must render that as words rather than as an
+ * empty string, a dash where a key would go, or a 0%. There is no partial
+ * label: tonic and mode arrive together or not at all.
+ */
+export function liveKeyLabel(stats: LiveStats): string | null {
+  if (stats.keyTonic === null || stats.keyMode === null) return null;
+  return `${stats.keyTonic} ${stats.keyMode}`;
+}
+
+/**
+ * What the readout is waiting for, in words.
+ *
+ * Each of these describes the *singing*, never a fault and never a failure —
+ * the same voice `audio-analysis-metrics.ts` uses for the same three refusals
+ * on an uploaded recording, written for someone who is still holding a
+ * microphone. An unrecognised reason falls back to the same voice.
+ */
+export const LIVE_KEY_WAITING_MESSAGES: Readonly<Record<LiveKeyUnmeasuredReason, string>> = {
+  TOO_LITTLE_VOICED_TIME: "Keep singing — there is not enough pitched audio yet.",
+  TOO_FEW_PITCH_CLASSES:
+    "Sing a few more different notes. A held note or a short arpeggio fits many keys equally well.",
+  AMBIGUOUS: "The notes so far fit several keys about equally well.",
+};
+
+export function liveKeyWaitingMessage(
+  reason: LiveKeyUnmeasuredReason | null,
+): string {
+  if (reason !== null && reason in LIVE_KEY_WAITING_MESSAGES) {
+    return LIVE_KEY_WAITING_MESSAGES[reason];
+  }
+  return "Keep singing — there is not enough to go on yet.";
+}
+
+/**
+ * The margin, for the line under the label.
+ *
+ * Three decimals and the word "margin", never a percentage: it is how far this
+ * key stood clear of the next-best candidate, and 0.26 is not "26% certain".
+ * `null` when there is no key, because a margin without a label is a number
+ * about nothing.
+ */
+export function liveKeyMarginLabel(stats: LiveStats): string | null {
+  if (liveKeyLabel(stats) === null || stats.keyConfidence === null) return null;
+  return `Margin ${stats.keyConfidence.toFixed(3)} over the next-best key`;
+}
+
 /* --- Target note ---------------------------------------------------------- */
 
 /** Notes offerable as a target: C2 to C6, the range the detector searches. */
