@@ -15,11 +15,16 @@
 >
 > Kept rather than deleted because the reasoning is the valuable part: the
 > decision gate, the two candidate scopes, the three corrections, and the
-> measurements that ruled out the obvious implementation. Candidate B (§13) and
+> measurements that ruled out the obvious implementation. Candidate B (§14) and
 > every non-scope item in §5 remain unbuilt and out of scope.
 >
 > **The decision gate was answered on 2026-08-12: Candidate A — musical key.**
 > See [The decision gate](#4-the-decision-gate).
+>
+> **§13 plans a live, in-browser key readout** for Live Vocal Practice — the key
+> updating while somebody sings, in Live Vocal Practice. It is an extension
+> numbered *after* this phase, planned only, and **nothing in it is built**.
+> Phase 8's completion above does not depend on it.
 
 ## Revision history
 
@@ -33,6 +38,7 @@
 | 10.8 (Slice 4) | The card. Every state in §9 built, and each one reached deliberately in a browser against the real stack; §9's open question 3 answered by measurement — see below. |
 | 10.8 (Slice 5) | The performance ceiling and the mutation run. The endpoint stopped loading the analysis document twice. One mutation survived the first run and exposed an untested property — the definition of the confidence margin — which `AMBIGUOUS_MODE` now pins. |
 | 10.8 (Slice 6) | The documentation sweep, and this file marked superseded. **Phase 8 complete.** |
+| Live key (planning) | A live, in-browser key readout added as **§13, Slices 7–9** — an extension after this phase, not a widening of it. Planned only; nothing implemented. |
 
 ### What the Slice 1 sweep settled
 
@@ -294,7 +300,7 @@ an engineering one.* An engineer choosing here would be inventing a requirement.
 > reference-audio input may be introduced by Phase 8, and how a reference song is
 > supplied is its own product decision when Phase 9 starts.
 >
-> Candidate B (§13) is **not** being built. It stays recorded because the
+> Candidate B (§14) is **not** being built. It stays recorded because the
 > reasoning that recovered it is worth keeping, not because it is queued.
 
 ---
@@ -811,9 +817,238 @@ updated; this file marked superseded, not deleted.
 | 5 ✅ | **Delivered.** Performance and mutation | `tests/test_audio_key.py`, `orchestration/audio_analysis.py`, `routes/audio_analysis.py`, a mutation script kept outside the repository | The ceiling derived from `max_audio_duration_seconds` and `HOP_SECONDS`, not written down: 1.35 ms at 12 931 points, under half `summarise_notes`, 7 216 bytes peak, sub-quadratic at 4× | — | Met. 21 mutations: 20 caught by a named test, 1 confirmed equivalent. One survived — the margin redefined over the next *different tonic* — because every adversarial fixture is stopped by the pitch-class gate before the correlation is reached. `AMBIGUOUS_MODE` closes it and the run was repeated. The endpoint also stopped loading the analysis document twice | 1–3 |
 | 6 ✅ | **Delivered.** Documentation | the six files above | — | — | Met. `audio-analysis.md` carries the algorithm, the profile race, all four thresholds with their measurements, what didn't work and the cost; `limitations.md` has the section in the shipped voice; `architecture.md` has its row and its corrections; `README.md` no longer lists shipped features as unbuilt; this file superseded, not deleted | 1–5 |
 
+**Slices 7–9 are §13**, the live in-browser readout. They are an extension
+after this phase, not part of the definition of done above.
+
 ---
 
-## 13. Candidate B — melody note events
+## 13. Extension — live key estimation (Slices 7–9)
+
+> **Not part of the agreed Phase 8 scope, and deliberately numbered after it.**
+> The decision in §4 covered one uploaded recording. This is a second pipeline in
+> a second runtime, so folding it into Slices 4–6 would have widened an agreed
+> scope silently. **Phase 8 closed at Slice 6 without it**, and §12's definition
+> of done neither includes nor depends on anything below. Nothing here is built.
+
+### What it is
+
+The key readout, live, while somebody sings — the estimate updating as evidence
+accumulates instead of arriving only after an upload. It extends **Live Vocal
+Practice (Steps 7H/7J)**, which already runs a full pitch pipeline in the page:
+`lib/pitch-detector.ts` detects, `lib/pitch-stream.ts` smooths,
+`lib/live-practice.ts` aggregates, and `hooks/use-live-stats.ts` publishes a
+snapshot twice a second.
+
+### Input
+
+`LivePitchSample` frames, from the stream that already exists. Nothing new is
+captured, nothing is uploaded, and **microphone audio still never leaves the
+page** — which is the rule that decides the whole design below.
+
+**Every voiced frame counts, not only held ones.** The backend folds every point
+in the stored timeline; `_sustained` and `trackRange` apply to the *range* and
+to nothing else. Reusing `LiveStatsAccumulator.trackRange`'s held-pitch rule here
+would silently give the live key a different definition from the uploaded one,
+which is the exact failure §2 of this document exists to prevent.
+
+### Three problems the backend version does not have
+
+**1. It needs a second implementation of the same mathematics.** The estimator
+cannot run on the server without sending audio there, so the profiles, the
+correlation and the gates must exist in TypeScript. That is not new ground: the
+musical conversions are already implemented twice on purpose
+(`audio_analysis/pitch.py` and `lib/pitch.ts`), and `docs/audio-analysis.md`
+records the rule — *"the implementations are separate on purpose and the
+mathematics is not"*, with the same reference cases asserted on both sides.
+
+The same discipline applies, and it is a hard requirement rather than a nicety:
+
+- the profile weights, `MIN_DISTINCT_PITCH_CLASSES`, `MIN_VOICED_SECONDS`,
+  `MIN_KEY_CONFIDENCE` and `MIN_PITCH_CLASS_SHARE` must be the same numbers;
+- a shared table of reference cases must be asserted in **both**
+  `backend/tests/test_audio_key.py` and `frontend/tests/`, so the two cannot
+  drift without a test failing. **`AMBIGUOUS_MODE` must be one of them**: Slice
+  5's mutation run found that redefining the margin over the next *different
+  tonic* survived every other fixture, because the pitch-class gate stops them
+  before the correlation is reached. That fixture is the only thing pinning the
+  definition of confidence, and a second implementation is exactly where it
+  would be got wrong again;
+- the twelve-key and transposition-invariance properties must hold in both.
+
+**2. Two numbers of the same kind, from two pipelines.** This is the real risk.
+A live "G major" followed by a backend "not measured" is a contradiction the user
+can see, and it will happen: the browser gates at clarity 0.90 over a 2048-sample
+window with median-of-5 smoothing, while the backend gates at 0.80 over 0.0929 s
+with octave-outlier rejection. Different frames survive, so different pitch-class
+profiles come out.
+
+The repository already has the answer and it is not "make them agree":
+
+> **Their numbers are not comparable and are never presented side by side.**
+> — `docs/audio-analysis.md`, the status banner
+
+So the live key is labelled as part of the **live recording estimate**, lives in
+the practice card, and is never rendered next to the analysis result. The two
+must not be reconciled, averaged, or cross-checked, and neither validates the
+other. A test should assert that no component renders both.
+
+**3. Flicker.** A label that changes every 500 ms as evidence trickles in is
+worse than no label. The backend estimates once over a finished recording and has
+no equivalent. See the commitment rules below.
+
+### Algorithm
+
+The fold is incremental — one array increment per voiced frame — and the estimate
+runs on the existing 500 ms publish tick, never per frame:
+
+```
+LivePitchSample ──▶ counts[midi mod 12] += 1        (per frame, O(1))
+                          │
+                          ▼
+              24 correlations over 12 values        (twice a second)
+                          │
+                          ▼
+              gates ──▶ commitment ──▶ label | "Not enough yet"
+```
+
+**The profile is cumulative over the session, not a rolling window.** The
+consistency figure uses the last 128 frames because "how in tune am I *now*" is a
+question about now. A key is a property of a passage: four seconds of singing
+rarely contains five distinct pitch classes, so a windowed key would answer "not
+enough yet" almost always. Session-cumulative also matches the session range,
+which is already cumulative.
+
+The consequence is stated rather than hidden: **a session that modulates reports
+the average of both keys**, and the longer the session runs the less responsive
+the estimate becomes. A "reset" control, or a per-take reset on stop/start, is
+Open question 3 below.
+
+### Commitment rules — the new problem
+
+The gates from §6 apply unchanged, and they already do most of the work: nothing
+is shown until five distinct pitch classes and a second of voiced time exist, so
+the readout stays at "Not enough yet" through the noisy opening of a session
+rather than cycling through wrong answers.
+
+Two rules on top, both of which **must be chosen by measurement against recorded
+practice sessions, not picked**:
+
+- **Hysteresis.** Once a key is shown, replacing it requires the new candidate to
+  lead by more than the incumbent by some margin — not merely to lead. Without
+  this the label alternates between relative major and minor near the boundary.
+- **Dwell.** A candidate must hold for a minimum number of consecutive ticks
+  before it is displayed at all.
+
+Neither exists in the backend and neither may be invented at implementation time
+with a plausible-looking constant. The fixture in §"Fixtures" below is what sets
+them.
+
+### Outputs
+
+Three fields added to `LiveStats`, published on the existing tick:
+
+| Field | Meaning |
+| --- | --- |
+| `keyTonic: string \| null` | Pitch class, or `null` while the evidence gates are unmet |
+| `keyMode: "major" \| "minor" \| null` | |
+| `keyConfidence: number \| null` | The same margin the backend reports |
+
+`null` is **"Not enough yet"**, never 0% and never a blank label — the rule
+`consistency` already follows.
+
+### Storage, API, network
+
+**None, none and none.** No endpoint, no request, no persistence, no telemetry.
+The live key is computed, displayed, and discarded when the session ends. That is
+what keeps the "microphone audio never leaves the page" guarantee intact, and it
+means this extension adds no ownership surface, no cost and no privacy risk
+whatsoever.
+
+### Frontend contract
+
+One block in the existing practice card (`components/record/live-stats-card.tsx`
+or a sibling), beside consistency and session range.
+
+| State | Shown |
+| --- | --- |
+| Gates unmet | "Not enough yet" plus what it is waiting for — the same treatment consistency uses |
+| Committed | Tonic + mode, labelled as a live estimate, with the margin available but not headline |
+| Changed | The new key, after hysteresis and dwell. Never a flicker |
+| Not recording | Nothing. No stale key from a finished session |
+
+Copy rules: it is **"Key you seem to be singing in"**, never "the key of the
+song"; it is never placed beside the uploaded analysis's key; and it never
+implies the key was right, because there is still no reference melody.
+
+### Fixtures and validation
+
+The browser suite is `node --test` over plain TypeScript modules, which is enough
+because the accumulator is a class a test can drive with scripted samples — the
+existing pattern.
+
+1. **Parity with the backend.** A shared table of pitch-class profiles with
+   expected tonic, mode and margin, asserted in both suites. This is the one that
+   stops the two implementations drifting.
+2. **All 24 keys, and transposition invariance**, as §10 requires of the backend.
+3. **Every adversarial fixture from §10** — hum, two classes, three-class
+   arpeggio, chromatic wander, uniform, random — driven through the accumulator
+   as *frame sequences*, each returning `null`.
+4. **Accumulation over time.** A scripted session must report `null` early and
+   commit only once the gates pass; the tick at which it commits is asserted.
+5. **Flicker.** A session scripted to sit on the major/minor boundary must not
+   change its displayed key more than a bounded number of times. This is the
+   fixture that sets hysteresis and dwell, and the constants are recorded with
+   its measurements.
+6. **Browser verification.** Sing into it. A held hum shows "Not enough yet"; a
+   melody commits to a key; stopping clears it.
+
+**No fixture here validates the estimator against human singing** — the same
+statement §10 makes, for the same reason.
+
+### Performance
+
+Measured in Node, the target runtime, before any of this was planned:
+
+| Operation | Cost |
+| --- | --- |
+| One frame folded into the histogram | **0.00006 ms** |
+| 24 correlations over 12 values (per tick) | **0.0081 ms** |
+| Total, at 30 frames/s plus 2 estimates/s | **0.018 ms per second** |
+| Share of one 500 ms publish budget | **0.003 %** |
+
+The cost is independent of session length, because the fold is incremental and
+the correlation is always over twelve numbers. Performance is not a constraint
+here and no optimisation is warranted; the render budget rule still applies —
+this runs on the 500 ms tick, not per frame, and its output goes through
+`LiveStats` like everything else.
+
+### Limitations
+
+Everything in §12 applies, plus:
+
+- **It is a different measurement from the uploaded key** and may disagree with
+  it. Neither is wrong; they are different pipelines over different frames.
+- **It reports one key for the whole session**, so modulation averages.
+- **It gets less responsive the longer a session runs**, by construction.
+- **It is browser-local and unverifiable.** Nothing is stored, so a disagreement
+  cannot be investigated after the fact.
+
+### Slices
+
+| # | Purpose | Files | Tests | Browser | Acceptance | Depends on |
+| --- | --- | --- | --- | --- | --- | --- |
+| 7 | The estimator in TypeScript | `frontend/lib/live-key.ts`, `frontend/tests/` | Parity table, 24 keys, transposition invariance, every adversarial fixture | — | Byte-comparable verdicts against the backend on the shared table; constants identical to `key.py` | Slices 1–6 |
+| 8 | Accumulation and commitment | `frontend/lib/live-practice.ts` (`LiveStats`, the accumulator) | Scripted sessions; the flicker fixture, with hysteresis and dwell set from its measurements | — | `null` until the gates pass; bounded changes on a boundary session; every voiced frame counted, not only held ones | 7 |
+| 9 | The readout | `components/record/`, `hooks/use-live-stats.ts` | Presentation logic under `node --test`, including that `null` renders no tonic | Sing into it: hum → "Not enough yet"; melody → a key; stop → cleared | Never rendered beside the uploaded analysis's key, asserted by a test | 8 |
+
+### What this extension does **not** add
+
+BPM · beat tracking · melody transcription · reference-song input · vocal
+separation · transposition · compatibility · any network request · any stored
+field · key in AI feedback, comparison or progress. The Phase 9 dependency stays
+blocked exactly as §4 records it.
+
+## 14. Candidate B — melody note events
 
 Recorded at enough depth to choose between the candidates. **Not fully specified;
 it needs one short design pass if it is selected.**
@@ -849,7 +1084,7 @@ from a song, and not a claim that any note was correct.
 
 ---
 
-## 14. Open questions
+## 15. Open questions
 
 Beyond the decision gate in §4, these need a product answer rather than an
 implementation choice:
