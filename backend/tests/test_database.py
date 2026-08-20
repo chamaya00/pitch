@@ -1018,19 +1018,96 @@ def test_both_field_projections_are_the_same_aggregates() -> None:
         assert statement.count("ORDER BY frame.ordinality") == 2, "both in the same order"
 
 
-def test_the_progress_query_reaches_the_metrics_once_per_row() -> None:
-    """Eleven scalars, one decompression.
+def test_the_progress_query_never_reaches_a_document() -> None:
+    """Eleven scalars, no decompression at all.
 
-    Reading each scalar from ``a.document`` detoasted the same document eleven
-    times: 593 ms and 11 834 buffers for a 30-recording window, against 30 ms and
-    1 172 once the lateral projects ``document->'metrics'`` and the scalars come
-    off that. The property is which side of the lateral the document is read on.
+    10.12 took this from eleven decompressions per row to one, by projecting
+    ``document->'metrics'`` inside the lateral instead of reading each scalar
+    off ``a.document``: 593 ms and 11 834 buffers for a 30-recording window
+    against 30 ms and 1 172. 10.18 took the last one, because that one is
+    linear in the *window* and the window goes to 200 — where it was 141 ms and
+    7 127 buffers, against 1.7 ms and 262 off the generated column.
+
+    The property is now the strongest form of the same statement: this query
+    does not mention ``document``, so no row of a window is detoasted.
     """
-    assert "document->'metrics' AS metrics" in PROGRESS_SQL
-    # Once, inside the lateral. Every scalar above it reads `a.metrics`.
     reads = _document_reads(PROGRESS_SQL)
-    assert reads == 1, f"the progress query decompresses each document {reads} times"
-    assert "a.document" not in PROGRESS_SQL
+    assert reads == 0, f"the progress query decompresses each document {reads} times"
+    assert "a.metrics" in PROGRESS_SQL
+
+
+def test_the_metrics_column_is_the_projection_it_replaced() -> None:
+    """What the generated column has to mean, checked against a written row.
+
+    10.12's ``pitch_point_count`` needs a rule to stay honest — written from
+    the same object in the same statement — because nothing else stops it
+    drifting. This one is maintained by PostgreSQL from the document itself,
+    and this asserts that for a record the repository actually wrote rather
+    than for one crafted here.
+    """
+
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        stored = recording()
+        await PostgresRecordingRepository(database).create(stored, owner.owner_id)
+        analysis = AudioAnalysis(
+            audio_analysis_id=new_audio_analysis_id(),
+            recording_id=stored.recording_id,
+            status=AudioAnalysisStatus.COMPLETED,
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            metrics=audio_metrics(),
+            pitch_points=(),
+        )
+        await PostgresAudioAnalysisRepository(database).create(analysis)
+
+        async with database.connection() as connection:
+            row = await fetch_one(
+                connection,
+                """
+                SELECT metrics,
+                       document -> 'metrics' AS projected,
+                       metrics IS NOT DISTINCT FROM document -> 'metrics' AS agree
+                  FROM audio_analyses WHERE id = %s
+                """,
+                (analysis.audio_analysis_id,),
+            )
+        assert row is not None
+        assert row["agree"] is True, "the column disagrees with the document it is generated from"
+        assert row["metrics"]["duration_seconds"] == analysis.metrics.duration_seconds
+
+    with_db(work)
+
+
+def test_a_row_whose_metrics_disagree_with_its_document_cannot_be_written() -> None:
+    """The reason it is generated rather than written beside the document.
+
+    A column the application maintains can be given a value; this one cannot be
+    given one at all, by anybody, including a future insert that forgets the
+    rule 0005's column depends on.
+    """
+
+    async def work(database: Database) -> None:
+        owner, _ = await _make_owner(database)
+        stored = recording()
+        await PostgresRecordingRepository(database).create(stored, owner.owner_id)
+
+        from psycopg import errors
+
+        with pytest.raises(errors.GeneratedAlways):
+            async with database.transaction() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO audio_analyses (
+                        id, recording_id, status, feedback_status, created_at,
+                        error_code, pitch_point_count, document, metrics
+                    ) VALUES (%s, %s, 'pending', 'not_requested', now(), NULL, 0,
+                              '{}'::jsonb, '{"duration_seconds": 1}'::jsonb)
+                    """,
+                    (new_audio_analysis_id(), stored.recording_id),
+                )
+
+    with_db(work)
 
 
 def test_an_audio_analysis_predating_the_count_column_is_counted_by_the_migration(
