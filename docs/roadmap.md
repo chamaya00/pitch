@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19), the checks nobody ran (10.20) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19), the checks nobody ran (10.20), a policy on responses that are data (10.21) |
 
 ## Phase 0 — delivered
 
@@ -942,6 +942,45 @@ Delivered in 10.20 — *the checks nobody ran*:
   execute them. Result: **1 782 passed, 0 skipped** — thirteen more tests than
   the best run available in this container, and no skips at all.
 
+Delivered in 10.21 — *a policy on responses that are data*:
+
+- 10.20's closing table listed four outstanding items and said each was waiting
+  on a decision. **One of them was not.** "A Content-Security-Policy on API
+  responses" was justified only by the fact that `limitations.md` recorded its
+  absence, and a record is not a decision. That is the same failure 10.20 itself
+  had just diagnosed, one step later and one row down.
+- Every API response now carries `default-src 'none'; frame-ancestors 'none';
+  base-uri 'none'; form-action 'none'; sandbox`. Every directive says the same
+  thing a different way: a response that is data has no business loading,
+  framing, submitting or executing anything. `sandbox` is the one that still
+  holds if the others are bypassed — it applies when a browser *does* treat the
+  response as a document, and gives it a unique origin with no scripts, forms or
+  plugins. `X-Content-Type-Options: nosniff` was the only thing standing there
+  before, and it is still the first line; this is the second.
+- **Set on the response, in the application rather than at the edge**, so it
+  travels with the API to any deployment, is exercised by the suite rather than
+  by a proxy nobody runs locally, and reaches responses no route produced: the
+  `FILE_TOO_LARGE` refusal written before routing, and a 404. Registered
+  outermost, which is what makes that true. nginx still sets none, so two
+  policies can never intersect into one nobody designed.
+- **What it buys was measured.** Framing an API response in Chromium from a page
+  carrying no policy of its own: before, the iframe **loaded** with no refusal;
+  after, "Refused to frame … because an ancestor violates the following Content
+  Security Policy directive: `frame-ancestors 'none'`". Through the shipped
+  proxy that was already refused by `X-Frame-Options: DENY` from 10.5 — what
+  changed is that it no longer depends on the edge.
+- **Verified in a browser, as 10.9's precedent requires.** The real web app
+  against an API sending the policy: five API calls, all 200, **0 CSP
+  violations, 0 console errors, 0 page errors**, page rendered. `/docs` and
+  `/redoc` are exempt — they are HTML that loads a CDN, and the shipped
+  deployment routes neither — and their failure to render *in this sandbox* was
+  checked to be its egress proxy blocking `cdn.jsdelivr.net` rather than a
+  policy refusal, by listening for `securitypolicyviolation` and finding zero
+  across all five pages.
+- The exemptions are read from the application rather than written into the
+  middleware, so moving or disabling a documentation UI cannot leave a stale
+  path exempting nothing.
+
 ## Where this leaves the project
 
 **The performance thread that ran from 10.11 to 10.19 is finished**, in the sense
@@ -967,7 +1006,14 @@ list of known gaps.** What follows is therefore what remains *after* an audit
 that went looking, and it should be read as the best current answer rather than
 a closed one.
 
-**What Phase 10 still needs is not blocked on engineering.** Four things remain,
+**It was not closed, either.** The first version of the table below had four
+rows, and one of them — a Content-Security-Policy on API responses — was listed
+as waiting on a decision when its only justification was that `limitations.md`
+recorded its absence. 10.21 built it. Three rows remain, and what separates them
+from that one is that each names a question somebody outside this repository has
+to answer.
+
+**What Phase 10 still needs is not blocked on engineering.** Three things remain,
 and each is waiting on a decision nobody has taken rather than on work nobody has
 done:
 
@@ -976,7 +1022,6 @@ done:
 | Real credentials — passwords, email, OAuth, sessions, reset, verification, MFA, account merging | A product decision about what an account *is* here. 10.2 rejected passwords for its own slice on the evidence: adding them while deferring reset and verification is worse than 128 random bits, not better. |
 | TLS termination and HSTS | A deployment decision. The proxy speaks HTTP and claims no HSTS deliberately; a certificate belongs to whoever operates the deployment, and claiming HSTS from a server that cannot serve TLS would break the site. |
 | Retention of identities that **hold recordings** | A product decision. 10.6 reclaims only identities that own nothing, because deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
-| A Content-Security-Policy on API responses | Recorded in [limitations.md](limitations.md). |
 
 **Phase 9 is in the same position and has been since 10.7**: audited, specified,
 and waiting on [one question](phase-9-specification.md#16-unresolved-product-decisions)

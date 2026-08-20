@@ -774,6 +774,68 @@ than a pool setting. What made this one different is that its cost is dominated
 by how much the owner has — from 25 rows to 5 000 in the same database — which
 is exactly the thing a plan chosen for an unknown parameter cannot know.
 
+### A policy on responses that are data (10.21)
+
+10.20 ended with a table of four outstanding items, each said to be waiting on a
+decision. One of them was not: "a Content-Security-Policy on API responses",
+whose stated reason was that `limitations.md` recorded its absence. A record is
+not a decision, and nothing about this one needs a product answer.
+
+10.5 put three security headers at the edge and 10.9 gave the web app a
+nonce-based policy. Responses from `/api/` had neither of their own. What stood
+between an API response and a browser treating it as a document was
+`X-Content-Type-Options: nosniff` alone — sound, but a single line with nothing
+behind it.
+
+Every response the API sends now carries:
+
+```
+default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; sandbox
+```
+
+Every directive says the same thing a different way: a response that is data has
+no business loading, framing, submitting or executing anything. `sandbox` is the
+one that matters if the others are bypassed — it applies only when a browser
+*does* treat the response as a document, and it then gives that document a
+unique origin with no scripts, no forms and no plugins. Unlike the web app's
+policy this one is a constant, and for the opposite reason: there is no nonce to
+mint, because nothing here is a document with scripts in it.
+
+**Set on the response, in the application, not at the edge.** The policy then
+travels with the API to any deployment, is exercised by the test suite rather
+than by a proxy nobody runs locally, and reaches responses no route produced —
+the `FILE_TOO_LARGE` refusal `MaxBodySizeMiddleware` writes before routing, and
+a 404. The middleware is registered last so it runs outermost, which is what
+makes that true. nginx still sets no policy of its own, so the two can never
+intersect into one nobody designed; `test_deployment.py` has asserted that since
+10.9 and now says why twice.
+
+**What it buys was measured, not asserted.** Framing an API response from a page
+carrying no policy of its own, in Chromium:
+
+| | iframe |
+| --- | --- |
+| before | **loaded**, no refusal, no policy header |
+| after | **refused** — "an ancestor violates the following Content Security Policy directive: `frame-ancestors 'none'`" |
+
+Through the shipped proxy that was already refused, by `X-Frame-Options: DENY`
+from 10.5. What changed is that it no longer depends on the edge: the
+application refuses on its own, wherever it is run.
+
+**Verified in a browser, as 10.9's precedent requires.** The real web app was
+loaded against an API sending the policy: five API calls, all `200`, **0 CSP
+violations, 0 console errors, 0 page errors**, and the page rendered. `/docs`
+and `/redoc` were checked for refusals too and had none — they fail to load
+Swagger UI and ReDoc *in this sandbox* because its egress proxy blocks
+`cdn.jsdelivr.net`, which is a network error rather than a policy one, and the
+distinction was checked rather than assumed by listening for
+`securitypolicyviolation` and finding zero across all five pages.
+
+The exemptions are read from the application — `app.docs_url`, `app.redoc_url`
+and the Swagger OAuth redirect — rather than written into the middleware, so
+moving or disabling a documentation UI cannot leave a stale path exempting
+nothing.
+
 ### Concurrency belongs to the database
 
 Until Step 7M both orchestrators guarded their find-or-create decision with a
