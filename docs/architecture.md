@@ -693,7 +693,86 @@ much one owner has: 6.1 ms at 50 recordings and 12.0 ms at 5 000. It answers
 "what would I lose?" with three counts, and it gets them by joining every
 recording to every analysis and sorting the result for three `count(DISTINCT)`s —
 9 ms of the 12 is that sort. It is recorded here rather than fixed, exactly as
-10.15 recorded the comparison read.
+10.15 recorded the comparison read; 10.19 fixed it, and found that one of the
+three counts had been answering a different question from the one the screen
+asks.
+
+### The last read that grows with a history, and what `psql` got wrong (10.19)
+
+10.18 ended by naming `GET /identity` as the only read whose cost grows with how
+much one owner holds, and recorded it rather than fixing it. This step is that
+fix, and the defect it turned up on the way is worth more than the milliseconds.
+
+**The number was wrong.** The identity panel's third count, `ai_feedback`, was
+`count(DISTINCT a.id) FILTER (WHERE a.feedback_status = 'completed')` — a count
+of *analyses*. Both places it reaches a reader are sentences about recordings:
+
+> This key holds 5 recordings, 3 measured, **2 with generated feedback**.
+
+> This permanently deletes 5 recordings, every measurement taken from them, and
+> the stored audio itself. **2 of them** carry generated feedback, which cannot
+> be recovered.
+
+A recording may be analysed more than once, and feedback may be generated on
+more than one of those runs. One recording with two feedback runs made the first
+sentence add a fourth item to a list of three, and the second sentence say that
+one recording included two of them. It is the same rule the rest of the product
+is built on — do not state what the data does not support — applied to a count
+instead of a measurement, and it is the same defect 10.13 found in a list.
+
+All three numbers count **recordings** now, and cannot exceed one another.
+
+**The two stores disagreed, in two different ways, and nothing had asked.** SQL
+counted feedback *runs*; the in-memory double counted recordings whose **latest**
+analysis carried feedback. The double was wrong about the second number too: a
+recording measured yesterday and re-analysed a minute ago read as unmeasured
+while the new run was pending, because it looked at the newest analysis instead
+of all of them. Two contract tests now hold both stores to the same answer for
+the shape that separates them — a recording analysed three times — and both
+failed before this step, differently.
+
+**The rewrite, and the measurement that chose it.** Folding each recording's
+analyses to two booleans in a lateral leaves the outer query one row per
+recording to count, so no `DISTINCT` is undoing a multiplication the statement
+just performed. Measured through a pooled connection against an owner holding
+5 000 recordings in a database of 201 owners:
+
+| form | 5 000 recordings | 25 recordings |
+| --- | --- | --- |
+| join, three `count(DISTINCT …)` (before) | 16.1 ms | 0.32 ms |
+| **lateral `bool_or`** (after) | **11.7 ms** | 0.31 ms |
+| three counts with `EXISTS` | 20.1 ms | 0.71 ms |
+
+End to end over HTTP, both builds against the same database: `GET /identity`
+**23.6 → 19.6 ms** at one client. At sixteen concurrent clients it does not move
+(128.9 against 128.8 requests a second): the saving is in a PostgreSQL backend,
+and under that much concurrency the endpoint is waiting on other things.
+
+**`psql` ranked those three the other way round, and `psql` was wrong.** With
+the owner id written into the statement as a literal, PostgreSQL plans the query
+afresh every time and can use the owner's real selectivity. A pooled application
+connection does not get that: psycopg prepares any statement it runs five times,
+and the plan is then chosen once for a parameter it has not seen. Under a custom
+plan the lateral is the *slowest* of the three (15.9 ms against 11.5 for the
+shipped join); under the prepared plan it is the fastest. Timing a query in
+`psql` and shipping the winner is therefore not a valid method here, and this is
+the first step in the sequence where it would have produced the wrong answer.
+
+Preparing is not itself the problem, and turning it off would be a bad trade —
+measured on the same connection, custom plan against prepared:
+
+| statement | custom | prepared | |
+| --- | --- | --- | --- |
+| the identity summary | 10.5 ms | 16.6 ms | **1.59× worse** |
+| the timeline fields (`/notes`) | 14.3 ms | 9.9 ms | 0.69× |
+| the history list | 0.73 ms | 0.54 ms | 0.74× |
+| the progress window of 30 | 1.50 ms | 1.23 ms | 0.82× |
+
+Every statement in the product is *faster* prepared except this one, which is
+why the fix is a query whose plan does not depend on knowing the owner rather
+than a pool setting. What made this one different is that its cost is dominated
+by how much the owner has — from 25 rows to 5 000 in the same database — which
+is exactly the thing a plan chosen for an unknown parameter cannot know.
 
 ### Concurrency belongs to the database
 

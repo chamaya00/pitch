@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19) |
 
 ## Phase 0 — delivered
 
@@ -803,6 +803,52 @@ Delivered in 10.18 — *what a hundred times the data does to a read*:
   Nine of those twelve milliseconds are the sort. Recorded here rather than
   fixed, the way 10.15 recorded the comparison read.
 
+Delivered in 10.19 — *the last read that grows with a history, and a number that
+was answering a different question*:
+
+- 10.18 named `GET /identity` as the only read whose cost grows with what one
+  owner holds and recorded it rather than fixing it. This step is that fix, and
+  **the defect it turned up on the way matters more than the milliseconds**.
+- The identity panel's `ai_feedback` counted *analyses* whose feedback had
+  completed. Both places it reaches a reader are sentences about **recordings**:
+  "this key holds 5 recordings, 3 measured, 2 with generated feedback", and the
+  deletion confirmation's "2 of them carry generated feedback, which cannot be
+  recovered". A recording analysed twice with feedback both times made the second
+  sentence say that one recording included two of them. Same rule as everywhere
+  else in this product — do not state what the data does not support — and the
+  same defect 10.13 found in a list. All three counts are counts of recordings
+  now, and none can exceed another.
+- **The two stores disagreed about it, in two different ways, and nothing had
+  asked.** SQL counted feedback runs; the in-memory double counted recordings
+  whose *latest* analysis carried feedback. The double was also wrong about
+  "measured": a recording analysed yesterday and re-analysed a minute ago read as
+  unmeasured while the new run was pending. Two contract tests now hold both
+  stores to the same answer on the shape that separates them, and both failed
+  before this step — differently.
+- The rewrite folds each recording's analyses to two booleans in a lateral, so
+  the outer query counts one row per recording and no `DISTINCT` is undoing a
+  multiplication the statement just performed. Through a pooled connection
+  against an owner holding 5 000 recordings in a database of 201 owners:
+  **16.1 ms → 11.7 ms**, and 0.32 → 0.31 ms for an owner holding 25. End to end
+  `GET /identity` goes **23.6 → 19.6 ms** at one client, and does not move at
+  sixteen, where the endpoint is waiting on other things.
+- **`psql` ranked the candidates the other way round, and `psql` was wrong.**
+  With the owner written in as a literal, PostgreSQL plans afresh and can use
+  that owner's real selectivity; a pooled application connection cannot, because
+  psycopg prepares any statement it runs five times and the plan is then chosen
+  for a parameter it has not seen. Under a custom plan this lateral is the
+  *slowest* of the three candidates; under the prepared plan it is the fastest.
+  Timing a query in `psql` and shipping the winner would have picked wrong here
+  for the first time in this sequence.
+- Preparing is not the problem and turning it off would be a bad trade: measured
+  on one connection, every other statement in the product is faster prepared —
+  the timeline fields 14.3 → 9.9 ms, the history list 0.73 → 0.54, a progress
+  window 1.50 → 1.23 — and only this one is worse (10.5 → 16.6). What made it
+  different is that its cost is dominated by how much the owner has, from 25 rows
+  to 5 000 in the same database, which is exactly what a plan chosen for an
+  unknown parameter cannot know. So the fix is a query whose plan does not depend
+  on knowing the owner, not a pool setting.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -837,8 +883,13 @@ kept leaving — the speech pipeline and the progress query at a hundred times t
 data — and found both flat: what was not flat was the progress *window*, whose
 maximum spent 155 ms decompressing a document per row for 600 bytes of metrics,
 which migration 0006 makes a generated column and 10.12 had said it would take a
-measurement to justify. The shared rate-limit counter landed in 10.10, and a
-deployment scaling workers must still turn it on by hand. Error pages landed
+measurement to justify. 10.19 took the last read 10.18 had named — the identity
+summary, the only one whose cost grows with what one owner holds — and found on
+the way that one of its three counts had been counting analyses where every
+sentence it is rendered into is about recordings, so a re-analysed recording
+could make the deletion warning claim one recording included two of them. The
+shared rate-limit counter landed in 10.10, and a deployment scaling workers must
+still turn it on by hand. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
 hold recordings remains unspecified and unbuilt. The Content-Security-Policy
