@@ -1,0 +1,51 @@
+-- The measurements beside the document instead of inside it.
+--
+-- Step 10.12 took the progress query from 593 ms to 30 ms by reading its eleven
+-- scalars off one projected `document->'metrics'` rather than eleven times off
+-- `a.document`. It said what was left, and why it was left:
+--
+--     "What remains is one unavoidable decompression per row, which is the cost
+--      of keeping the metrics in the same document as the timeline.
+--      Denormalising them into columns would remove that too, and is still a
+--      schema change worth making only when a measurement demands it — this one
+--      did not."
+--
+-- Step 10.18 is that measurement. A five-minute recording stores a 253 kB
+-- document of which the metrics are ~600 bytes, so every row of a progress
+-- window decompresses 253 kB to read 600 of them. It does not grow with the
+-- number of recordings in the database — measured flat from 50 to 5 000 — it
+-- grows with the *window*, and the window is a documented parameter that goes
+-- to 200:
+--
+--     window of 200, metrics read from the document     141.1 ms, 7 127 buffers
+--     window of 200, metrics read from this column        1.7 ms,   262 buffers
+--
+-- 80x, and the buffer count is the mechanism rather than a side effect: 200
+-- decompressions become none.
+--
+-- GENERATED ALWAYS ... STORED rather than a column the repository writes.
+-- `pitch_point_count` (0005) is the second kind, and it needs a rule stated in
+-- three places to stay honest — "written from the same object in the same
+-- statement" — because nothing but that discipline stops it drifting from the
+-- timeline it counts. PostgreSQL maintains this one. There is no INSERT to
+-- change, no UPDATE to remember, no backfill, and no way to write a row whose
+-- metrics column disagrees with its document: the expression *is* the
+-- projection the query used to compute on the fly.
+--
+-- The expression is exactly the one it replaces, so what a null means does not
+-- change. A pending or failed analysis has no measurements, `->` yields SQL
+-- NULL for a missing key, and every scalar read out of it stays NULL — which is
+-- what `sources.py` already relies on for a recording with no completed
+-- analysis.
+--
+-- **This rewrites the table.** A generated column cannot be added with a
+-- default, so every row is rewritten to acquire it: 18 seconds for 5 000
+-- five-minute recordings (1.1 GB) here. Migrations run at startup under an
+-- advisory lock, so a deployment with a large `audio_analyses` table should
+-- expect its boot to take that long, once.
+ALTER TABLE audio_analyses
+    ADD COLUMN metrics JSONB GENERATED ALWAYS AS (document -> 'metrics') STORED;
+
+-- No index, for the reason 0005 gave: nothing filters, joins or orders by this
+-- column. It is read off a row the lateral has already located by
+-- `audio_analyses_recording_idx`.
