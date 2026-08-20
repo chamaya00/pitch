@@ -13,7 +13,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 5 | Advanced metrics: RMS, peak, spectral features | ✅ Complete |
 | 6 | Claude integration: structured payload, service, feedback UI | ✅ Complete |
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
-| 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
+| 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6), and the live in-browser readout that extends it (7–9). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
 | 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19), the checks nobody ran (10.20), a policy on responses that are data (10.21) |
 
@@ -201,26 +201,49 @@ and `reference` never once means a reference recording.
 does not contain — tempo, beats, melody transcription, note events, a reference
 song, transposition and compatibility — is unchanged and still out of scope.
 
-### Planned extension — a live key readout
+### Extension — a live key readout ✅ delivered
 
-Slices 7–9 in
+Slices 7–9 of
 [phase-8-specification.md §13](phase-8-specification.md#13-extension--live-key-estimation-slices-79):
 the key updating **while somebody sings**, in Live Vocal Practice, instead of
-only after an upload. Planned, not built, and deliberately numbered after the
-phase so the agreed scope does not widen by accident.
+only after an upload. Numbered after the phase on purpose, and built after it:
+§12's definition of done neither included nor depended on any of this.
 
-It reuses the pitch stream Steps 7H/7J already run in the page, so nothing new is
-captured and **microphone audio still never leaves the browser** — which is also
-what forces the estimator to be implemented a second time in TypeScript, under
-the same "one mathematics, two implementations" rule `pitch.py` and `pitch.ts`
-already follow.
+- **Slice 7 — the estimator, again.** `frontend/lib/live-key.ts`, the same
+  mathematics as `key.py` in the runtime the microphone lives in, because
+  microphone audio never leaves the page. `fixtures/key-parity.json` — fifteen
+  profiles and the verdict each must produce, generated from the backend — is
+  asserted by both suites, and every margin agrees to within 1e-9. The table
+  carries `AMBIGUOUS_MODE`, the one fixture that can see how confidence is
+  defined and therefore the one a second implementation would get wrong.
+- **Slice 8 — accumulation and commitment.** One array increment per voiced
+  frame; the estimate runs on the 500 ms publish tick that already existed.
+  Every voiced frame counts rather than only held ones, and the profile is
+  cumulative rather than windowed — both to keep the live definition the same as
+  the uploaded one, both with their costs stated and tested.
+- **Slice 9 — the readout.** One block in the practice card. "Not enough yet"
+  with the reason in words, a committed key with its margin under it, and
+  nothing at all once the take ends.
 
-Three problems the uploaded version does not have, all recorded in the plan: a
-second implementation to keep in step, two numbers of the same kind from two
-pipelines that will sometimes disagree (the answer is the existing one — label
-them apart and never show them side by side), and flicker, which needs hysteresis
-and dwell rules set by measurement rather than picked. Cost is not one of them:
-measured at **0.008 ms per estimate**, 0.003% of one publish tick.
+**Two of the plan's expectations did not survive measurement, and the record is
+the measurement rather than the plan.** The flicker fixture the plan asked for
+was built — a boundary session whose raw per-tick label changes 14 times in 20
+seconds — and the dwell sweep over four such sessions chose 4 ticks, the
+smallest value holding all of them at or below three changes, at a cost of 3.0 s
+before a clear melody is labelled. **Hysteresis was not shipped**: a margin below
+`MIN_KEY_CONFIDENCE` cannot fire, because an answered key already leads every
+other candidate by at least the gate, and the relative-major boundary the rule
+was written for is refused outright by the confidence gate. A test asserts the
+invariant, so the reason it was left out fails first if the gate ever moves.
+
+Cost was not a constraint and is not asserted as prose: under 0.01 ms per folded
+frame and under 1 ms per estimate, against a 500 ms budget. Nothing is stored,
+requested or logged; the server does not know the feature exists.
+
+Verified in a browser as well as in tests: a synthesised C major melody through
+Chromium's fake capture device commits to C major within ~4 s at 390 px and
+1280 px in both colour schemes, a held hum reads "Not enough yet" throughout,
+and stopping the take leaves no key on the page.
 
 
 ## Phase 9 — audited, specified, blocked

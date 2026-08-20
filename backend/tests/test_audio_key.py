@@ -65,15 +65,22 @@ of them could see how the margin was defined — the property ``key.py`` argues
 for at length was, in fact, untested. ``AMBIGUOUS_MODE`` closes it, and the
 mutation was re-run against it: caught.
 
-There is no frontend counterpart to audit. The musical-key UI is Slice 4 and is
-not in this repository yet.
+The frontend has its own counterpart now, and it audits a different thing. The
+musical-key *card* is presentation; ``frontend/lib/live-key.ts`` is this
+measurement implemented a second time, for the live readout, because microphone
+audio never leaves the browser. Its 24 mutations are recorded in
+``frontend/tests/live-key.test.ts``. One of them — redefining the runner-up's own
+margin — survived its first run against the parity table below and is the reason
+that table carries ``alternative_confidence``.
 """
 
+import json
 import math
 import random
 import time
 import tracemalloc
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -614,6 +621,92 @@ def test_every_profile_set_has_twelve_weights_per_mode() -> None:
         assert len(profiles.minor) == 12
         assert profiles.weights(KeyMode.MAJOR) == profiles.major
         assert profiles.weights(KeyMode.MINOR) == profiles.minor
+
+
+# --- Parity with the browser implementation ---------------------------------
+#
+# The live readout in Live Vocal Practice estimates the key of a session while
+# somebody sings, and it cannot call this module: microphone audio never leaves
+# the page, so the mathematics exists a second time in ``frontend/lib/live-key.ts``.
+# That is the rule ``pitch.py`` and ``lib/pitch.ts`` already follow — the
+# implementations are separate on purpose and the mathematics is not.
+#
+# ``fixtures/key-parity.json`` is what holds them together: one table of
+# profiles and the verdicts they must produce, read here and by
+# ``frontend/tests/live-key.test.ts``. Neither side may be changed to agree with
+# the other without this table changing too, and the table is generated from
+# *this* implementation, which is the authoritative one.
+
+
+PARITY_TABLE = json.loads(
+    (Path(__file__).resolve().parents[2] / "fixtures" / "key-parity.json").read_text()
+)
+
+
+def test_the_parity_table_states_the_thresholds_this_module_uses() -> None:
+    """A table written against different constants would prove nothing."""
+    thresholds = PARITY_TABLE["thresholds"]
+    assert PARITY_TABLE["profile_set"] == DEFAULT_PROFILE_SET.name
+    assert thresholds["min_distinct_pitch_classes"] == MIN_DISTINCT_PITCH_CLASSES
+    assert thresholds["min_voiced_seconds"] == MIN_VOICED_SECONDS
+    assert thresholds["min_key_confidence"] == MIN_KEY_CONFIDENCE
+    assert thresholds["min_pitch_class_share"] == MIN_PITCH_CLASS_SHARE
+    assert len(PARITY_TABLE["cases"]) >= 15
+
+
+@pytest.mark.parametrize(
+    "case", PARITY_TABLE["cases"], ids=[case["name"] for case in PARITY_TABLE["cases"]]
+)
+def test_the_shared_table_is_what_this_estimator_produces(case: dict[str, object]) -> None:
+    """Every row, against the implementation the browser copy mirrors.
+
+    The margins are asserted exactly rather than approximately. Both sides
+    perform the same operations in the same order over the same doubles, so a
+    difference beyond floating-point noise is a difference in the measurement.
+    """
+    frames = {
+        pitch_class: count
+        for pitch_class, count in enumerate(case["frames"])  # type: ignore[call-overload]
+        if count
+    }
+    analysis = analyse_key(timeline(frames), frame_seconds=float(PARITY_TABLE["frame_seconds"]))
+    expected = case["expect"]  # type: ignore[index]
+
+    assert (analysis.key.tonic if analysis.key else None) == expected["tonic"]
+    assert (analysis.key.mode.value if analysis.key else None) == expected["mode"]
+    assert (analysis.unmeasured_reason.value if analysis.unmeasured_reason else None) == expected[
+        "unmeasured_reason"
+    ]
+    assert analysis.distinct_pitch_classes == expected["distinct_pitch_classes"]
+
+    if expected["confidence"] is None:
+        assert analysis.key is None
+        return
+    assert analysis.key is not None
+    assert analysis.key.confidence == pytest.approx(expected["confidence"], abs=1e-12)
+    alternative = analysis.key.alternative
+    assert (alternative.tonic if alternative else None) == expected["alternative_tonic"]
+    assert (alternative.mode.value if alternative else None) == expected["alternative_mode"]
+    assert alternative is not None
+    assert alternative.confidence == pytest.approx(expected["alternative_confidence"], abs=1e-12)
+
+
+def test_the_fixture_that_pins_the_margin_is_in_the_shared_table() -> None:
+    """The one row a second implementation would get wrong.
+
+    Slice 5's mutation run found that defining confidence as the lead over the
+    next candidate with a *different tonic* survived every other fixture — all of
+    them are stopped by the pitch-class gate before the correlation is reached.
+    ``AMBIGUOUS_MODE`` is the only profile that can see the difference, so a
+    parity table without it would let the browser copy adopt the wrong
+    definition and still pass.
+    """
+    row = next(
+        case for case in PARITY_TABLE["cases"] if case["name"] == "both thirds, neither mode"
+    )
+    frames = {pitch_class: count for pitch_class, count in enumerate(row["frames"]) if count}
+    assert frames == AMBIGUOUS_MODE
+    assert row["expect"]["unmeasured_reason"] == KeyUnmeasuredReason.AMBIGUOUS.value
 
 
 # --- The model's own guarantees ---------------------------------------------

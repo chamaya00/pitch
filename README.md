@@ -25,9 +25,9 @@ Implemented and working end to end:
   WAV, uploaded only when you ask.
 - **Live Vocal Practice** — while you record: the detected note, a tuner meter
   showing flat or sharp with the deviation in cents, a scrolling pitch trace,
-  a rolling pitch-consistency figure, the range covered this session, and an
-  optional target note to practise against. All computed locally; audio never
-  leaves the page during recording.
+  a rolling pitch-consistency figure, the range covered this session, the key
+  you seem to be singing in, and an optional target note to practise against.
+  All computed locally; audio never leaves the page during recording.
 - **Upload** — WAV/MP3, validated by content rather than by filename, stored
   with server-generated names.
 - **Speech analysis** — transcription, then deterministic metrics counted from
@@ -41,6 +41,10 @@ Implemented and working end to end:
 - **Musical key** — the key implied by what was sung, folded from the same pitch
   timeline. It refuses rather than guesses: a hum, an arpeggio or a wandering
   phrase is reported as "not measured" with the reason and the evidence shown.
+  The same measurement runs live in the practice card, implemented a second time
+  in the browser because microphone audio never leaves it — the two are held to
+  each other by a shared fixture table, are labelled apart, and are never shown
+  side by side.
 - **Recording history, comparison and progress** — an owner's recordings over
   time, two of them side by side, and their measurements charted. Deterministic
   arithmetic throughout: no grade, no level, no trend line.

@@ -1,0 +1,434 @@
+{
+  "purpose": "One table of pitch-class profiles and the verdicts they must produce, asserted by backend/tests/test_audio_key.py and frontend/tests/live-key.test.ts. Melodic key estimation is implemented twice - in Python for an uploaded recording and in TypeScript for the live readout, because microphone audio never leaves the page - and this file is what stops the two drifting. Generated from the backend estimator; regenerate it only with a deliberate change to the measurement, never to make a failing test pass.",
+  "frames_are": "Twelve counts, in pitch-class order starting at C: how many detected frames landed on each class. Voiced seconds is the total multiplied by frame_seconds, because every frame carries exactly one hop.",
+  "frame_seconds": 0.0232,
+  "profile_set": "temperley",
+  "thresholds": {
+    "min_distinct_pitch_classes": 5,
+    "min_voiced_seconds": 1.0,
+    "min_key_confidence": 0.05,
+    "min_pitch_class_share": 2.0
+  },
+  "cases": [
+    {
+      "name": "major melody",
+      "note": "a weighted C major melody: the tonic and dominant carry it",
+      "frames": [
+        40,
+        0,
+        20,
+        0,
+        30,
+        20,
+        0,
+        40,
+        0,
+        20,
+        0,
+        10
+      ],
+      "expect": {
+        "tonic": "C",
+        "mode": "major",
+        "confidence": 0.26210426831730227,
+        "alternative_tonic": "F",
+        "alternative_mode": "major",
+        "alternative_confidence": 0.12004116407283383,
+        "unmeasured_reason": null,
+        "distinct_pitch_classes": 7
+      }
+    },
+    {
+      "name": "minor melody",
+      "note": "the same shape with a minor third, sixth and seventh",
+      "frames": [
+        40,
+        0,
+        20,
+        30,
+        0,
+        20,
+        0,
+        40,
+        20,
+        0,
+        10,
+        0
+      ],
+      "expect": {
+        "tonic": "C",
+        "mode": "minor",
+        "confidence": 0.20468247257692973,
+        "alternative_tonic": "D#",
+        "alternative_mode": "major",
+        "alternative_confidence": 0.10061004039197952,
+        "unmeasured_reason": null,
+        "distinct_pitch_classes": 7
+      }
+    },
+    {
+      "name": "pentatonic melody",
+      "note": "five classes: the smallest real melody the gates admit",
+      "frames": [
+        40,
+        0,
+        20,
+        0,
+        25,
+        0,
+        0,
+        35,
+        0,
+        20,
+        0,
+        0
+      ],
+      "expect": {
+        "tonic": "C",
+        "mode": "major",
+        "confidence": 0.240914616037878,
+        "alternative_tonic": "G",
+        "alternative_mode": "major",
+        "alternative_confidence": 0.030484416594687924,
+        "unmeasured_reason": null,
+        "distinct_pitch_classes": 5
+      }
+    },
+    {
+      "name": "major melody transposed up 5",
+      "note": "transposition moves the tonic and nothing else",
+      "frames": [
+        40,
+        0,
+        20,
+        0,
+        10,
+        40,
+        0,
+        20,
+        0,
+        30,
+        20,
+        0
+      ],
+      "expect": {
+        "tonic": "F",
+        "mode": "major",
+        "confidence": 0.2621042683173025,
+        "alternative_tonic": "A#",
+        "alternative_mode": "major",
+        "alternative_confidence": 0.1200411640728336,
+        "unmeasured_reason": null,
+        "distinct_pitch_classes": 7
+      }
+    },
+    {
+      "name": "minor melody transposed up 7",
+      "note": "the same, in the minor mode",
+      "frames": [
+        20,
+        0,
+        40,
+        20,
+        0,
+        10,
+        0,
+        40,
+        0,
+        20,
+        30,
+        0
+      ],
+      "expect": {
+        "tonic": "G",
+        "mode": "minor",
+        "confidence": 0.20468247257692984,
+        "alternative_tonic": "A#",
+        "alternative_mode": "major",
+        "alternative_confidence": 0.1006100403919793,
+        "unmeasured_reason": null,
+        "distinct_pitch_classes": 7
+      }
+    },
+    {
+      "name": "bare unweighted scale",
+      "note": "seven equal degrees: answered, and answered weakly",
+      "frames": [
+        20,
+        0,
+        20,
+        0,
+        20,
+        20,
+        0,
+        20,
+        0,
+        20,
+        0,
+        20
+      ],
+      "expect": {
+        "tonic": "C",
+        "mode": "major",
+        "confidence": 0.14581911429282202,
+        "alternative_tonic": "A",
+        "alternative_mode": "minor",
+        "alternative_confidence": 0.07949479853075148,
+        "unmeasured_reason": null,
+        "distinct_pitch_classes": 7
+      }
+    },
+    {
+      "name": "hum",
+      "note": "one held note. Raw correlation +0.684 under Krumhansl-Kessler",
+      "frames": [
+        140,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "TOO_FEW_PITCH_CLASSES",
+        "distinct_pitch_classes": 1
+      }
+    },
+    {
+      "name": "two pitch classes",
+      "note": "leads the next tonic by 0.173 and the next candidate by 0.021",
+      "frames": [
+        80,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        60,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "TOO_FEW_PITCH_CLASSES",
+        "distinct_pitch_classes": 2
+      }
+    },
+    {
+      "name": "three-note arpeggio",
+      "note": "margin 0.309 - higher than real music. Only the pitch-class gate catches it",
+      "frames": [
+        60,
+        0,
+        0,
+        0,
+        45,
+        0,
+        0,
+        50,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "TOO_FEW_PITCH_CLASSES",
+        "distinct_pitch_classes": 3
+      }
+    },
+    {
+      "name": "four pitch classes",
+      "note": "margin 0.171, likewise above the confidence gate",
+      "frames": [
+        50,
+        0,
+        0,
+        0,
+        40,
+        0,
+        0,
+        45,
+        0,
+        0,
+        30,
+        0
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "TOO_FEW_PITCH_CLASSES",
+        "distinct_pitch_classes": 4
+      }
+    },
+    {
+      "name": "chromatic wander",
+      "note": "twelve classes, so only the confidence gate stands here",
+      "frames": [
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "AMBIGUOUS",
+        "distinct_pitch_classes": 12
+      }
+    },
+    {
+      "name": "uniform profile",
+      "note": "equally unlike every key: correlation 0, not a division by zero",
+      "frames": [
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20,
+        20
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "AMBIGUOUS",
+        "distinct_pitch_classes": 12
+      }
+    },
+    {
+      "name": "random pitch-class weights",
+      "note": "a raw correlation of +0.492 that looks like evidence",
+      "frames": [
+        13,
+        41,
+        9,
+        21,
+        12,
+        36,
+        33,
+        35,
+        29,
+        18,
+        11,
+        36
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "AMBIGUOUS",
+        "distinct_pitch_classes": 12
+      }
+    },
+    {
+      "name": "both thirds, neither mode",
+      "note": "the fixture that pins how the margin is defined",
+      "frames": [
+        32,
+        0,
+        20,
+        16,
+        18,
+        21,
+        0,
+        27,
+        11,
+        0,
+        0,
+        18
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "AMBIGUOUS",
+        "distinct_pitch_classes": 8
+      }
+    },
+    {
+      "name": "five classes, half a second",
+      "note": "margin 0.281, refused on voiced time alone",
+      "frames": [
+        5,
+        0,
+        4,
+        0,
+        5,
+        4,
+        0,
+        5,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expect": {
+        "tonic": null,
+        "mode": null,
+        "confidence": null,
+        "alternative_tonic": null,
+        "alternative_mode": null,
+        "alternative_confidence": null,
+        "unmeasured_reason": "TOO_LITTLE_VOICED_TIME",
+        "distinct_pitch_classes": 5
+      }
+    }
+  ]
+}
