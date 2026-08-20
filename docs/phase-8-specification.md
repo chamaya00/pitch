@@ -926,8 +926,18 @@ which is already cumulative.
 
 The consequence is stated rather than hidden: **a session that modulates reports
 the average of both keys**, and the longer the session runs the less responsive
-the estimate becomes. A "reset" control, or a per-take reset on stop/start, is
-Open question 3 below.
+the estimate becomes. A "reset" control, or a per-take reset on stop/start, was
+left open here.
+
+> **Answered by what was already there.** A per-take reset needed no control and
+> no decision: `hooks/use-live-stats.ts` keys its accumulator on `sessionId`,
+> which `record-panel.tsx` bumps on every `start`, so a new take begins with
+> `EMPTY_STATS` — no key, and none of the previous take's pitch classes. A test
+> asserts it with a *different* key rather than with an empty session, because
+> a session that answers nothing cannot tell whether the counts were cleared.
+> A mid-take reset control was **not** added: nothing in the repository asked
+> for one, and a button that silently changes what a displayed measurement was
+> folded from is a feature that needs a reason first.
 
 ### Commitment rules — the new problem
 
