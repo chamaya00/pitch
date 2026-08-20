@@ -1013,15 +1013,17 @@ recorded its absence. 10.21 built it. Three rows remain, and what separates them
 from that one is that each names a question somebody outside this repository has
 to answer.
 
-**What Phase 10 still needs is not blocked on engineering.** Three things remain,
+**What Phase 10 still needs is not blocked on engineering.** Four things remain,
 and each is waiting on a decision nobody has taken rather than on work nobody has
-done:
+done. The last of them was not on any list until an audit went looking for what
+was not written down, which is the third time that has happened in three steps:
 
 | Outstanding | What it is waiting on |
 | --- | --- |
 | Real credentials — passwords, email, OAuth, sessions, reset, verification, MFA, account merging | A product decision about what an account *is* here. 10.2 rejected passwords for its own slice on the evidence: adding them while deferring reset and verification is worse than 128 random bits, not better. |
 | TLS termination and HSTS | A deployment decision. The proxy speaks HTTP and claims no HSTS deliberately; a certificate belongs to whoever operates the deployment, and claiming HSTS from a server that cannot serve TLS would break the site. |
 | Retention of identities that **hold recordings** | A product decision. 10.6 reclaims only identities that own nothing, because deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
+| A licence | The owner's decision, and found by the same audit that found 10.20: this repository is public and carries no `LICENSE` file, so nobody may use it and nobody had written that down. Which licence is not an engineering question. |
 
 **Phase 9 is in the same position and has been since 10.7**: audited, specified,
 and waiting on [one question](phase-9-specification.md#16-unresolved-product-decisions)
