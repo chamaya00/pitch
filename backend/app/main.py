@@ -12,7 +12,7 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
-from app.core.middleware import MaxBodySizeMiddleware
+from app.core.middleware import ApiSecurityPolicyMiddleware, MaxBodySizeMiddleware
 from app.db.migrate import apply_migrations
 from app.db.pool import Database
 from app.schemas.health import HealthResponse
@@ -106,6 +106,20 @@ def create_app() -> FastAPI:
     # Registered after CORS so it runs *inside* it: an oversized upload still
     # gets the headers a browser needs to read the error.
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_audio_size_bytes)
+
+    # Registered last, so it runs *outermost* and every response carries the
+    # policy — including the ones produced above without reaching a route. The
+    # exempt set is read from the application rather than written out, so
+    # turning a documentation UI off or moving it cannot leave a stale path
+    # here, and adding one cannot silently escape the policy.
+    app.add_middleware(
+        ApiSecurityPolicyMiddleware,
+        exempt_paths=frozenset(
+            path
+            for path in (app.docs_url, app.redoc_url, app.swagger_ui_oauth2_redirect_url)
+            if path
+        ),
+    )
 
     # Per-application rather than module-level: two applications in one test
     # process must not share counters and refuse each other's requests. Built
