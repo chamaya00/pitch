@@ -392,6 +392,15 @@ concurrency = pytest.mark.skipif(
 )
 
 
+#: What these two tests need from a pool, and why it is not the default.
+#:
+#: They open eight connections *simultaneously* to force real interleaving.
+#: Step 10.17 sized the shipped pool at four, for a worker sharing a server's
+#: connections with its siblings; a test provoking contention in one process is
+#: a different requirement and states its own.
+_RACE_POOL_SIZE = 10
+
+
 async def _warm(database: Database, connections: int) -> None:
     """Open ``connections`` real connections at once so the race is a race."""
 
@@ -439,7 +448,7 @@ def test_concurrent_anonymous_requests_cannot_exceed_the_identity_limit() -> Non
     """
 
     async def work() -> None:
-        database = Database(DATABASE_URL)
+        database = Database(DATABASE_URL, max_size=_RACE_POOL_SIZE)
         await database.open()
         try:
             async with database.transaction() as connection:
@@ -479,7 +488,7 @@ def test_concurrent_requests_from_an_existing_owner_are_never_refused() -> None:
     """Concurrency must not turn a returning user into a newcomer."""
 
     async def work() -> None:
-        database = Database(DATABASE_URL)
+        database = Database(DATABASE_URL, max_size=_RACE_POOL_SIZE)
         await database.open()
         try:
             async with database.transaction() as connection:

@@ -287,6 +287,11 @@ def test_the_edge_sets_no_content_security_policy(directives: str) -> None:
     scripts. Measured in the equivalent case — the policy served without the
     nonce reaching the HTML — Chromium refused all ten script elements and the
     page never hydrated.
+
+    Since Step 10.21 the *API* has a policy of its own too, set on the response
+    for the opposite reason: nothing it serves is a document with scripts in it,
+    so there is no nonce to know and the policy can be a constant. Both arrive
+    from an upstream, and both would be intersected with anything added here.
     """
     assert "Content-Security-Policy" not in directives
 

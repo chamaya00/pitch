@@ -90,8 +90,16 @@ second permanent handle on the same person into logs and screenshots for no
 benefit. A `credential_id` is not credential material: knowing one grants
 nothing, and revoking needs it.
 
-`ai_feedback` is counted separately because generating it costs a provider call:
-measurements can be recomputed from the audio, generated prose cannot.
+All three counts are counts of **recordings**, so neither of the last two can
+exceed the first. `ai_feedback` is how many recordings have generated feedback on
+at least one of their analyses, and it is counted separately because generating
+it costs a provider call: measurements can be recomputed from the audio,
+generated prose cannot.
+
+Until Step 10.19 that last one counted feedback *runs* rather than recordings, so
+a recording analysed twice with feedback both times contributed two — and the
+deletion confirmation, which renders it as "*n* of them carry generated
+feedback", could say that one recording included two of them.
 
 ### `DELETE /api/v1/identity`
 

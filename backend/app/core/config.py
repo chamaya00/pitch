@@ -134,6 +134,35 @@ class Settings(BaseSettings):
     #: ``services/limits/limiter.py``.
     rate_limit_backend: Literal["memory", "database"] = "memory"
 
+    # --- Database pool (Step 10.17) ----------------------------------------
+    #: How many connections **this process** may hold at once.
+    #:
+    #: A per-process quantity against a server-wide limit, and that is the whole
+    #: reason it is configuration rather than the constant it used to be. One
+    #: worker holding ten is unremarkable; twelve workers holding ten is every
+    #: connection a default PostgreSQL grants, after which nothing else can
+    #: connect at all — not another worker, not ``cleanup_identities``, not
+    #: ``psql``. Measured in Step 10.17: twelve workers took 97 of 97.
+    #:
+    #: Four is the default because four is what one worker can use. Raising the
+    #: pool from four to ten changed no read's throughput at sixteen concurrent
+    #: clients by more than the run-to-run noise, because the work those reads
+    #: are made of is decompression and parsing rather than waiting on a socket.
+    #:
+    #: The startup log reports how many processes of this size the server it is
+    #: pointed at has room for, so an operator adding workers has the arithmetic
+    #: in front of them; a pool too large to fit at all is refused rather than
+    #: opened.
+    db_pool_max_size: int = Field(default=4, ge=1, le=1000)
+
+    #: How many connections this process keeps open while idle.
+    #:
+    #: One, so a worker that serves nothing costs the server one connection
+    #: rather than a full pool. The pool grows on demand and — psycopg's
+    #: default — hands back what has been idle for ten minutes, so a burst is
+    #: paid for at its peak and for a while afterwards.
+    db_pool_min_size: int = Field(default=1, ge=1, le=1000)
+
     # --- Identity retention (Step 10.6) ------------------------------------
     #: How long an identity that owns **nothing** may sit unused before it is
     #: reclaimed.
@@ -195,6 +224,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RATE_LIMIT_BACKEND=database requires DATABASE_URL: a shared "
                 "rate-limit counter has nowhere to count without one"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_pool_cannot_keep_more_than_it_holds(self) -> "Settings":
+        """``min_size`` above ``max_size`` is refused, not silently clamped."""
+        if self.db_pool_min_size > self.db_pool_max_size:
+            raise ValueError(
+                "DB_POOL_MIN_SIZE cannot exceed DB_POOL_MAX_SIZE: a pool cannot "
+                "keep more connections open than it may hold"
             )
         return self
 

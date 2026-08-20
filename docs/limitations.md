@@ -399,11 +399,15 @@ publishes nothing else. What that does **not** give you:
   `X-Forwarded-For` because only the proxy can reach it. If a deployment
   republishes the backend's port, or runs it on a shared network, that
   assumption is void and the per-address limit becomes forgeable.
-- **The Content-Security-Policy covers the web app, not the API.** The app
-  serves a strict, nonce-based policy on every document (see below). Responses
-  from `/api/` carry no policy of their own; they are JSON sent with
-  `X-Content-Type-Options: nosniff`, which is what stops a browser treating one
-  as a document, but that is a narrower guarantee than a policy would be.
+- **The API's policy is a second line, not a first.** Since Step 10.21 every
+  response the API sends carries `default-src 'none'; frame-ancestors 'none';
+  base-uri 'none'; form-action 'none'; sandbox`, which is what a JSON response
+  is allowed to do — nothing. What that does *not* do is make a mis-typed
+  response safe to render: `X-Content-Type-Options: nosniff` is still what stops
+  a browser treating JSON as a document, and the policy is what limits the
+  damage if it ever does. The two interactive documentation pages, `/docs` and
+  `/redoc`, are exempt because they are HTML that loads a CDN; the shipped
+  deployment does not route them at all.
 - **The database password has a development default.** The database is not
   reachable from the host, but `POSTGRES_PASSWORD` should be set for anything
   real.

@@ -64,6 +64,15 @@ services:
       # allowed 20. Set this to `database` if you do either, and the count moves
       # into a table all of them share.
       RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-memory}
+      # Connections held by ONE backend process. PostgreSQL's limit is
+      # server-wide, so what it sees is this times the number of processes:
+      # scale this service, or add `--workers` to the image's CMD, and the
+      # ceiling multiplies exactly as the rate-limit counter above does.
+      # Measured in Step 10.17: twelve processes of ten took all 97 connections
+      # the `postgres:16-alpine` default grants, after which nothing else could
+      # connect — including `docker compose exec db psql` and the identity
+      # cleanup job. At four, twenty-four processes fit.
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-4}
     expose:
       - "8000"
     volumes:

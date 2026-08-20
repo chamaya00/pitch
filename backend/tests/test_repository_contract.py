@@ -1640,6 +1640,77 @@ def test_an_unfinished_analysis_does_not_count_as_analysed(backend: Any) -> None
     backend(work)
 
 
+def audio_feedback() -> Any:
+    """Generated prose to hang on a finished feedback run."""
+    from tests.test_audio_feedback import run_feedback_fixture
+
+    return run_feedback_fixture()
+
+
+def test_a_re_analysed_recording_is_counted_once(backend: Any) -> None:
+    """What the three ``count(DISTINCT …)`` were paying for, and what they hid.
+
+    A recording may be analysed more than once, so joining recordings to
+    analyses multiplies rows. Every number in this summary is about
+    *recordings* — both sentences it is rendered into say so, "this key holds 5
+    recordings, 3 measured, 2 with generated feedback" and "2 of them carry
+    generated feedback" — so an owner with two recordings, one of them analysed
+    three times with feedback on two of those runs, holds two recordings, one
+    measured, one with generated feedback.
+
+    Before Step 10.19 PostgreSQL answered 2 to the last one, counting feedback
+    *runs*, which made the second sentence claim that one recording included two
+    of them. The in-memory double answered 1 by looking only at the newest
+    analysis, which is a third thing again. Nothing had asked either of them.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        first = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.recordings.create(make_recording(), owner.owner_id)
+
+        await prepared.audio.create(completed_audio(first.recording_id))
+        for _ in range(2):
+            await prepared.audio.create(
+                completed_audio(
+                    first.recording_id,
+                    feedback_status=AudioFeedbackStatus.COMPLETED,
+                    feedback=audio_feedback().model_dump(),
+                )
+            )
+
+        summary = await prepared.owners.data_summary(owner.owner_id)
+
+        assert summary.recordings == 2
+        assert summary.analysed_recordings == 1
+        assert summary.ai_feedback == 1
+
+    backend(work)
+
+
+def test_a_recording_being_re_analysed_is_still_a_measured_recording(backend: Any) -> None:
+    """ "Has this been measured?" is about every analysis, not the newest one.
+
+    A recording measured yesterday and re-analysed a minute ago still holds a
+    completed measurement, and the summary answers "what would I lose?". The
+    in-memory double used to read the latest analysis and report it as
+    unmeasured while the new run was pending; SQL had always looked at all of
+    them.
+    """
+
+    async def work(prepared: Backend) -> None:
+        owner = await prepared.owner()
+        stored = await prepared.recordings.create(make_recording(), owner.owner_id)
+        await prepared.audio.create(completed_audio(stored.recording_id))
+        await prepared.audio.create(make_audio(stored.recording_id))
+
+        summary = await prepared.owners.data_summary(owner.owner_id)
+
+        assert (summary.recordings, summary.analysed_recordings) == (1, 1)
+
+    backend(work)
+
+
 def test_recording_ids_are_only_the_owners_and_are_ordered(backend: Any) -> None:
     """The deletion service names files from this list, so it must be complete."""
 

@@ -494,8 +494,347 @@ are ~6 ms and ~210 to 250 requests a second. The slowest of the four by
 throughput is now `/pitch`, at 64.2 requests a second and 298.9 ms p95 at c=16,
 and what it spends its time on is the sample it genuinely returns. Unchanged from
 10.14 and 10.15, and not addressed here: everything has been measured on **one
-worker**, and the speech pipeline and the progress query have not been measured
-at a hundred times the data.
+worker** — 10.17 took the same reads across several — and the speech pipeline
+and the progress query have not been measured at a hundred times the data.
+
+### What several workers do to a read (10.17)
+
+Every number in 10.11 through 10.16 was taken against **one uvicorn worker**,
+and each of those steps said so in its own closing paragraph. 10.10 had already
+made several workers a supported shape — it moved the rate-limit counter into a
+table for exactly that reason — so the gap was not hypothetical, it was the
+shape the previous six steps had never been measured in. This step measures it.
+
+Against the same rig those steps used — 30 five-minute recordings, 12 931 points
+each, one PostgreSQL on the same four-core host — every read at sixteen
+concurrent clients, in requests a second:
+
+| read | 1 worker | 2 workers | 4 workers |
+| --- | --- | --- | --- |
+| `GET /recordings` | 196.0 | 414.8 | **553.8** |
+| `GET /audio-analysis` | 161.8 | 269.8 | **355.4** |
+| `…/key` | 95.7 | 139.1 | **161.7** |
+| `GET /recordings/progress` | 95.5 | 132.7 | **135.1** |
+| `…/notes` | 81.1 | 133.2 | **148.7** |
+| `GET /recordings/compare` | 63.8 | 93.6 | **97.8** |
+| `…/pitch` | 55.3 | 103.6 | **128.5** |
+
+**They scale, and the scaling stops where the cores do.** The second worker is
+worth 1.4× to 2.1× on every read; the third and fourth together are worth 1.05×
+to 1.35× more, because by then four API processes and PostgreSQL are sharing
+four cores. Nothing needed changing for that — after 10.15 and 10.16 the reads
+are mostly PostgreSQL's work plus a small fold, and work that already left the
+event loop parallelises across processes for free. What a user would feel is the
+same shape: with three clients holding a note breakdown open, the poll the
+browser makes while a measurement runs is 31.0 ms on one worker and **12.2 ms**
+on four.
+
+**The defect several workers exposed is not in a read. It is in the pool.**
+`db/pool.py` opened up to ten connections with a comment saying "this is one API
+process serving a handful of concurrent requests" — written when it was true,
+and left alone when 10.10 made it false. Ten is not the number PostgreSQL sees.
+`workers × 10` is, and a default server grants 97 (`max_connections` 100, less
+three reserved for superusers). Measured, at twelve workers under load:
+
+| | connections held | `psql` can connect | `too many clients` in the log |
+| --- | --- | --- | --- |
+| pool of ten, twelve workers | **97 of 97** | **no** | yes, continuously |
+| pool of four, twelve workers | 21 (ceiling 48) | yes | none |
+
+The API's own requests did *not* fail in the first row, and that is what makes
+it worth writing down: psycopg queues a caller that cannot get a connection, so
+from the outside the symptom was latency, not an error. What broke was
+everything else — a thirteenth worker could not boot, `python -m
+app.db.cleanup_identities` could not run, and `psql` was refused at the socket.
+The database had been taken over by one application's idle capacity.
+
+The same load through the fixed default serves **82.8 requests a second against
+87.4**, which is the whole argument: the ceiling that took the server down was
+never being used for anything.
+
+**Four, because four is what one worker can use.** The pool size was swept at
+one worker, sixteen concurrent clients, two rounds each:
+
+| pool | `…/notes` | `GET /recordings/compare` |
+| --- | --- | --- |
+| 10 | 85.0, 83.1 req/s | 66.2, 66.4 req/s |
+| 6 | 85.4, 85.8 req/s | 65.5, 64.1 req/s |
+| 4 | 84.7, 87.4 req/s | 62.3, 60.2 req/s |
+| 2 | 70.1 req/s | 49.2 req/s |
+| 1 | 44.8 req/s | 30.8 req/s |
+
+Below four it costs real throughput; at four it costs the comparison read about
+7% and everything else nothing, and that 7% is the only thing given up here. It
+is given up on a single-worker deployment at sixteen concurrent clients, and it
+buys room for twenty-four processes where ten left room for nine. At four
+workers even that disappears: a pool of four and a pool of ten are the same
+throughput, on 16 connections against 40.
+
+Three things carry the decision so it does not have to be remembered:
+
+- **`DB_POOL_MAX_SIZE` and `DB_POOL_MIN_SIZE` are configuration**, because a
+  per-process share of a server-wide limit is exactly the kind of number that
+  depends on a deployment. `min_size` above `max_size` is refused at startup
+  rather than clamped.
+- **The startup log reports the arithmetic**: `database_pool_opened` carries the
+  pool size, the server's `max_connections` and `processes_that_fit` — how many
+  processes of this size the server it is pointed at has room for. A process
+  cannot know how many siblings uvicorn started, so it reports the division
+  rather than enforcing it. A pool too large to fit *even once* is impossible
+  rather than ambitious, and is refused the way 10.10 refuses
+  `RATE_LIMIT_BACKEND=database` with no `DATABASE_URL`.
+- **Connections say who holds them.** Every connection sets `application_name`
+  — `vocallens-api`, or `vocallens-maintenance` for the one-off jobs — so
+  `pg_stat_activity` on a server that has run out is a list of culprits rather
+  than a list of rows. The maintenance jobs also ask for **one** connection
+  each: they are sequential, and the moment they matter is the moment the API's
+  workers are holding everything else.
+
+**What is left.** The rate-limit counter must still be moved to `database` by
+hand when a deployment scales, exactly as 10.10 documented — this step changed
+nothing about that, and a multi-worker deployment left on `memory` still gets
+one counter per worker. The speech pipeline and the progress query at a hundred
+times the data were still unmeasured here; 10.18 measured them. And every number
+above was taken on **one host**, with PostgreSQL sharing its four cores with the
+workers, so the point at which scaling flattens belongs to this rig rather than
+to the code.
+
+### What a hundred times the data does to a read (10.18)
+
+Every step from 10.11 to 10.17 closed by naming the same two unmeasured things:
+the speech pipeline and the progress query at a hundred times the data. This
+step measured them, against one owner holding **5 000 five-minute recordings** —
+each with a completed audio analysis of 12 931 points and a completed speech
+analysis, a 1 131 MB `audio_analyses` table — beside the 50-recording rig
+10.12 used.
+
+**Both are flat, and so is everything else that was worried about:**
+
+| read, one client | 50 recordings | 5 000 recordings |
+| --- | --- | --- |
+| `GET …/analysis` (the speech read) | 6.2 ms | 6.1 ms |
+| `GET /recordings` | 6.4 ms | 6.8 ms |
+| `GET …/audio-analysis` | 7.3 ms | 7.7 ms |
+| `GET /recordings/progress` | 28.9 ms | 28.0 ms |
+| `GET /identity` | 6.1 ms | **12.0 ms** |
+
+Flat is the expected answer and it is worth stating why it is not luck: every
+one of those reads is bounded by an index on `(owner_id, …)` or by a primary
+key, and 10.13 had already shown the history list flat with *depth* at 5 000
+recordings. A hundred times the rows changes nothing about how many of them a
+query touches.
+
+**What is not flat is the window, and the window is a parameter.**
+`GET /recordings/progress` takes `limit` up to 200, and at 200 it cost
+**155.5 ms**. That is not the database being large; it is 200 rows each
+decompressing a 253 kB document to read about 600 bytes of metrics out of it.
+10.12 had left exactly this and said so in the module and in the migration:
+
+> What remains is one unavoidable decompression per row, which is the cost of
+> keeping the metrics in the same document as the timeline. Denormalising them
+> into columns would remove that too, and is still a schema change worth making
+> only when a measurement demands it — this one did not.
+
+This one does. Migration 0006 adds
+
+```sql
+ALTER TABLE audio_analyses
+    ADD COLUMN metrics JSONB GENERATED ALWAYS AS (document -> 'metrics') STORED;
+```
+
+and the lateral selects that column instead of computing the projection. The
+statement no longer mentions `document` at all, which is the strongest form of
+the rule 10.12 introduced — not "touch it once per row" but "do not touch it".
+
+| in PostgreSQL, window of 200 | time | TOAST reads |
+| --- | --- | --- |
+| `document->'metrics'` | 141.1 ms | 7 127 |
+| the `metrics` column | **1.7 ms** | **262** |
+
+End to end over HTTP, the previous build running beside this one against the
+same 5 000-recording database:
+
+| `GET /recordings/progress` | before | after |
+| --- | --- | --- |
+| default window (30), one client | 28.7 ms | **7.7 ms** |
+| `limit=200`, one client | 155.5 ms | **19.4 ms** |
+| default window, p50 at sixteen clients | 152.1 ms | **87.2 ms** |
+| default window, requests a second at sixteen | 95.6 | **161.9** |
+| `limit=200`, p50 at sixteen clients | 731.5 ms | **303.4 ms** |
+| `limit=200`, requests a second at sixteen | 21.6 | **53.4** |
+
+**The response is identical, and that was checked rather than reasoned about**:
+both builds were asked for the same 200-recording window and returned the same
+bytes.
+
+**Generated, not written.** `pitch_point_count` (10.12) is a column the
+repository fills, and it stays honest only because a rule — *write it from the
+same object in the same statement* — is stated in three places and followed. It
+had already been got wrong once, by a `model_copy(update=…)` that skipped the
+validator deriving it. This column has no such rule to break: PostgreSQL
+computes it from the document in the same write, no INSERT mentions it, there is
+no backfill, and an INSERT that tries to give it a value of its own is rejected
+by the server. A test asserts each of those.
+
+Two costs are real and are recorded rather than glossed:
+
+- **The migration rewrites the table.** A generated column cannot be added with
+  a default, so every row is rewritten: **18 seconds** for the 1 131 MB table
+  here. Migrations run at startup under an advisory lock, so a deployment with a
+  large `audio_analyses` should expect one boot to take that long.
+- **The column is a second copy of ~600 bytes per row** — 4 MB across 5 000
+  recordings, against the 1 131 MB the documents already occupy. It is a
+  physical projection maintained by the database, not a denormalised
+  *measurement*: nothing derives a number and stores it, so 10.8's rule that
+  every analysis ever completed stays answerable from its document is untouched.
+
+**What is left.** `GET /identity` is now the only read whose cost grows with how
+much one owner has: 6.1 ms at 50 recordings and 12.0 ms at 5 000. It answers
+"what would I lose?" with three counts, and it gets them by joining every
+recording to every analysis and sorting the result for three `count(DISTINCT)`s —
+9 ms of the 12 is that sort. It is recorded here rather than fixed, exactly as
+10.15 recorded the comparison read; 10.19 fixed it, and found that one of the
+three counts had been answering a different question from the one the screen
+asks.
+
+### The last read that grows with a history, and what `psql` got wrong (10.19)
+
+10.18 ended by naming `GET /identity` as the only read whose cost grows with how
+much one owner holds, and recorded it rather than fixing it. This step is that
+fix, and the defect it turned up on the way is worth more than the milliseconds.
+
+**The number was wrong.** The identity panel's third count, `ai_feedback`, was
+`count(DISTINCT a.id) FILTER (WHERE a.feedback_status = 'completed')` — a count
+of *analyses*. Both places it reaches a reader are sentences about recordings:
+
+> This key holds 5 recordings, 3 measured, **2 with generated feedback**.
+
+> This permanently deletes 5 recordings, every measurement taken from them, and
+> the stored audio itself. **2 of them** carry generated feedback, which cannot
+> be recovered.
+
+A recording may be analysed more than once, and feedback may be generated on
+more than one of those runs. One recording with two feedback runs made the first
+sentence add a fourth item to a list of three, and the second sentence say that
+one recording included two of them. It is the same rule the rest of the product
+is built on — do not state what the data does not support — applied to a count
+instead of a measurement, and it is the same defect 10.13 found in a list.
+
+All three numbers count **recordings** now, and cannot exceed one another.
+
+**The two stores disagreed, in two different ways, and nothing had asked.** SQL
+counted feedback *runs*; the in-memory double counted recordings whose **latest**
+analysis carried feedback. The double was wrong about the second number too: a
+recording measured yesterday and re-analysed a minute ago read as unmeasured
+while the new run was pending, because it looked at the newest analysis instead
+of all of them. Two contract tests now hold both stores to the same answer for
+the shape that separates them — a recording analysed three times — and both
+failed before this step, differently.
+
+**The rewrite, and the measurement that chose it.** Folding each recording's
+analyses to two booleans in a lateral leaves the outer query one row per
+recording to count, so no `DISTINCT` is undoing a multiplication the statement
+just performed. Measured through a pooled connection against an owner holding
+5 000 recordings in a database of 201 owners:
+
+| form | 5 000 recordings | 25 recordings |
+| --- | --- | --- |
+| join, three `count(DISTINCT …)` (before) | 16.1 ms | 0.32 ms |
+| **lateral `bool_or`** (after) | **11.7 ms** | 0.31 ms |
+| three counts with `EXISTS` | 20.1 ms | 0.71 ms |
+
+End to end over HTTP, both builds against the same database: `GET /identity`
+**23.6 → 19.6 ms** at one client. At sixteen concurrent clients it does not move
+(128.9 against 128.8 requests a second): the saving is in a PostgreSQL backend,
+and under that much concurrency the endpoint is waiting on other things.
+
+**`psql` ranked those three the other way round, and `psql` was wrong.** With
+the owner id written into the statement as a literal, PostgreSQL plans the query
+afresh every time and can use the owner's real selectivity. A pooled application
+connection does not get that: psycopg prepares any statement it runs five times,
+and the plan is then chosen once for a parameter it has not seen. Under a custom
+plan the lateral is the *slowest* of the three (15.9 ms against 11.5 for the
+shipped join); under the prepared plan it is the fastest. Timing a query in
+`psql` and shipping the winner is therefore not a valid method here, and this is
+the first step in the sequence where it would have produced the wrong answer.
+
+Preparing is not itself the problem, and turning it off would be a bad trade —
+measured on the same connection, custom plan against prepared:
+
+| statement | custom | prepared | |
+| --- | --- | --- | --- |
+| the identity summary | 10.5 ms | 16.6 ms | **1.59× worse** |
+| the timeline fields (`/notes`) | 14.3 ms | 9.9 ms | 0.69× |
+| the history list | 0.73 ms | 0.54 ms | 0.74× |
+| the progress window of 30 | 1.50 ms | 1.23 ms | 0.82× |
+
+Every statement in the product is *faster* prepared except this one, which is
+why the fix is a query whose plan does not depend on knowing the owner rather
+than a pool setting. What made this one different is that its cost is dominated
+by how much the owner has — from 25 rows to 5 000 in the same database — which
+is exactly the thing a plan chosen for an unknown parameter cannot know.
+
+### A policy on responses that are data (10.21)
+
+10.20 ended with a table of four outstanding items, each said to be waiting on a
+decision. One of them was not: "a Content-Security-Policy on API responses",
+whose stated reason was that `limitations.md` recorded its absence. A record is
+not a decision, and nothing about this one needs a product answer.
+
+10.5 put three security headers at the edge and 10.9 gave the web app a
+nonce-based policy. Responses from `/api/` had neither of their own. What stood
+between an API response and a browser treating it as a document was
+`X-Content-Type-Options: nosniff` alone — sound, but a single line with nothing
+behind it.
+
+Every response the API sends now carries:
+
+```
+default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; sandbox
+```
+
+Every directive says the same thing a different way: a response that is data has
+no business loading, framing, submitting or executing anything. `sandbox` is the
+one that matters if the others are bypassed — it applies only when a browser
+*does* treat the response as a document, and it then gives that document a
+unique origin with no scripts, no forms and no plugins. Unlike the web app's
+policy this one is a constant, and for the opposite reason: there is no nonce to
+mint, because nothing here is a document with scripts in it.
+
+**Set on the response, in the application, not at the edge.** The policy then
+travels with the API to any deployment, is exercised by the test suite rather
+than by a proxy nobody runs locally, and reaches responses no route produced —
+the `FILE_TOO_LARGE` refusal `MaxBodySizeMiddleware` writes before routing, and
+a 404. The middleware is registered last so it runs outermost, which is what
+makes that true. nginx still sets no policy of its own, so the two can never
+intersect into one nobody designed; `test_deployment.py` has asserted that since
+10.9 and now says why twice.
+
+**What it buys was measured, not asserted.** Framing an API response from a page
+carrying no policy of its own, in Chromium:
+
+| | iframe |
+| --- | --- |
+| before | **loaded**, no refusal, no policy header |
+| after | **refused** — "an ancestor violates the following Content Security Policy directive: `frame-ancestors 'none'`" |
+
+Through the shipped proxy that was already refused, by `X-Frame-Options: DENY`
+from 10.5. What changed is that it no longer depends on the edge: the
+application refuses on its own, wherever it is run.
+
+**Verified in a browser, as 10.9's precedent requires.** The real web app was
+loaded against an API sending the policy: five API calls, all `200`, **0 CSP
+violations, 0 console errors, 0 page errors**, and the page rendered. `/docs`
+and `/redoc` were checked for refusals too and had none — they fail to load
+Swagger UI and ReDoc *in this sandbox* because its egress proxy blocks
+`cdn.jsdelivr.net`, which is a network error rather than a policy one, and the
+distinction was checked rather than assumed by listening for
+`securitypolicyviolation` and finding zero across all five pages.
+
+The exemptions are read from the application — `app.docs_url`, `app.redoc_url`
+and the Swagger OAuth redirect — rather than written into the middleware, so
+moving or disabling a documentation UI cannot leave a stale path exempting
+nothing.
 
 ### Concurrency belongs to the database
 
@@ -1050,6 +1389,53 @@ cd frontend && npm run lint && npm run typecheck && npm run build
 
 `mypy` runs in strict mode over `app/`. `ruff` lints and formats both `app/` and
 `tests/`.
+
+### The checks nobody ran (10.20)
+
+Everything above had been true since Phase 0, and **nothing invoked any of it**.
+There was no `.github` directory. Nineteen steps of Phase 10 rest on a suite
+that ran when somebody remembered to type one command.
+
+The second half of the finding is why a workflow alone would not have been
+enough. Three runs of the same suite, and what each is worth:
+
+| run | result | what it proves about the SQL |
+| --- | --- | --- |
+| no database | 1 584 passed, **187 skipped**, green | nothing |
+| this container, with a database | 1 769 passed, 2 skipped | everything except two permission tests root cannot exercise |
+| CI: not root, with a database | **1 782 passed, 0 skipped** | everything |
+
+185 of those 187 skips are the database gate, and they are not a random 185:
+they are the whole PostgreSQL half of the contract suite (99), every migration
+and statement-shape assertion (52), the shared rate limiter (25), the filesystem
+import (7) and the concurrency tests (2) — which is where nearly all of Steps
+10.11 to 10.19 lives. A CI job that forgot `TEST_DATABASE_URL` would look
+identical to one that did not: same command, same green tick.
+
+`test_database.py` had claimed such a run "is not skipped quietly in CI: a run
+with no database says so in the skip reason". A reason printed in a log nothing
+reads is exactly what quiet means, and there was no CI to read it. So the run
+itself now refuses: with `REQUIRE_DATABASE_TESTS=1`, a missing `TEST_DATABASE_URL`
+is a `UsageError` before collection rather than 185 skips and a success. It is
+stated by whoever starts the run rather than sniffed from the environment, so a
+contributor is never surprised by it, and a checkout with no database still runs
+the other 1 584 tests exactly as before.
+
+`tests/test_ci.py` holds the workflow to what makes it worth running — that it
+sets both variables, that it runs `scripts/check.sh` rather than restating the
+checks, that its PostgreSQL major version is the one `docker-compose.yml`
+deploys and its Python is the one `backend/Dockerfile` runs — for the same
+reason `test_deployment.py` holds the compose file to a database with no
+published port. Each was confirmed by mutation: deleting
+`REQUIRE_DATABASE_TESTS`, moving to `postgres:15`, and inlining the commands
+each fail exactly one test.
+
+The workflow was not written and hoped for. Its conditions were reproduced here
+before it was committed — a database created empty, so the suite's own
+migrations have to build the schema, and the run performed as a non-root user,
+because two storage tests skip under root and CI would have been the first thing
+ever to execute them. They pass. What CI runs is a strictly larger suite than
+anything this container can produce.
 
 ## Feature allocation, Steps 7A–7M
 

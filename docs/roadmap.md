@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19), the checks nobody ran (10.20), a policy on responses that are data (10.21) |
 
 ## Phase 0 — delivered
 
@@ -694,6 +694,161 @@ Delivered in 10.16 — *the same fix, on the read that does it twice*:
   are ~6 ms and ~210 to 250. The slowest of the four is now `/pitch`, and what it
   spends its time on is the sample it genuinely returns.
 
+Delivered in 10.17 — *what several workers do to a read*:
+
+- The gap 10.11–10.16 each closed with: every number in them was taken on **one
+  worker**, while 10.10 had already made several a supported shape. Taken again
+  across 1, 2 and 4 workers on the same rig, at sixteen concurrent clients, the
+  reads **scale, and the scaling stops where the cores do**: the second worker
+  is worth 1.4×–2.1× on every read, the third and fourth together 1.05×–1.35×
+  more, because four API processes and PostgreSQL are then sharing four cores.
+  `GET /recordings` 196 → 554 requests a second, `/pitch` 55 → 129, `/notes`
+  81 → 149, compare 64 → 98. The poll the browser makes while a measurement
+  runs, with three clients holding a note breakdown open: **31.0 ms → 12.2 ms**.
+- Nothing about a read was changed to get that, and that is the result: after
+  10.15 and 10.16 the reads are PostgreSQL's work plus a small fold, and work
+  that has already left the event loop parallelises across processes for free.
+- **The defect several workers exposed is in the pool, not in a read.**
+  `db/pool.py` opened up to ten connections per process behind a comment saying
+  "this is one API process" — true when it was written, false since 10.10. What
+  PostgreSQL sees is `workers × 10` against the 97 a default server grants.
+  Measured at twelve workers: **97 of 97 taken**, `psql` refused at the socket,
+  `too many clients` in the log continuously, and no thirteenth worker or
+  `cleanup_identities` run able to connect. The API's own requests did not fail
+  — psycopg queues a caller that cannot get a connection — so from outside, one
+  application quietly taking the whole database looked like latency.
+- The default is **four**, and the sweep says why: below four costs real
+  throughput (a pool of 1 halves the comparison read), at four it costs the
+  comparison read ~7% at sixteen concurrent clients on a single worker and
+  everything else nothing, and at four workers a pool of four and a pool of ten
+  are the same throughput on 16 connections against 40. Ten left room for nine
+  processes; four leaves room for twenty-four. The same load that took the
+  server down serves **82.8 requests a second against 87.4** through the fixed
+  default — the ceiling that broke it was never being used.
+- `DB_POOL_MAX_SIZE` and `DB_POOL_MIN_SIZE` are configuration, because a
+  per-process share of a server-wide limit depends on the deployment. Startup
+  logs the arithmetic an operator scaling workers needs and cannot derive from
+  the API's own settings — the pool size, the server's `max_connections`, and
+  how many processes of this size fit — and refuses a pool too large to fit even
+  once, the way 10.10 refuses `RATE_LIMIT_BACKEND=database` with no
+  `DATABASE_URL`.
+- Connections now say who holds them: `application_name` is `vocallens-api`, or
+  `vocallens-maintenance` for `cleanup_identities` and `import_filesystem`,
+  which also ask for **one** connection each — they are sequential, and the
+  moment they matter is the moment the API's workers are holding everything.
+  `pg_stat_activity` on an exhausted server is a list of culprits rather than a
+  list of rows.
+- Ten new tests. The ceiling the whole step rests on is counted rather than
+  assumed — twelve callers against a pool of three must find exactly three
+  backends, and "at most three" would have passed while counting nothing. The
+  budget is read from the server rather than from a comment, an oversized pool
+  is refused *and* releases what it opened, and startup is asserted to build the
+  pool the settings describe, because a wrongly sized pool serves requests
+  perfectly well. Two existing suites now state their own pool size: they open
+  six and eight connections *simultaneously* to make a race a race, which is a
+  different requirement from a worker sharing a server.
+- **What is left, and it is unchanged by this step**: a deployment that scales
+  workers must still move `RATE_LIMIT_BACKEND` to `database` by hand, and one
+  left on `memory` still gets a counter per worker. Everything above was
+  measured on one host with PostgreSQL sharing the workers' four cores, so where
+  the scaling flattens belongs to the rig, not the code.
+
+Delivered in 10.18 — *what a hundred times the data does to a read*:
+
+- The other gap every step from 10.11 to 10.17 declared: the speech pipeline and
+  the progress query had never been measured at scale. Measured here against one
+  owner holding **5 000 five-minute recordings**, each with a completed audio
+  analysis of 12 931 points and a completed speech analysis — a 1 131 MB
+  `audio_analyses` table — beside the 50-recording rig 10.12 used.
+- **Both are flat, and so is every other read**: the speech read 6.2 → 6.1 ms,
+  the history list 6.4 → 6.8 ms, `GET /audio-analysis` 7.3 → 7.7 ms, the
+  progress query 28.9 → 28.0 ms. A hundred times the rows changes nothing about
+  how many rows a query bounded by an index actually touches.
+- **What is not flat is the window, and the window is a documented parameter.**
+  `GET /recordings/progress` takes `limit` up to 200, and at 200 it cost
+  155.5 ms — 200 rows each decompressing a 253 kB document to read ~600 bytes of
+  metrics out of it. That is precisely the one decompression per row 10.12 had
+  left, having written that denormalising was "a schema change worth making only
+  when a measurement demands it". This is the measurement.
+- Migration 0006 makes the projection a stored generated column —
+  `metrics JSONB GENERATED ALWAYS AS (document -> 'metrics') STORED` — and the
+  lateral selects it. **The statement no longer mentions `document` at all**,
+  which is the strongest form of 10.12's rule: not "touch it once per row" but
+  "do not touch it". In PostgreSQL, a window of 200: **141.1 ms and 7 127 TOAST
+  reads → 1.7 ms and 262**.
+- End to end over HTTP, the previous build running beside this one on the same
+  database: the default window **28.7 → 7.7 ms** and 95.6 → 161.9 requests a
+  second at sixteen clients; `limit=200` **155.5 → 19.4 ms** and 21.6 → 53.4.
+  The progress query is no longer the slowest read that never touches a
+  timeline — it now sits in the same 6–8 ms band as the history list and the
+  speech read. **The response is identical, checked byte for byte** across both
+  builds.
+- **Generated rather than written, and that is the point.** `pitch_point_count`
+  (10.12) is a column the repository fills, honest only because a rule is stated
+  in three places and followed — and that rule had already been got wrong once,
+  by a `model_copy(update=…)` that skipped the validator deriving it. This column
+  has no rule to break: PostgreSQL computes it in the same write, no INSERT
+  mentions it, there is no backfill, and an INSERT that tries to supply one is
+  refused by the server. Three tests, one per clause.
+- Two costs recorded rather than glossed: the migration **rewrites the table**
+  (18 s for 1 131 MB, under the startup advisory lock, once), and the column is a
+  second copy of ~600 bytes per row (4 MB across 5 000 recordings). It is a
+  physical projection the database maintains, not a stored *measurement* —
+  nothing derives a number and keeps it, so 10.8's rule that every analysis ever
+  completed stays answerable from its document is untouched.
+- **What is left was measured, not assumed.** `GET /identity` is now the only
+  read whose cost grows with how much one owner holds — 6.1 ms at 50 recordings
+  and 12.0 ms at 5 000 — because it answers "what would I lose?" by joining every
+  recording to every analysis and sorting the result for three `count(DISTINCT)`s.
+  Nine of those twelve milliseconds are the sort. Recorded here rather than
+  fixed, the way 10.15 recorded the comparison read.
+
+Delivered in 10.19 — *the last read that grows with a history, and a number that
+was answering a different question*:
+
+- 10.18 named `GET /identity` as the only read whose cost grows with what one
+  owner holds and recorded it rather than fixing it. This step is that fix, and
+  **the defect it turned up on the way matters more than the milliseconds**.
+- The identity panel's `ai_feedback` counted *analyses* whose feedback had
+  completed. Both places it reaches a reader are sentences about **recordings**:
+  "this key holds 5 recordings, 3 measured, 2 with generated feedback", and the
+  deletion confirmation's "2 of them carry generated feedback, which cannot be
+  recovered". A recording analysed twice with feedback both times made the second
+  sentence say that one recording included two of them. Same rule as everywhere
+  else in this product — do not state what the data does not support — and the
+  same defect 10.13 found in a list. All three counts are counts of recordings
+  now, and none can exceed another.
+- **The two stores disagreed about it, in two different ways, and nothing had
+  asked.** SQL counted feedback runs; the in-memory double counted recordings
+  whose *latest* analysis carried feedback. The double was also wrong about
+  "measured": a recording analysed yesterday and re-analysed a minute ago read as
+  unmeasured while the new run was pending. Two contract tests now hold both
+  stores to the same answer on the shape that separates them, and both failed
+  before this step — differently.
+- The rewrite folds each recording's analyses to two booleans in a lateral, so
+  the outer query counts one row per recording and no `DISTINCT` is undoing a
+  multiplication the statement just performed. Through a pooled connection
+  against an owner holding 5 000 recordings in a database of 201 owners:
+  **16.1 ms → 11.7 ms**, and 0.32 → 0.31 ms for an owner holding 25. End to end
+  `GET /identity` goes **23.6 → 19.6 ms** at one client, and does not move at
+  sixteen, where the endpoint is waiting on other things.
+- **`psql` ranked the candidates the other way round, and `psql` was wrong.**
+  With the owner written in as a literal, PostgreSQL plans afresh and can use
+  that owner's real selectivity; a pooled application connection cannot, because
+  psycopg prepares any statement it runs five times and the plan is then chosen
+  for a parameter it has not seen. Under a custom plan this lateral is the
+  *slowest* of the three candidates; under the prepared plan it is the fastest.
+  Timing a query in `psql` and shipping the winner would have picked wrong here
+  for the first time in this sequence.
+- Preparing is not the problem and turning it off would be a bad trade: measured
+  on one connection, every other statement in the product is faster prepared —
+  the timeline fields 14.3 → 9.9 ms, the history list 0.73 → 0.54, a progress
+  window 1.50 → 1.23 — and only this one is worse (10.5 → 16.6). What made it
+  different is that its cost is dominated by how much the owner has, from 25 rows
+  to 5 000 in the same database, which is exactly what a plan chosen for an
+  unknown parameter cannot know. So the fix is a query whose plan does not depend
+  on knowing the owner, not a pool setting.
+
 **Phase 10 is not complete.** What 10.2 deliberately did *not* build: passwords,
 email, OAuth, sessions, password reset, email verification, MFA, account
 recovery, rate limiting, email delivery and account merging. Passwords were
@@ -711,18 +866,30 @@ and found nothing worth changing, and measured the history read at 5 000
 recordings, where paging is flat with depth. 10.14 took every read under
 concurrent load — the gap 10.11–10.13 left — found that only the timeline reads
 fail to scale, and fixed the one of the three that was building points it threw
-away. What is still unmeasured: the speech pipeline and the progress query at a
-hundred times the data, and everything under concurrency has been measured on
-**one worker**; the shared rate-limit counter that makes several of them
-supported landed in 10.10, but no read has been measured across them. 10.15 took the first of the two
+away. 10.15 took the first of the two
 options 10.14 left open for `/notes` and `/key` — the fields a fold reads rather
 than the frames — which took them from ~135 ms to ~38 ms and from ~8 to ~65
 requests a second at c=16, and found the read that was then slowest:
 `GET /recordings/compare`, which folded two whole timelines. 10.16 gave that read
 the same fix, taking it from 137.5 to 36.0 ms and from 7.3 to 63.1 requests a
 second at c=16, after which no read stands out: the four built on a timeline sit
-within one band and the three that are not are ~6 ms. The shared rate-limit counter
-landed in 10.10. Error pages landed
+within one band and the three that are not are ~6 ms. 10.17 closed the gap every
+one of those steps had declared — they were all measured on one worker — by
+taking the same reads across 1, 2 and 4 of them: they scale until the cores run
+out, no read needed changing, and what several workers did expose was a pool
+sized per process for a deployment that had one, which at twelve workers took
+every connection the server had. 10.18 answered the other question those steps
+kept leaving — the speech pipeline and the progress query at a hundred times the
+data — and found both flat: what was not flat was the progress *window*, whose
+maximum spent 155 ms decompressing a document per row for 600 bytes of metrics,
+which migration 0006 makes a generated column and 10.12 had said it would take a
+measurement to justify. 10.19 took the last read 10.18 had named — the identity
+summary, the only one whose cost grows with what one owner holds — and found on
+the way that one of its three counts had been counting analyses where every
+sentence it is rendered into is about recordings, so a re-analysed recording
+could make the deletion warning claim one recording included two of them. The
+shared rate-limit counter landed in 10.10, and a deployment scaling workers must
+still turn it on by hand. Error pages landed
 in 10.4; the proxy, the internal network and the edge body cap landed in 10.5;
 retention of *empty* identities landed in 10.6, and retention of identities that
 hold recordings remains unspecified and unbuilt. The Content-Security-Policy
@@ -732,3 +899,139 @@ reason recorded in [limitations.md](limitations.md).
 The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while
 the entire existing owner-scoped product continues to work unchanged.
+
+Delivered in 10.20 — *the checks nobody ran*:
+
+- 10.19 closed with "the next step in this repository is a decision, not a
+  commit". **That was wrong, and it was wrong in the way this project is meant
+  to catch**: it listed what the roadmap already knew was outstanding instead of
+  auditing for what nothing had written down. One `ls` would have found it —
+  there was no `.github` directory. Nineteen steps of Phase 10 rest on a suite
+  that ran when somebody remembered to type one command.
+- **A skip is a silent pass, and this one was 185 tests wide.** Without
+  `TEST_DATABASE_URL` the suite reports 1 584 passed and 187 skipped, in green.
+  Those skips are not a random slice: the PostgreSQL half of the contract suite
+  (99), the migrations and statement shapes (52), the shared rate limiter (25),
+  the filesystem import (7) and the concurrency tests (2) — which is where
+  nearly all of 10.11 to 10.19 lives. A workflow that forgot the variable would
+  have looked exactly like one that did not.
+- `.github/workflows/checks.yml` runs `scripts/check.sh` — the same command a
+  contributor runs, not a second list of checks to keep in step — on every push
+  and pull request, against a `postgres:16-alpine` service, with
+  `TEST_DATABASE_URL` and `REQUIRE_DATABASE_TESTS=1` set.
+- The run now **refuses to be quietly incomplete**: with
+  `REQUIRE_DATABASE_TESTS=1` a missing DSN is a `UsageError` before collection
+  rather than 185 skips and a success. `test_database.py` had claimed a run
+  without a database "is not skipped quietly in CI: a run with no database says
+  so in the skip reason" — a reason in a log nothing reads is what quiet means,
+  and there was no CI to read it. A checkout with no database still runs its
+  1 584 tests exactly as before; the flag is set by whoever starts a run that is
+  *meant* to be complete, never sniffed from the environment.
+- `tests/test_ci.py` holds the workflow to what makes it worth having — both
+  variables set, `scripts/check.sh` invoked rather than restated, the PostgreSQL
+  major version `docker-compose.yml` deploys, the Python `backend/Dockerfile`
+  runs — the way `test_deployment.py` holds the compose file to an unpublished
+  database port. Confirmed by mutation: deleting `REQUIRE_DATABASE_TESTS`,
+  dropping to `postgres:15` and inlining the commands each fail exactly one
+  test, and no other.
+- **The workflow was reproduced before it was committed rather than pushed and
+  watched.** Its two conditions that differ from any run this project has done
+  were both exercised: a database created *empty*, so the suite's own migrations
+  build the schema, and the whole suite run as a **non-root user**, because two
+  storage tests skip under root and CI would have been the first thing ever to
+  execute them. Result: **1 782 passed, 0 skipped** — thirteen more tests than
+  the best run available in this container, and no skips at all.
+
+Delivered in 10.21 — *a policy on responses that are data*:
+
+- 10.20's closing table listed four outstanding items and said each was waiting
+  on a decision. **One of them was not.** "A Content-Security-Policy on API
+  responses" was justified only by the fact that `limitations.md` recorded its
+  absence, and a record is not a decision. That is the same failure 10.20 itself
+  had just diagnosed, one step later and one row down.
+- Every API response now carries `default-src 'none'; frame-ancestors 'none';
+  base-uri 'none'; form-action 'none'; sandbox`. Every directive says the same
+  thing a different way: a response that is data has no business loading,
+  framing, submitting or executing anything. `sandbox` is the one that still
+  holds if the others are bypassed — it applies when a browser *does* treat the
+  response as a document, and gives it a unique origin with no scripts, forms or
+  plugins. `X-Content-Type-Options: nosniff` was the only thing standing there
+  before, and it is still the first line; this is the second.
+- **Set on the response, in the application rather than at the edge**, so it
+  travels with the API to any deployment, is exercised by the suite rather than
+  by a proxy nobody runs locally, and reaches responses no route produced: the
+  `FILE_TOO_LARGE` refusal written before routing, and a 404. Registered
+  outermost, which is what makes that true. nginx still sets none, so two
+  policies can never intersect into one nobody designed.
+- **What it buys was measured.** Framing an API response in Chromium from a page
+  carrying no policy of its own: before, the iframe **loaded** with no refusal;
+  after, "Refused to frame … because an ancestor violates the following Content
+  Security Policy directive: `frame-ancestors 'none'`". Through the shipped
+  proxy that was already refused by `X-Frame-Options: DENY` from 10.5 — what
+  changed is that it no longer depends on the edge.
+- **Verified in a browser, as 10.9's precedent requires.** The real web app
+  against an API sending the policy: five API calls, all 200, **0 CSP
+  violations, 0 console errors, 0 page errors**, page rendered. `/docs` and
+  `/redoc` are exempt — they are HTML that loads a CDN, and the shipped
+  deployment routes neither — and their failure to render *in this sandbox* was
+  checked to be its egress proxy blocking `cdn.jsdelivr.net` rather than a
+  policy refusal, by listening for `securitypolicyviolation` and finding zero
+  across all five pages.
+- The exemptions are read from the application rather than written into the
+  middleware, so moving or disabling a documentation UI cannot leave a stale
+  path exempting nothing.
+
+## Where this leaves the project
+
+**The performance thread that ran from 10.11 to 10.19 is finished**, in the sense
+that it can name what it did not find rather than what it has not looked at. Every
+read in the product has now been measured at one client and at sixteen, across
+one, two and four workers, at fifty recordings and at five thousand, and with a
+realistic spread of re-analysed recordings and generated feedback. No read stands
+out: the four built on a pitch timeline sit in one band, and the rest are
+single-digit milliseconds. Three things that *were* found on the way are worth separating
+from the milliseconds, because none of them was a performance defect: a page of
+history describing itself as the whole history (10.13), a connection budget sized
+for a deployment that no longer existed (10.17), and a count of analyses rendered
+into a sentence about recordings (10.19).
+
+**This section said "the next step is a decision, not a commit", and 10.20 is
+what that claim was worth.** It was assembled from the outstanding items the
+roadmap already listed, which is not an audit — it can only ever find what
+somebody has already written down. What it missed was that nothing ran the
+checks: no `.github` directory, no automation of `scripts/check.sh`, and a suite
+that silently skips its 185 SQL tests when no database is configured. The lesson
+is 7P's and 10.7's, and it is now recorded twice: **audit the repository, not the
+list of known gaps.** What follows is therefore what remains *after* an audit
+that went looking, and it should be read as the best current answer rather than
+a closed one.
+
+**It was not closed, either.** The first version of the table below had four
+rows, and one of them — a Content-Security-Policy on API responses — was listed
+as waiting on a decision when its only justification was that `limitations.md`
+recorded its absence. 10.21 built it. Three rows remain, and what separates them
+from that one is that each names a question somebody outside this repository has
+to answer.
+
+**What Phase 10 still needs is not blocked on engineering.** Four things remain,
+and each is waiting on a decision nobody has taken rather than on work nobody has
+done. The last of them was not on any list until an audit went looking for what
+was not written down, which is the third time that has happened in three steps:
+
+| Outstanding | What it is waiting on |
+| --- | --- |
+| Real credentials — passwords, email, OAuth, sessions, reset, verification, MFA, account merging | A product decision about what an account *is* here. 10.2 rejected passwords for its own slice on the evidence: adding them while deferring reset and verification is worse than 128 random bits, not better. |
+| TLS termination and HSTS | A deployment decision. The proxy speaks HTTP and claims no HSTS deliberately; a certificate belongs to whoever operates the deployment, and claiming HSTS from a server that cannot serve TLS would break the site. |
+| Retention of identities that **hold recordings** | A product decision. 10.6 reclaims only identities that own nothing, because deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
+| A licence | The owner's decision, and found by the same audit that found 10.20: this repository is public and carries no `LICENSE` file, so nobody may use it and nobody had written that down. Which licence is not an engineering question. |
+
+**Phase 9 is in the same position and has been since 10.7**: audited, specified,
+and waiting on [one question](phase-9-specification.md#16-unresolved-product-decisions)
+— where a reference song comes from. Four options are analysed there and none is
+chosen, because an engineer choosing would be inventing the requirement.
+
+The honest summary is that every remaining item on this list is waiting on a
+decision. What 10.20 showed is that "this list" and "what is left" are not the
+same thing, so the summary worth acting on is the weaker one: **nothing left on
+the list can be built without an answer, and the list is only as good as the last
+audit.**
