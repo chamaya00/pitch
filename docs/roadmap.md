@@ -899,3 +899,36 @@ reason recorded in [limitations.md](limitations.md).
 The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while
 the entire existing owner-scoped product continues to work unchanged.
+
+## Where this leaves the project
+
+**The performance thread that ran from 10.11 to 10.19 is finished**, in the sense
+that it can name what it did not find rather than what it has not looked at. Every
+read in the product has now been measured at one client and at sixteen, across
+one, two and four workers, at fifty recordings and at five thousand, and with a
+realistic spread of re-analysed recordings and generated feedback. No read stands
+out: the four built on a pitch timeline sit in one band, and the rest are
+single-digit milliseconds. Three things that *were* found on the way are worth separating
+from the milliseconds, because none of them was a performance defect: a page of
+history describing itself as the whole history (10.13), a connection budget sized
+for a deployment that no longer existed (10.17), and a count of analyses rendered
+into a sentence about recordings (10.19).
+
+**What Phase 10 still needs is not blocked on engineering.** Four things remain,
+and each is waiting on a decision nobody has taken rather than on work nobody has
+done:
+
+| Outstanding | What it is waiting on |
+| --- | --- |
+| Real credentials — passwords, email, OAuth, sessions, reset, verification, MFA, account merging | A product decision about what an account *is* here. 10.2 rejected passwords for its own slice on the evidence: adding them while deferring reset and verification is worse than 128 random bits, not better. |
+| TLS termination and HSTS | A deployment decision. The proxy speaks HTTP and claims no HSTS deliberately; a certificate belongs to whoever operates the deployment, and claiming HSTS from a server that cannot serve TLS would break the site. |
+| Retention of identities that **hold recordings** | A product decision. 10.6 reclaims only identities that own nothing, because deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
+| A Content-Security-Policy on API responses | Recorded in [limitations.md](limitations.md). |
+
+**Phase 9 is in the same position and has been since 10.7**: audited, specified,
+and waiting on [one question](phase-9-specification.md#16-unresolved-product-decisions)
+— where a reference song comes from. Four options are analysed there and none is
+chosen, because an engineer choosing would be inventing the requirement.
+
+The honest summary is that the next step in this repository is a decision, not a
+commit.
