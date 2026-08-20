@@ -188,6 +188,23 @@ Or run everything at once:
 ./scripts/check.sh
 ```
 
+**With a database, or the SQL is not checked.** The PostgreSQL suites skip when
+`TEST_DATABASE_URL` is unset, and that is 185 tests — the whole PostgreSQL half
+of the contract suite, every migration, every statement-shape assertion, the
+shared rate limiter and the connection budget. A run without one is worth having
+and is not a run that has checked the repository's statements:
+
+```bash
+# A scratch database. The suites TRUNCATE between tests, so never a real one.
+createdb vocallens_test
+TEST_DATABASE_URL=postgresql://localhost/vocallens_test ./scripts/check.sh
+```
+
+A run that must not skip them sets `REQUIRE_DATABASE_TESTS=1`, which turns a
+missing `TEST_DATABASE_URL` into a failed run rather than 185 quiet skips.
+[`.github/workflows/checks.yml`](.github/workflows/checks.yml) sets both and runs
+this same script on every push and pull request.
+
 ## Configuration
 
 All configuration comes from the environment; see [`.env.example`](.env.example).

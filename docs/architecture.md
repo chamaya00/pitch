@@ -1328,6 +1328,53 @@ cd frontend && npm run lint && npm run typecheck && npm run build
 `mypy` runs in strict mode over `app/`. `ruff` lints and formats both `app/` and
 `tests/`.
 
+### The checks nobody ran (10.20)
+
+Everything above had been true since Phase 0, and **nothing invoked any of it**.
+There was no `.github` directory. Nineteen steps of Phase 10 rest on a suite
+that ran when somebody remembered to type one command.
+
+The second half of the finding is why a workflow alone would not have been
+enough. Three runs of the same suite, and what each is worth:
+
+| run | result | what it proves about the SQL |
+| --- | --- | --- |
+| no database | 1 584 passed, **187 skipped**, green | nothing |
+| this container, with a database | 1 769 passed, 2 skipped | everything except two permission tests root cannot exercise |
+| CI: not root, with a database | **1 782 passed, 0 skipped** | everything |
+
+185 of those 187 skips are the database gate, and they are not a random 185:
+they are the whole PostgreSQL half of the contract suite (99), every migration
+and statement-shape assertion (52), the shared rate limiter (25), the filesystem
+import (7) and the concurrency tests (2) — which is where nearly all of Steps
+10.11 to 10.19 lives. A CI job that forgot `TEST_DATABASE_URL` would look
+identical to one that did not: same command, same green tick.
+
+`test_database.py` had claimed such a run "is not skipped quietly in CI: a run
+with no database says so in the skip reason". A reason printed in a log nothing
+reads is exactly what quiet means, and there was no CI to read it. So the run
+itself now refuses: with `REQUIRE_DATABASE_TESTS=1`, a missing `TEST_DATABASE_URL`
+is a `UsageError` before collection rather than 185 skips and a success. It is
+stated by whoever starts the run rather than sniffed from the environment, so a
+contributor is never surprised by it, and a checkout with no database still runs
+the other 1 584 tests exactly as before.
+
+`tests/test_ci.py` holds the workflow to what makes it worth running — that it
+sets both variables, that it runs `scripts/check.sh` rather than restating the
+checks, that its PostgreSQL major version is the one `docker-compose.yml`
+deploys and its Python is the one `backend/Dockerfile` runs — for the same
+reason `test_deployment.py` holds the compose file to a database with no
+published port. Each was confirmed by mutation: deleting
+`REQUIRE_DATABASE_TESTS`, moving to `postgres:15`, and inlining the commands
+each fail exactly one test.
+
+The workflow was not written and hoped for. Its conditions were reproduced here
+before it was committed — a database created empty, so the suite's own
+migrations have to build the schema, and the run performed as a non-root user,
+because two storage tests skip under root and CI would have been the first thing
+ever to execute them. They pass. What CI runs is a strictly larger suite than
+anything this container can produce.
+
 ## Feature allocation, Steps 7A–7M
 
 Where each capability lives, and what it is *not*. Read the "Not" column as

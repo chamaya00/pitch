@@ -15,7 +15,7 @@ tests, error states, lint, type checks and documentation are all in place.
 | 7 | User history: users, recordings, analyses, comparison, progress chart | ✅ Complete |
 | 8 | Melodic key estimation (scope resolved in 10.8) | ✅ Complete — domain (1), service (2), API (3), UI (4), performance and mutation (5), documentation (6). [phase-8-specification.md](phase-8-specification.md) |
 | 9 | Song compatibility: range overlap, difficulty, transpose suggestions | **Blocked** — audited, specified, and waiting on one product decision: where a reference song comes from. Nothing built. [phase-9-specification.md](phase-9-specification.md) |
-| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19) |
+| 10 | Production polish: auth, security hardening, error pages, performance, deployment | Started — identity portability and deletion (7P), credentials attached to the owner (10.2), rate limiting (10.3), error boundaries (10.4), edge proxy (10.5), identity retention (10.6), Content-Security-Policy (10.9), a rate-limit counter every worker shares (10.10), reads that stop paying for the pitch timeline (10.11), one decompression per row rather than one per expression (10.12), a history page that says it is a page (10.13), the reads that do not scale and the one that stopped needing to (10.14), the fields a fold reads rather than the frames (10.15), the same fix on the read that does it twice (10.16), the reads across several workers and the connection budget they share (10.17), a hundred times the data and the last decompression in the progress query (10.18), the last read that grows with a history and the count that was answering a different question (10.19), the checks nobody ran (10.20) |
 
 ## Phase 0 — delivered
 
@@ -900,6 +900,48 @@ The step's success criterion was not "a login works". It was that a credential
 can resolve to an already-existing owner **without changing ownership**, while
 the entire existing owner-scoped product continues to work unchanged.
 
+Delivered in 10.20 — *the checks nobody ran*:
+
+- 10.19 closed with "the next step in this repository is a decision, not a
+  commit". **That was wrong, and it was wrong in the way this project is meant
+  to catch**: it listed what the roadmap already knew was outstanding instead of
+  auditing for what nothing had written down. One `ls` would have found it —
+  there was no `.github` directory. Nineteen steps of Phase 10 rest on a suite
+  that ran when somebody remembered to type one command.
+- **A skip is a silent pass, and this one was 185 tests wide.** Without
+  `TEST_DATABASE_URL` the suite reports 1 584 passed and 187 skipped, in green.
+  Those skips are not a random slice: the PostgreSQL half of the contract suite
+  (99), the migrations and statement shapes (52), the shared rate limiter (25),
+  the filesystem import (7) and the concurrency tests (2) — which is where
+  nearly all of 10.11 to 10.19 lives. A workflow that forgot the variable would
+  have looked exactly like one that did not.
+- `.github/workflows/checks.yml` runs `scripts/check.sh` — the same command a
+  contributor runs, not a second list of checks to keep in step — on every push
+  and pull request, against a `postgres:16-alpine` service, with
+  `TEST_DATABASE_URL` and `REQUIRE_DATABASE_TESTS=1` set.
+- The run now **refuses to be quietly incomplete**: with
+  `REQUIRE_DATABASE_TESTS=1` a missing DSN is a `UsageError` before collection
+  rather than 185 skips and a success. `test_database.py` had claimed a run
+  without a database "is not skipped quietly in CI: a run with no database says
+  so in the skip reason" — a reason in a log nothing reads is what quiet means,
+  and there was no CI to read it. A checkout with no database still runs its
+  1 584 tests exactly as before; the flag is set by whoever starts a run that is
+  *meant* to be complete, never sniffed from the environment.
+- `tests/test_ci.py` holds the workflow to what makes it worth having — both
+  variables set, `scripts/check.sh` invoked rather than restated, the PostgreSQL
+  major version `docker-compose.yml` deploys, the Python `backend/Dockerfile`
+  runs — the way `test_deployment.py` holds the compose file to an unpublished
+  database port. Confirmed by mutation: deleting `REQUIRE_DATABASE_TESTS`,
+  dropping to `postgres:15` and inlining the commands each fail exactly one
+  test, and no other.
+- **The workflow was reproduced before it was committed rather than pushed and
+  watched.** Its two conditions that differ from any run this project has done
+  were both exercised: a database created *empty*, so the suite's own migrations
+  build the schema, and the whole suite run as a **non-root user**, because two
+  storage tests skip under root and CI would have been the first thing ever to
+  execute them. Result: **1 782 passed, 0 skipped** — thirteen more tests than
+  the best run available in this container, and no skips at all.
+
 ## Where this leaves the project
 
 **The performance thread that ran from 10.11 to 10.19 is finished**, in the sense
@@ -913,6 +955,17 @@ from the milliseconds, because none of them was a performance defect: a page of
 history describing itself as the whole history (10.13), a connection budget sized
 for a deployment that no longer existed (10.17), and a count of analyses rendered
 into a sentence about recordings (10.19).
+
+**This section said "the next step is a decision, not a commit", and 10.20 is
+what that claim was worth.** It was assembled from the outstanding items the
+roadmap already listed, which is not an audit — it can only ever find what
+somebody has already written down. What it missed was that nothing ran the
+checks: no `.github` directory, no automation of `scripts/check.sh`, and a suite
+that silently skips its 185 SQL tests when no database is configured. The lesson
+is 7P's and 10.7's, and it is now recorded twice: **audit the repository, not the
+list of known gaps.** What follows is therefore what remains *after* an audit
+that went looking, and it should be read as the best current answer rather than
+a closed one.
 
 **What Phase 10 still needs is not blocked on engineering.** Four things remain,
 and each is waiting on a decision nobody has taken rather than on work nobody has
@@ -930,5 +983,8 @@ and waiting on [one question](phase-9-specification.md#16-unresolved-product-dec
 — where a reference song comes from. Four options are analysed there and none is
 chosen, because an engineer choosing would be inventing the requirement.
 
-The honest summary is that the next step in this repository is a decision, not a
-commit.
+The honest summary is that every remaining item on this list is waiting on a
+decision. What 10.20 showed is that "this list" and "what is left" are not the
+same thing, so the summary worth acting on is the weaker one: **nothing left on
+the list can be built without an answer, and the list is only as good as the last
+audit.**
