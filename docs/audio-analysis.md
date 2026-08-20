@@ -816,6 +816,18 @@ real one, and a test sweeps every component to make sure no single one of them
 can put both on the screen — the same rule this document's status banner already
 states for live pitch against analysed pitch.
 
+**What the tests would notice, measured rather than assumed.** 24 mutations
+across `live-key.ts` and the fold beside it, each required to fail a named test:
+23 caught, one confirmed equivalent — removing the tie-break from the ranking,
+which is the same mutation `key.py` documents as equivalent for the same reason.
+Five survived the first run and all five were the same blind spot: every session
+the fixtures sang was one octave wide, exactly in tune and free of silence, so
+discarding the octave, rounding to the nearest note, charging only voiced frames
+and clearing the counts on reset were unasserted. A sixth — the runner-up's own
+margin — survived because the parity table asserted the runner-up's tonic and
+mode but not its margin; the table now carries it. Those tests exist, and each
+names the mutation that produced it.
+
 **This is not validated against human singing either.** Every fixture is
 synthetic, on both sides.
 

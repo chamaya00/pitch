@@ -18,6 +18,31 @@
  * **No fixture here validates the estimator against human singing.** Every
  * profile is constructed, as on the backend, and for the same reason: there is
  * no annotated corpus of real singing in this repository.
+ *
+ * Mutation audit
+ * --------------
+ *
+ * Run by a script kept **outside** the repository — it edits source files in
+ * place, and a crash mid-run must not leave a mutated tree behind that somebody
+ * commits. 24 mutations across `live-key.ts` and the fold in `live-practice.ts`,
+ * each required to fail a named test in this suite or in `live-practice.test.ts`:
+ *
+ * | invariant | result | notes |
+ * | --- | --- | --- |
+ * | candidate scoring (5) | caught | profiles reversed, rotation inverted, correlation used as confidence, margin redefined over the next different tonic, runner-up returned |
+ * | evidence gates (4) | caught | each of the three gates dropped, and the negligible-share rule removed |
+ * | null semantics (4) | caught | reasons reported in the wrong order, evidence dropped from a refusal, an empty profile turned into twelve measured zeroes, half a key rendered as a label |
+ * | the fold (5) | caught | the octave kept, rounding down instead of to the nearest note, only held frames counted, silence charged as voiced time, the frame duration changed |
+ * | commitment (4) | caught | dwell reduced to one tick, dwell counted without requiring the same candidate, a refusal clearing the label at once, reset forgetting the pitch classes |
+ * | ranking (1) | equiv. | removing the tie-break changes no observable behaviour: the list is built in a fixed order and the sort is stable. The backend documents the same mutation the same way |
+ * | the runner-up's own margin (1) | caught | **only after the first run.** It survived, because the parity table asserted the runner-up's tonic and mode and not its margin. The table now carries `alternative_confidence` and both suites assert it |
+ *
+ * **Five mutations survived the first run**, and every one of them was a blind
+ * spot of the same shape: the sessions the fixtures sang were one octave wide,
+ * exactly in tune, and had no silence in them, so discarding the octave,
+ * rounding to the nearest note, charging only voiced frames and clearing the
+ * counts on reset were all unasserted. Those tests exist now, at the end of
+ * `live-practice.test.ts`, each naming the mutation that produced it.
  */
 
 import assert from "node:assert/strict";
@@ -53,6 +78,7 @@ interface ParityCase {
     confidence: number | null;
     alternative_tonic: string | null;
     alternative_mode: KeyMode | null;
+    alternative_confidence: number | null;
     unmeasured_reason: string | null;
     distinct_pitch_classes: number;
   };
@@ -128,6 +154,15 @@ for (const parityCase of PARITY.cases) {
     );
     assert.equal(result.key.alternative?.tonic ?? null, expected.alternative_tonic);
     assert.equal(result.key.alternative?.mode ?? null, expected.alternative_mode);
+    // The runner-up's own margin is over the *third* candidate, by the same
+    // definition. Asserted because a mutation run found nothing else was
+    // looking at it.
+    assert.ok(
+      expected.alternative_confidence !== null &&
+        result.key.alternative !== null &&
+        Math.abs(result.key.alternative.confidence - expected.alternative_confidence) < 1e-9,
+      `runner-up margin ${result.key.alternative?.confidence}`,
+    );
   });
 }
 

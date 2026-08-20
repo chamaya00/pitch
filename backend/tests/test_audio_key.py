@@ -65,8 +65,13 @@ of them could see how the margin was defined — the property ``key.py`` argues
 for at length was, in fact, untested. ``AMBIGUOUS_MODE`` closes it, and the
 mutation was re-run against it: caught.
 
-There is no frontend counterpart to audit. The musical-key UI is Slice 4 and is
-not in this repository yet.
+The frontend has its own counterpart now, and it audits a different thing. The
+musical-key *card* is presentation; ``frontend/lib/live-key.ts`` is this
+measurement implemented a second time, for the live readout, because microphone
+audio never leaves the browser. Its 24 mutations are recorded in
+``frontend/tests/live-key.test.ts``. One of them — redefining the runner-up's own
+margin — survived its first run against the parity table below and is the reason
+that table carries ``alternative_confidence``.
 """
 
 import json
@@ -682,6 +687,8 @@ def test_the_shared_table_is_what_this_estimator_produces(case: dict[str, object
     alternative = analysis.key.alternative
     assert (alternative.tonic if alternative else None) == expected["alternative_tonic"]
     assert (alternative.mode.value if alternative else None) == expected["alternative_mode"]
+    assert alternative is not None
+    assert alternative.confidence == pytest.approx(expected["alternative_confidence"], abs=1e-12)
 
 
 def test_the_fixture_that_pins_the_margin_is_in_the_shared_table() -> None:

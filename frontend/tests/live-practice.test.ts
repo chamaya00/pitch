@@ -826,3 +826,87 @@ test("no component renders the live key beside the uploaded recording's key", ()
     );
   }
 });
+
+// --- What the mutation audit found the tests could not see ------------------
+//
+// Each of these exists because a deliberate break in `live-key.ts` or the fold
+// above passed the suite as it stood. The implementations were right; the
+// fixtures were blind, all in the same way — every session they sang was one
+// octave wide, exactly in tune, and had no silence in it.
+
+test("octaves fold into one pitch class", () => {
+  // A2, A4 and A5 are three pitches and one pitch class. The range keeps the
+  // octave; the key must discard it, and only here — so the same melody sung an
+  // octave up, an octave down, or scattered across three of them is one key
+  // with one margin.
+  const sung = (midiOf: (pitchClass: number, index: number) => number): LiveStats => {
+    const stats = new LivePracticeStats();
+    for (let tick = 0; tick < 8; tick++) {
+      for (const [index, pitchClass] of MAJOR_MELODY_FRAMES.entries()) {
+        stats.push(voiced(midiOf(pitchClass, index)));
+      }
+      stats.snapshot();
+    }
+    return stats.snapshot();
+  };
+
+  const middle = sung((pitchClass) => 60 + pitchClass);
+  assert.equal(middle.keyTonic, "C");
+  assert.equal(middle.keyMode, "major");
+
+  for (const octave of [48, 72]) {
+    const moved = sung((pitchClass) => octave + pitchClass);
+    assert.equal(moved.keyTonic, "C", `octave at MIDI ${octave}`);
+    assert.equal(moved.keyConfidence, middle.keyConfidence);
+  }
+
+  // And scattered: the same melody, each note in a different octave.
+  const scattered = sung((pitchClass, index) => 60 + pitchClass + 12 * ((index % 3) - 1));
+  assert.equal(scattered.keyTonic, "C");
+  assert.equal(scattered.keyConfidence, middle.keyConfidence);
+});
+
+test("a note sung flat still counts as the note it is nearest", () => {
+  // Every frame 40 cents flat: nearest is still the note above, and rounding
+  // the wrong way would move the whole melody down a semitone and report the
+  // key a semitone out.
+  const stats = new LivePracticeStats();
+  for (let tick = 0; tick < 8; tick++) {
+    for (const pitchClass of MAJOR_MELODY_FRAMES) stats.push(voiced(60 + pitchClass, -40));
+    stats.snapshot();
+  }
+  assert.equal(stats.snapshot().keyTonic, "C");
+});
+
+test("silence is not pitched time, however much of it there is", () => {
+  // The gate is a second of *voiced* audio. Counting every frame instead would
+  // let a few notes surrounded by silence answer a key.
+  const stats = new LivePracticeStats();
+  sing(stats, [0, 2, 4, 5, 7, 9, 11, 0, 7, 4, 5, 2, 0, 7, 4].slice(0, 15));
+  feed(stats, unvoiced(), 300);
+
+  const snapshot = stats.snapshot();
+  assert.equal(snapshot.voicedFrames, 15);
+  assert.ok(snapshot.totalFrames > 300);
+  assert.equal(snapshot.keyTonic, null);
+  assert.equal(snapshot.keyUnmeasuredReason, "TOO_LITTLE_VOICED_TIME");
+});
+
+test("a new take does not inherit the last one's pitch classes", () => {
+  // Asserted with a *different* key rather than with an empty session: after a
+  // reset every count is zero, so a session that answers nothing cannot tell
+  // whether the counts were cleared.
+  const stats = new LivePracticeStats();
+  for (let tick = 0; tick < 8; tick++) {
+    sing(stats, MAJOR_MELODY_FRAMES);
+    stats.snapshot();
+  }
+  assert.equal(stats.snapshot().keyTonic, "C");
+
+  stats.reset();
+  for (let tick = 0; tick < 8; tick++) {
+    sing(stats, MAJOR_MELODY_FRAMES.map((pitchClass) => (pitchClass + 6) % 12));
+    stats.snapshot();
+  }
+  assert.equal(stats.snapshot().keyTonic, "F#");
+});

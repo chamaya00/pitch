@@ -39,6 +39,7 @@
 | 10.8 (Slice 5) | The performance ceiling and the mutation run. The endpoint stopped loading the analysis document twice. One mutation survived the first run and exposed an untested property — the definition of the confidence margin — which `AMBIGUOUS_MODE` now pins. |
 | 10.8 (Slice 6) | The documentation sweep, and this file marked superseded. **Phase 8 complete.** |
 | Live key (planning) | A live, in-browser key readout added as **§13, Slices 7–9** — an extension after this phase, not a widening of it. Planned only; nothing implemented. |
+| Live key (mutation audit) | 24 mutations across the browser estimator and the fold: 23 caught, one equivalent. Six survived the first run — five of them one blind spot in the fixtures, one a field the parity table did not assert. Both closed; the table gained `alternative_confidence`. |
 | Live key (Slices 7–9) | Built. The estimator in TypeScript, held to `key.py` by a shared parity table; cumulative accumulation over every voiced frame; the readout in the practice card. **The plan's two commitment rules became one**: the dwell was set by the sweep the plan asked for, and hysteresis was measured to be unreachable below the confidence gate — see §13. |
 
 ### What the Slice 1 sweep settled
