@@ -1,0 +1,130 @@
+# Everything the VocalLens edge proxy does, minus how it is listened to.
+#
+# Included by both entry points — `templates/vocallens.conf.template`, which
+# speaks HTTP, and `templates-tls/vocallens.conf.template`, which terminates
+# TLS. It exists so that routing, the body cap, the forwarding header and the
+# security headers have exactly one definition. Two server blocks with two
+# copies of this is two places for a rule to drift, and the rule that drifts is
+# always the one nobody re-reads.
+#
+# **This file is not a `.conf`.** The nginx image's default configuration does
+# `include /etc/nginx/conf.d/*.conf`, so a partial with `location` blocks in it
+# would be pulled into the `http` context and refuse to parse. Substituted, it
+# lands at `/etc/nginx/conf.d/_vocallens.inc`, which that glob does not match,
+# and each entry point includes it explicitly.
+#
+# What is deliberately *not* here: `listen`, `server_name`, the TLS directives
+# and `Strict-Transport-Security`. Those are the things that differ between a
+# server that speaks plaintext and one that does not, and keeping HSTS out of
+# this file is what makes "a plaintext listener cannot advertise HSTS" a
+# property of the layout rather than of somebody's memory.
+
+# --- The edge body cap -------------------------------------------------
+#
+# Set from ${VL_EDGE_MAX_BODY_MB}, which compose keeps equal to the
+# application's own MAX_AUDIO_SIZE_MB. Equal, not larger, and that was
+# settled by measurement rather than taste.
+#
+# The first attempt made this cap 2 MiB *larger*, on the theory that the
+# application's middleware should stay the primary limit and keep answering
+# with its documented envelope. What actually happened, with a 51 MiB body:
+# nginx buffered the whole request, began forwarding it, and the
+# application's `MaxBodySizeMiddleware` refused and closed the connection
+# mid-stream — so nginx reported **502 Bad Gateway** and the client got an
+# HTML page instead of `FILE_TOO_LARGE`. Any gap between the two caps is a
+# window where an oversized upload gets a worse answer than it used to.
+#
+# With the caps equal there is no window: nginx refuses everything the
+# application would have refused, before a byte reaches Python, and answers
+# with the API's own envelope (below) so the client contract is unchanged.
+# The application's middleware is untouched and still the only limit when
+# something reaches it directly — which is what defence in depth means here.
+access_log ${VL_ACCESS_LOG} vocallens;
+
+client_max_body_size ${VL_EDGE_MAX_BODY_MB}m;
+
+# Read the body before contacting the upstream. This is nginx's default and
+# is stated explicitly because it is load-bearing: it is what makes an
+# oversized upload fail at the edge, without an application worker being
+# occupied, without an identity being minted, and without a costly-request
+# allowance being spent.
+proxy_request_buffering on;
+
+# The refusal a client actually receives: byte-for-byte the envelope the API
+# returns for the same condition, so nothing downstream — the frontend's
+# error map included — has to learn that some 413s look different.
+error_page 413 = @body_too_large;
+
+# --- Forwarding --------------------------------------------------------
+#
+# `$remote_addr`, NOT `$proxy_add_x_forwarded_for`. The latter appends to
+# whatever the client sent, so a client can pad the header with invented
+# hops; the backend counts from the right and would still be correct, but
+# there is no reason to carry a client-controlled value at all. Setting it
+# discards anything the client supplied, which is why
+# RATE_LIMIT_TRUSTED_PROXIES=1 is the right value on the other side.
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header Host $host;
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection $vl_connection_upgrade;
+
+# --- Headers -----------------------------------------------------------
+#
+# `always` so they are present on error responses too, including the 413
+# this proxy generates itself.
+#
+# No Content-Security-Policy, and as of Step 10.9 that is a positive
+# decision rather than a deferral. The web app sets its own, built around a
+# nonce minted per request in `frontend/proxy.ts`, because Next.js emits
+# inline scripts that nothing but a per-request nonce can admit.
+#
+# A second policy here would not make that stricter. A browser given two
+# `Content-Security-Policy` headers enforces *both*, so a resource has to
+# satisfy each independently — and any policy written here cannot know the
+# nonce, so it would forbid precisely the scripts the app's policy permits.
+# Measured, in the equivalent case where the nonce was absent from the HTML:
+# Chromium refused all ten script elements and the page never hydrated.
+#
+# No Strict-Transport-Security **here**, in either mode. A plaintext listener
+# advertising it would be a false claim, and the TLS entry point sets it in its
+# own file — see `templates-tls/vocallens.conf.template`. Because `add_header`
+# accumulates within one server block, the four headers arrive together there
+# and these three arrive alone under plain HTTP.
+add_header X-Content-Type-Options nosniff always;
+add_header Referrer-Policy strict-origin-when-cross-origin always;
+add_header X-Frame-Options DENY always;
+
+# --- The proxy's own liveness -----------------------------------------
+#
+# Answered by nginx itself: no upstream, no database, no identity minted,
+# no quota spent, no provider called. It says "this proxy is running" and
+# nothing more, which is all a proxy health check should claim.
+location @body_too_large {
+    # No `add_header` here, deliberately. nginx's inheritance is
+    # replace-not-merge: a single `add_header` in this block would drop
+    # every header set on the server, and an earlier version of this file
+    # did exactly that — the 413 went out carrying `X-Content-Type-Options`
+    # and *neither* `Referrer-Policy` nor `X-Frame-Options`. Inheriting all
+    # three is the fix, and under TLS it is what carries HSTS onto the 413 too.
+    default_type application/json;
+    return 413 '{"status":"failed","error_code":"FILE_TOO_LARGE","message":"The uploaded file is larger than this server accepts."}';
+}
+
+location = /healthz {
+    access_log off;
+    # `default_type`, not `add_header` — see @body_too_large. An add_header
+    # here would drop the inherited security headers for this response.
+    default_type text/plain;
+    return 200 "ok\n";
+}
+
+location /api/ {
+    proxy_pass http://${VL_BACKEND};
+}
+
+location / {
+    proxy_pass http://${VL_FRONTEND};
+}

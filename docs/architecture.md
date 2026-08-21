@@ -1437,6 +1437,139 @@ because two storage tests skip under root and CI would have been the first thing
 ever to execute them. They pass. What CI runs is a strictly larger suite than
 anything this container can produce.
 
+## Terminating TLS (Step 13)
+
+Until Step 13 the bundled proxy spoke HTTP and said so, and TLS was listed as
+waiting on a deployment decision. The decision was taken: **TLS may be
+terminated at the bundled proxy, and it is opt-in.**
+
+```
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+```
+
+Opt-in rather than default because both answers are right for somebody. Many
+deployments already terminate upstream — a cloud load balancer, an ingress
+controller, a corporate proxy — and for those the plain HTTP entry point is
+correct. Two terminators are not more secure; they are one more certificate to
+let expire.
+
+### Why it stopped being optional for this product
+
+Plain HTTP does not merely make VocalLens less private. It removes half of it:
+
+- **`getUserMedia` is gated on a secure context**, so recording — one of the two
+  ways audio gets in — does not exist over HTTP anywhere but `localhost`;
+- **a service worker will not register outside one either**, so the manifest and
+  the icons added in Step 12 are inert and the app cannot be installed.
+
+Both were verified over a real TLS connection rather than reasoned about; the
+measurements are below.
+
+### The layout, and the one property it exists to guarantee
+
+The proxy is now a **listener plus a shared body**:
+
+| File | What it holds |
+| --- | --- |
+| `common/_vocallens.inc.template` | Everything the proxy *does*: routing, the body cap, forwarding, the three security headers |
+| `templates/vocallens.conf.template` | The plaintext listener |
+| `templates-tls/vocallens.conf.template` | The TLS listener, the certificate, the redirect, the ACME challenge — and `Strict-Transport-Security` |
+
+**A listener that speaks plaintext must never advertise HSTS.** It is a promise
+a browser *enforces*: once seen, it refuses to reach the host over HTTP until
+the max-age expires, so a host that sends it and then cannot serve TLS is
+unreachable rather than degraded. The layout is what makes that safe —
+`Strict-Transport-Security` appears in exactly one file, and it is the file that
+carries `ssl_certificate`. Neither the plaintext entry point nor the shared body
+can reach it. `test_deployment.py` asserts this of the shared file directly and
+of the *effective* configuration with the include spliced in, so moving the
+header into the shared body fails four tests.
+
+The shared body exists so that routing, the body cap and the forwarding header
+have one definition. Two server blocks with two copies is two places for a rule
+to drift, and the one that drifts is the one nobody re-reads. It is substituted
+to `_vocallens.inc`, deliberately *not* `.conf`, because the image's default
+configuration does `include /etc/nginx/conf.d/*.conf` and a partial full of
+`location` blocks pulled into the `http` context does not parse.
+
+### What the TLS listener negotiates, and why
+
+- **TLS 1.2 and 1.3 only.** 1.0 and 1.1 are withdrawn and no browser that can
+  run this application needs them. Verified: `openssl s_client` is refused at
+  1.0 and 1.1, accepted at 1.2 and 1.3.
+- **`ssl_prefer_server_ciphers off`**, which is not a relaxation. TLS 1.3
+  negotiates its own suites regardless, and for 1.2 the client's order is the
+  better one to follow: a phone that prefers ChaCha20 prefers it because it has
+  no AES instructions, and overriding that makes the handshake slower on exactly
+  the devices this product is used on.
+- **Session tickets off.** A ticket key that lives for the life of the process
+  loses forward secrecy for every session it covers; the session cache already
+  spares the round trip.
+- **HSTS is `${VL_HSTS}`, not a literal.** The safe way to adopt it is a short
+  max-age, confirm every path works over TLS, then raise it — and a value baked
+  into the file would make the cautious version of that a code change.
+  **`preload` is deliberately not in the default**: it is a one-way door, and it
+  commits every subdomain of the registrable domain including ones this
+  deployment may not own.
+
+### Port 80 keeps two jobs and serves no application
+
+The ACME `http-01` challenge is served **before** the redirect, from a webroot
+rather than proxied, so renewal does not depend on the application being up —
+the moment a certificate most needs renewing is the moment something is wrong.
+Everything else gets a **308**, not a 301: a 301 permits a client to turn a POST
+into a GET, and although nothing should reach port 80 in normal use — HSTS keeps
+a returning browser off it — that is exactly why what does reach it must not be
+silently corrupted.
+
+**No ACME client is bundled.** The challenge path is served so an external
+certbot can renew against the webroot, but which client, which challenge type
+and which account are operator decisions, and shipping an untested container
+that holds your private key would be worse than shipping none.
+
+### The mistake this override most wants to prevent
+
+`NEXT_PUBLIC_API_URL` is inlined into the browser bundle **at build time**. If
+it stays `http://localhost` while the page is served over HTTPS, the application
+loads and does nothing: every API call is refused, and the only symptom is an
+empty screen. Measured in Chromium against exactly that misconfiguration — ten
+console errors, no data, a rendered shell.
+
+So `docker-compose.tls.yml` makes `PUBLIC_ORIGIN` **required with no default**.
+The failure moves from a silently broken deployment to a message at `up`.
+
+### Verified over a real TLS connection
+
+`scripts/verify-proxy.sh start-tls` runs the shipped template with a self-signed
+certificate for `localhost` — the certificate is the only difference from the
+deployed configuration. Against it:
+
+| | |
+| --- | --- |
+| `https://…/`, `/healthz`, `/api/v1/health` | 200 |
+| `Strict-Transport-Security` over TLS | present, alongside the other three headers |
+| the same header over plain HTTP | absent |
+| `GET`/`POST` on port 80 | 308, path and method preserved |
+| ACME challenge on port 80 | 200, served from the webroot, not redirected |
+| TLS 1.0 / 1.1 | refused |
+| TLS 1.2 / 1.3 | accepted |
+
+And in Chromium, over HTTPS, the things HTTP cannot do at all:
+
+| | |
+| --- | --- |
+| secure context | true |
+| service worker | registered and **activated** |
+| microphone | stream acquired, live readout showing |
+| installability | manifest, three icons, active worker |
+| CSP violations / console errors | **0 / 0** |
+
+**One thing is not exercised locally and says so.** `http2 on;` needs nginx
+≥ 1.25.1; the pinned image is 1.27, but a development machine may be older.
+`verify-proxy.sh` detects that, removes the single directive and prints that
+HTTP/2 is therefore not being tested — rather than silently running a different
+configuration than the one that ships.
+
 ## Installing it as an app (Step 12)
 
 VocalLens is installable: a manifest, an icon set and a service worker, which is

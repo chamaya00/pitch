@@ -62,7 +62,7 @@ installable to a home screen or a dock, launching in its own window. It caches
 its own static files and **never a measurement** — a cached number would be
 presented as current when it is not. There is no offline mode: the app needs a
 network to open, and says so on a static offline page when it cannot reach one.
-Installing and the microphone both require HTTPS.
+Installing and the microphone both require HTTPS — see below.
 
 The speech and audio analyses are **separate**: separate endpoints, separate
 records, separate sections in the UI. There is no combined "voice score", and
@@ -221,6 +221,31 @@ A run that must not skip them sets `REQUIRE_DATABASE_TESTS=1`, which turns a
 missing `TEST_DATABASE_URL` into a failed run rather than 185 quiet skips.
 [`.github/workflows/checks.yml`](.github/workflows/checks.yml) sets both and runs
 this same script on every push and pull request.
+
+## Serving it over HTTPS
+
+The microphone and the installable app both need a secure context, so neither
+works over plain HTTP anywhere but `localhost`. TLS can be terminated at the
+bundled proxy:
+
+```bash
+export PUBLIC_ORIGIN=https://vocallens.example   # required, no default
+export PUBLIC_HOST=vocallens.example
+export TLS_CERT_DIR=/etc/letsencrypt/live/vocallens.example
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+```
+
+Port 80 then serves the ACME `http-01` challenge and redirects everything else;
+port 443 serves the app with HSTS. **No ACME client is bundled** — point an
+external certbot at the challenge webroot.
+
+Deployments that already terminate TLS upstream — a load balancer, an ingress
+controller — should use the base compose file alone. Two terminators are not
+more secure, only one more certificate to let expire.
+
+`scripts/verify-proxy.sh start-tls` runs the same configuration locally with a
+self-signed certificate, if you want to see it work before pointing a domain at
+it.
 
 ## Configuration
 

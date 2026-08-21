@@ -1176,21 +1176,74 @@ Two more things the same audit found, neither of them on any list:
   could hold. A key holding six described songs and no recordings read both — of
   data that key is the only way back to.
 
+
+## Steps 12 and 13 — an app you can install, over a connection that lets you
+
+**Step 12 made VocalLens installable**: a manifest, an icon set and a service
+worker that caches the application's own static files and **never a
+measurement**. A cached number would be presented as current when it is not,
+which is the one thing this product refuses to do anywhere else.
+
+The step is worth reading for a claim it had to withdraw. The obvious reason not
+to cache the HTML is that it carries a per-request CSP nonce, so a cached copy
+would carry a stale one and every script would be refused. That was written into
+the code before it was checked, and it is **wrong**: a cache stores a response
+with its headers, so the nonce in the body and the nonce in the header go stale
+together and stay in agreement. Measured — 0 violations, the page hydrated and
+answered a click. The shell is still not cached, for the reason that survives:
+it would freeze one nonce in place, and `layout.tsx` gave up the full-route
+cache specifically to keep that value per-request. What that costs is offline
+practice, and `limitations.md` records it as given up rather than missed.
+
+**Step 13 closed the TLS row**, which had been listed as waiting on a deployment
+decision since Phase 10. The decision: TLS may be terminated at the bundled
+proxy, opt-in, because deployments that already terminate upstream should not
+run two terminators.
+
+It stopped being optional for this product in Step 12. `getUserMedia` and
+service workers are both gated on a secure context, so over plain HTTP —
+anywhere but `localhost` — **recording does not exist and the app cannot be
+installed**. Half of VocalLens was unreachable without it.
+
+The proxy is now a listener plus a shared body, and that split is what makes one
+sentence structurally true: **a listener that speaks plaintext cannot advertise
+HSTS.** The header lives in exactly one file, the one carrying
+`ssl_certificate`; neither the plaintext entry point nor the shared body can
+reach it. Moving it into the shared body fails four tests, which was checked by
+mutation rather than assumed — as were weakening the 308 redirect to a 301 and
+giving `PUBLIC_ORIGIN` a default.
+
+That last one is the mistake the override most wants to prevent.
+`NEXT_PUBLIC_API_URL` is inlined at build time, so an `http://` origin behind an
+HTTPS page produces an app that loads and does nothing. Measured in Chromium
+against exactly that: ten console errors and an empty screen. The variable is
+now required with no default, so the failure is a message at `up`.
+
+Verified over a real TLS connection rather than reasoned about: protocols
+refused below 1.2, HSTS present over TLS and absent over HTTP, port 80
+redirecting with the method preserved, the ACME challenge served without the
+application, and in Chromium a secure context, an activated service worker, a
+live microphone readout, every installability criterion, and 0 CSP violations.
+
+**One thing is not exercised locally and says so.** `http2 on;` needs nginx
+≥ 1.25.1 and a development machine may be older, so `verify-proxy.sh` removes
+that single directive and prints that HTTP/2 is therefore untested — rather than
+silently running a different configuration than the one that ships.
+
 ## Where this leaves the project
 
 **Every phase in [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) §32 is now
 delivered**, Phase 9 last and four steps after it was specified. Phase 10's
-outstanding table had four rows when 10.21 closed; two of them are now closed as
-well. The licence is MIT, chosen by the owner on 2026-08-20 and the last item
+outstanding table had four rows when 10.21 closed; three of them are now closed
+as well — the licence, Phase 9's blocker, and TLS. The licence is MIT, chosen by the owner on 2026-08-20 and the last item
 that was waiting on a decision nobody had been asked for rather than on work
 nobody had done. Phase 9's blocker was the other.
 
-**Two rows remain, and both are outside this repository:**
+**Two rows remain, and both are decisions nobody here can take:**
 
 | Outstanding | What it is waiting on |
 | --- | --- |
 | Real credentials — passwords, email, OAuth, sessions, reset, verification, MFA, account merging | A product decision about what an account *is* here. 10.2 rejected passwords for its own slice on the evidence: adding them while deferring reset and verification is worse than 128 random bits, not better. |
-| TLS termination and HSTS | A deployment decision. The proxy speaks HTTP and claims no HSTS deliberately; a certificate belongs to whoever operates the deployment, and claiming HSTS from a server that cannot serve TLS would break the site. |
 | Retention of identities that **hold recordings** | A product decision. Reclaiming covers identities that own *nothing*; deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
 
 **The honest summary is the weaker one, and it has been earned three times

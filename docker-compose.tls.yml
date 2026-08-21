@@ -1,0 +1,92 @@
+# Terminate TLS at the bundled proxy.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# An override rather than a replacement, and opt-in rather than default, because
+# terminating TLS here is right for some deployments and wrong for others. Many
+# already terminate upstream — a cloud load balancer, an ingress controller, a
+# corporate proxy — and for those the plain HTTP entry point is correct and this
+# file is not: two terminators are not more secure, they are one more
+# certificate to let expire.
+#
+# What it changes, and nothing else:
+#
+#   - the proxy mounts `templates-tls/` instead of `templates/`, which is the
+#     only place `Strict-Transport-Security` exists;
+#   - it publishes 443 as well as 80, where 80 now serves the ACME challenge and
+#     redirects everything else;
+#   - `PUBLIC_ORIGIN` becomes **required**. See below; it is the mistake this
+#     file most wants to prevent.
+#
+# Required in the environment:
+#
+#   PUBLIC_ORIGIN   https://vocallens.example   the origin browsers use
+#   PUBLIC_HOST     vocallens.example           the certificate's host
+#   TLS_CERT_DIR    /etc/letsencrypt/live/...   holds fullchain.pem, privkey.pem
+#
+# Optional:
+#
+#   VL_HSTS         max-age=31536000; includeSubDomains
+#
+# Getting a certificate is deliberately not automated here. The ACME challenge
+# path is served (see the TLS template) so an external certbot can renew against
+# this webroot, but no ACME client is bundled: which one, which challenge and
+# which account are operator decisions, and shipping an untested container that
+# holds your certificate would be worse than shipping none.
+
+services:
+  frontend:
+    build:
+      args:
+        # Required, with no default, and that is the point. `NEXT_PUBLIC_API_URL`
+        # is inlined into the browser bundle at build time; if it stayed
+        # `http://localhost` while the page was served over HTTPS, every API call
+        # would be blocked as mixed content and the application would load and do
+        # nothing. Failing at `up` with this message is much easier to diagnose
+        # than an app whose network tab is empty.
+        NEXT_PUBLIC_API_URL: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN to your https:// origin, e.g. https://vocallens.example}
+
+  proxy:
+    environment:
+      VL_TLS_PORT: "443"
+      VL_INCLUDE: /etc/nginx/conf.d/_vocallens.inc
+      VL_SERVER_NAME: ${PUBLIC_HOST:?set PUBLIC_HOST to the hostname on the certificate, e.g. vocallens.example}
+      VL_TLS_CERT: /etc/nginx/tls/fullchain.pem
+      VL_TLS_KEY: /etc/nginx/tls/privkey.pem
+      VL_ACME_WEBROOT: /var/www/acme
+      # A year, and every subdomain. Adopt it in stages if the domain has
+      # siblings that are not ready: start at `max-age=300`, confirm every path
+      # works over TLS, then raise it. A browser enforces what it has already
+      # seen, so lowering the value later does not un-tell the ones that saw it.
+      #
+      # `preload` is not here and should not be added casually — it is a one-way
+      # door that commits every subdomain of the registrable domain.
+      VL_HSTS: ${VL_HSTS:-max-age=31536000; includeSubDomains}
+    ports:
+      # Keyed by container port, so these replace the base file's mapping of 80
+      # and add 443 beside it.
+      - "${PUBLIC_HTTP_PORT:-80}:80"
+      - "${PUBLIC_HTTPS_PORT:-443}:443"
+    volumes:
+      # Replaces the base file's template mount — Compose merges volumes by
+      # container path — so only the TLS entry point is substituted and only it
+      # can send HSTS.
+      - ./deploy/nginx/templates-tls:/etc/nginx/templates:ro
+      # The shared body, unchanged. One copy in the repository, both modes.
+      - ./deploy/nginx/common/_vocallens.inc.template:/etc/nginx/templates/_vocallens.inc.template:ro
+      # Read-only, and holding the private key. Point it at a directory
+      # containing `fullchain.pem` and `privkey.pem` — the names certbot uses.
+      - ${TLS_CERT_DIR:?set TLS_CERT_DIR to a directory holding fullchain.pem and privkey.pem}:/etc/nginx/tls:ro
+      - acme_webroot:/var/www/acme
+    healthcheck:
+      # Over TLS now, and `--no-check-certificate` because the container reaches
+      # itself as `localhost`, which is not the name on the certificate. This
+      # checks that nginx is up and terminating, not that the certificate is
+      # valid for anybody — which is not a thing a health check can know.
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O- https://localhost/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  acme_webroot:

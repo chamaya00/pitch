@@ -28,10 +28,44 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "docker-compose.yml"
-TEMPLATE = ROOT / "deploy" / "nginx" / "templates" / "vocallens.conf.template"
+TLS_COMPOSE = ROOT / "docker-compose.tls.yml"
+
+NGINX = ROOT / "deploy" / "nginx"
+#: The plaintext entry point, and the one that terminates TLS. Two listeners.
+TEMPLATE = NGINX / "templates" / "vocallens.conf.template"
+TLS_TEMPLATE = NGINX / "templates-tls" / "vocallens.conf.template"
+#: Everything the proxy *does*, shared by both so they cannot drift apart.
+SHARED = NGINX / "common" / "_vocallens.inc.template"
 
 #: The one service allowed to be reachable from outside.
 PUBLIC_SERVICE = "proxy"
+
+
+def effective(entry_point: Path) -> str:
+    """An entry point with its shared body spliced in, as nginx assembles it.
+
+    Step 13 split the proxy into a listener and a body so that the plaintext and
+    TLS configurations could share the second without duplicating it. These
+    tests are about the configuration that *runs*, so they read what the
+    ``include`` resolves to rather than the two halves separately — which also
+    keeps ``server_level`` below meaning what it always meant.
+    """
+    text = entry_point.read_text(encoding="utf-8")
+    body = SHARED.read_text(encoding="utf-8")
+    assert "include ${VL_INCLUDE};" in text, f"{entry_point.name} includes no shared body"
+    return text.replace("include ${VL_INCLUDE};", body)
+
+
+def without_comments(text: str) -> str:
+    """Directives only.
+
+    Assertions about what is *absent* have to look at directives only. These
+    files explain at length why there is no CSP and no HSTS, so a naive
+    ``"Content-Security-Policy" not in template`` fails on the very comment
+    documenting its absence — which is how the first version of these tests
+    failed.
+    """
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
 @pytest.fixture(scope="module")
@@ -48,20 +82,31 @@ def services(compose: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture(scope="module")
 def template() -> str:
-    return TEMPLATE.read_text(encoding="utf-8")
+    """The plaintext deployment, as it runs."""
+    return effective(TEMPLATE)
 
 
 @pytest.fixture(scope="module")
 def directives(template: str) -> str:
-    """The template with its comments removed.
+    return without_comments(template)
 
-    Assertions about what is *absent* have to look at directives only. The
-    template explains at length why there is no CSP and no HSTS, so a naive
-    ``"Content-Security-Policy" not in template`` fails on the very comment
-    documenting its absence — which is how the first version of these tests
-    failed.
-    """
-    return "\n".join(line for line in template.splitlines() if not line.lstrip().startswith("#"))
+
+@pytest.fixture(scope="module")
+def tls_template() -> str:
+    """The TLS deployment, as it runs."""
+    return effective(TLS_TEMPLATE)
+
+
+@pytest.fixture(scope="module")
+def tls_directives(tls_template: str) -> str:
+    return without_comments(tls_template)
+
+
+@pytest.fixture(scope="module")
+def tls_compose() -> dict[str, Any]:
+    parsed = yaml.safe_load(TLS_COMPOSE.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
 
 
 def environment(service: dict[str, Any]) -> dict[str, str]:
@@ -193,7 +238,10 @@ def test_the_edge_message_matches_the_application_message() -> None:
     """Read from the middleware itself, so a reworded message fails here."""
     from app.core.middleware import _TOO_LARGE_MESSAGE
 
-    assert _TOO_LARGE_MESSAGE in TEMPLATE.read_text(encoding="utf-8")
+    # The effective configuration, not the entry point: the refusal lives in the
+    # shared body that both listeners include.
+    assert _TOO_LARGE_MESSAGE in effective(TEMPLATE)
+    assert _TOO_LARGE_MESSAGE in effective(TLS_TEMPLATE)
 
 
 # --- Routing ----------------------------------------------------------------
@@ -220,7 +268,7 @@ def test_the_proxy_answers_its_own_health_check(template: str) -> None:
     A health check that minted an identity would be a rate-limit consumer that
     runs every ten seconds forever.
     """
-    match = re.search(r"location\s+=\s+/healthz\s*\{(.*?)\n    \}", template, re.S)
+    match = re.search(r"location\s+=\s+/healthz\s*\{(.*?)\n\s*\}", template, re.S)
     assert match, "no /healthz location"
     body = match.group(1)
     assert "return 200" in body
@@ -339,3 +387,171 @@ def test_the_compose_file_carries_no_baked_in_secret(compose: dict[str, Any]) ->
     # that would be wrong to publish.
     assert "ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}" in text
     assert "POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-" in text
+
+
+# --- Terminating TLS (Step 13) ----------------------------------------------
+#
+# The property this whole section exists to keep is one sentence: **a listener
+# that speaks plaintext must never advertise HSTS.** It is a promise a browser
+# enforces — once seen, it refuses to reach the host over HTTP until the max-age
+# expires — so a host that sends it and then cannot serve TLS is unreachable
+# rather than degraded.
+#
+# The layout is what makes that true. `Strict-Transport-Security` appears in
+# exactly one file, and that file is the one carrying `ssl_certificate`. Neither
+# the plaintext entry point nor the shared body can reach it, so the mistake is
+# not one somebody has to remember not to make.
+
+
+def test_the_plaintext_deployment_makes_no_transport_security_claim(directives: str) -> None:
+    """The original invariant, now asserted against the *effective* config.
+
+    Before Step 13 this read one file. It now reads the entry point with the
+    shared body spliced in, which is the thing that actually runs — so moving
+    HSTS into the shared body, where the plaintext listener would inherit it,
+    fails here.
+    """
+    assert "Strict-Transport-Security" not in directives
+    assert "ssl_certificate" not in directives
+    assert "listen 443" not in directives
+
+
+def test_the_shared_body_cannot_carry_hsts() -> None:
+    """Said directly of the shared file, not only of what includes it.
+
+    The test above would also pass if HSTS were absent for some accidental
+    reason. This one states the structural rule: the body both listeners share
+    is not allowed to know about transport security at all.
+    """
+    shared = without_comments(SHARED.read_text(encoding="utf-8"))
+    assert "Strict-Transport-Security" not in shared
+    assert "ssl_" not in shared
+
+
+def test_the_tls_deployment_does_claim_transport_security(tls_directives: str) -> None:
+    assert "Strict-Transport-Security" in tls_directives
+    assert "ssl_certificate" in tls_directives
+
+
+def test_hsts_is_configurable_rather_than_baked_in(tls_directives: str) -> None:
+    """The safe way to adopt HSTS is a short max-age raised after checking.
+
+    A literal in the template would make the cautious version of that a code
+    change, so the value is substituted and compose supplies a default.
+    """
+    assert re.search(r'Strict-Transport-Security\s+"\$\{VL_HSTS\}"\s+always', tls_directives)
+
+
+def test_the_default_hsts_is_a_year_and_does_not_preload(tls_compose: dict[str, Any]) -> None:
+    """`preload` is a one-way door and commits subdomains this deployment may not own.
+
+    Submitting to the browser preload list is a decision an operator takes
+    knowingly. It must not be something they inherit from a default.
+    """
+    default = environment(tls_compose["services"][PUBLIC_SERVICE])["VL_HSTS"]
+    assert "max-age=31536000" in default
+    assert "includeSubDomains" in default
+    assert "preload" not in default
+
+
+def test_both_listeners_share_one_body() -> None:
+    """One definition of routing, the body cap, forwarding and the headers.
+
+    Two server blocks with two copies is two places for a rule to drift, and the
+    one that drifts is always the one nobody re-reads.
+    """
+    for entry in (TEMPLATE, TLS_TEMPLATE):
+        assert "include ${VL_INCLUDE};" in entry.read_text(encoding="utf-8"), entry.name
+
+    # And the shared body really is where the substance lives.
+    shared = SHARED.read_text(encoding="utf-8")
+    for directive in ("client_max_body_size", "proxy_set_header X-Forwarded-For", "location /api/"):
+        assert directive in shared, directive
+
+
+def test_the_shared_body_is_not_auto_included_as_a_conf(services: dict[str, Any]) -> None:
+    """Its substituted name must not match the image's ``include conf.d/*.conf``.
+
+    A partial full of ``location`` blocks pulled into the ``http`` context does
+    not parse, and the failure is at container start with a message about an
+    unexpected directive rather than about the mount.
+    """
+    mounts = services[PUBLIC_SERVICE]["volumes"]
+    shared_mount = next(m for m in mounts if "_vocallens.inc.template" in m)
+    target = shared_mount.split(":")[1]
+    assert target.endswith("_vocallens.inc.template")
+    # Substituted, `.template` is stripped, leaving `.inc` — not `.conf`.
+    assert not target.removesuffix(".template").endswith(".conf")
+
+
+def test_tls_serves_the_acme_challenge_without_the_application(tls_directives: str) -> None:
+    """Renewal must not depend on the app being up.
+
+    The moment a certificate most needs renewing is the moment something is
+    wrong, so the challenge is served from a webroot rather than proxied.
+    """
+    match = re.search(
+        r"location\s+\^~\s+/\.well-known/acme-challenge/\s*\{(.*?)\n\s*\}",
+        tls_directives,
+        re.S,
+    )
+    assert match, "no ACME challenge location"
+    body = match.group(1)
+    assert "root" in body
+    assert "proxy_pass" not in body
+
+
+def test_the_redirect_preserves_the_method(tls_directives: str) -> None:
+    """308, not 301.
+
+    A 301 permits a client to turn a POST into a GET. Nothing should reach port
+    80 in normal use — HSTS keeps a returning browser off it — which is exactly
+    why what does reach it must not be silently corrupted.
+    """
+    assert re.search(r"return\s+308\s+https://\$host\$request_uri", tls_directives)
+    assert not re.search(r"return\s+30[12]\s", tls_directives)
+
+
+def test_tls_negotiates_only_current_protocols(tls_directives: str) -> None:
+    match = re.search(r"ssl_protocols([^;]*);", tls_directives)
+    assert match, "no ssl_protocols"
+    protocols = match.group(1).split()
+    assert protocols == ["TLSv1.2", "TLSv1.3"]
+
+
+def test_session_tickets_are_off(tls_directives: str) -> None:
+    """A ticket key living for the life of the process loses forward secrecy."""
+    assert re.search(r"ssl_session_tickets\s+off\s*;", tls_directives)
+
+
+def test_the_tls_override_requires_an_explicit_public_origin(tls_compose: dict[str, Any]) -> None:
+    """The mistake this file most wants to prevent.
+
+    ``NEXT_PUBLIC_API_URL`` is inlined into the browser bundle at build time. If
+    it stayed ``http://localhost`` while the page was served over HTTPS, every
+    API call would fail and the application would load and do nothing —
+    measured in Chromium during Step 13: ten console errors and an empty screen.
+    Requiring the variable turns that into a failure at ``up`` with a message.
+    """
+    build = tls_compose["services"]["frontend"]["build"]
+    api_url = str(build["args"]["NEXT_PUBLIC_API_URL"])
+    assert api_url.startswith("${PUBLIC_ORIGIN:?"), api_url
+
+
+def test_the_tls_override_requires_a_certificate_directory(tls_compose: dict[str, Any]) -> None:
+    mounts = [str(m) for m in tls_compose["services"][PUBLIC_SERVICE]["volumes"]]
+    assert any(m.startswith("${TLS_CERT_DIR:?") for m in mounts), mounts
+
+
+def test_the_tls_override_mounts_the_tls_templates(tls_compose: dict[str, Any]) -> None:
+    """Compose merges volumes by container path, so this replaces the plain one."""
+    mounts = [str(m) for m in tls_compose["services"][PUBLIC_SERVICE]["volumes"]]
+    assert any("templates-tls:/etc/nginx/templates" in m for m in mounts), mounts
+
+
+def test_the_tls_override_publishes_only_the_two_web_ports(tls_compose: dict[str, Any]) -> None:
+    """Terminating TLS must not become an excuse to expose anything else."""
+    assert set(tls_compose["services"]) == {"frontend", PUBLIC_SERVICE}
+    ports = tls_compose["services"][PUBLIC_SERVICE]["ports"]
+    published = [str(p).rsplit(":", 1)[-1] for p in ports]
+    assert sorted(published) == ["443", "80"]

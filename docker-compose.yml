@@ -109,6 +109,12 @@ services:
       VL_ACCESS_LOG: /var/log/nginx/access.log
       VL_BACKEND: backend:8000
       VL_FRONTEND: frontend:3000
+      # Where envsubst leaves the shared body. A variable rather than a literal
+      # so the same template file also runs under `scripts/verify-proxy.sh`,
+      # which substitutes it somewhere else — the shipped config and the one
+      # that gets exercised are then the same file, not two that resemble
+      # each other.
+      VL_INCLUDE: /etc/nginx/conf.d/_vocallens.inc
       # Kept EQUAL to the backend's MAX_AUDIO_SIZE_MB, not larger. A gap
       # between them is a range of body sizes that nginx forwards and the
       # application then refuses mid-stream, which nginx reports as 502 — see
@@ -120,6 +126,13 @@ services:
     volumes:
       # The official image runs envsubst over everything here at start-up.
       - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      # The shared body of the proxy, mounted as a single file *into* the
+      # template directory so envsubst reaches it. It lives outside both
+      # template directories because the TLS deployment mounts a different one
+      # over the line above and must still get this exact file — one copy, two
+      # entry points. It is substituted to `_vocallens.inc`, which the image's
+      # `include conf.d/*.conf` deliberately does not match.
+      - ./deploy/nginx/common/_vocallens.inc.template:/etc/nginx/templates/_vocallens.inc.template:ro
     depends_on:
       - backend
       - frontend

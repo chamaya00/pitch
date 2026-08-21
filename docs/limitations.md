@@ -370,8 +370,9 @@ and no feature that appears only in the installed window.
   [architecture.md](architecture.md) records the measurement, including that the
   first argument written down for it turned out to be false.
 - **Installing needs HTTPS**, as does the microphone. Neither works over plain
-  HTTP except on `localhost`, and the bundled deployment speaks HTTP — see
-  *What the deployment does and does not protect*.
+  HTTP except on `localhost`. Since Step 13 the bundled deployment *can*
+  terminate TLS — see *What the deployment does and does not protect* — but it
+  is opt-in, and the base compose file alone will not make the app installable.
 
 ## When something breaks
 
@@ -449,10 +450,29 @@ period (30 days by default) is deleted, along with its keys. What that does
 The bundled `docker-compose.yml` puts an nginx proxy in front of everything and
 publishes nothing else. What that does **not** give you:
 
-- **No TLS.** The proxy speaks HTTP. Terminating TLS — and therefore protecting
-  the bearer key in transit — is an external responsibility, and the proxy
-  deliberately advertises no HSTS rather than implying otherwise. **Over plain
-  HTTP a key can be read by anyone on the network path.**
+- **TLS is opt-in, and the default deployment does not have it.** `docker
+  compose up` with the base file alone speaks HTTP, advertises no HSTS, and
+  **over plain HTTP the bearer key can be read by anyone on the network path.**
+  Step 13 added a TLS entry point — `docker-compose.tls.yml` — which terminates
+  at the proxy, redirects port 80 and does advertise HSTS. Deployments that
+  already terminate upstream should keep the plain entry point rather than
+  running two terminators.
+- **Without TLS, half the product does not exist.** `getUserMedia` and service
+  workers are both gated on a secure context, so over plain HTTP — anywhere but
+  `localhost` — recording does not work and the app cannot be installed. This is
+  a browser rule, not a policy of ours, and nothing in this application can work
+  around it.
+- **No certificate is issued for you.** The ACME `http-01` challenge path is
+  served so an external client can renew against it, but no ACME client is
+  bundled: which one, which challenge and which account are operator decisions,
+  and a certificate is not something this repository can hold.
+- **HSTS is a promise a browser enforces.** Once it has seen the header it will
+  refuse to reach the host over HTTP until the max-age expires, whatever anybody
+  does. A deployment that enables TLS, is seen once, and then loses its
+  certificate is *unreachable*, not degraded. Adopt it by raising `VL_HSTS` in
+  stages rather than starting at a year, and note that `preload` — deliberately
+  absent from the default — is a one-way door that commits every subdomain of
+  the registrable domain.
 - **The proxy does not rate-limit.** It adds no counter of its own. The API's
   limiter is per process unless `RATE_LIMIT_BACKEND=database` is set, so a
   deployment that scales the API past the single worker `docker-compose.yml`

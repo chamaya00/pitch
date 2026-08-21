@@ -1,0 +1,113 @@
+# VocalLens edge proxy — the TLS entry point.
+#
+# Selected instead of `templates/` by deploying with `docker-compose.tls.yml`.
+# Terminating TLS here is what makes two things possible that plain HTTP cannot
+# have at all, and both of them are the product rather than a nicety:
+#
+#   - **the microphone.** `getUserMedia` is gated on a secure context, so
+#     recording — half of what VocalLens is — simply does not exist over HTTP
+#     anywhere but `localhost`;
+#   - **installing the app.** A service worker will not register outside a
+#     secure context either, so the manifest and the icons are inert without it.
+#
+# Everything this proxy *does* is in `common/_vocallens.inc.template`, shared
+# with the HTTP entry point. What is here is the listener, the certificate, and
+# the one header that may only ever be sent by a server that can honour it.
+#
+# **TLS is terminated here only if you choose it.** Many deployments already
+# terminate upstream — a cloud load balancer, an ingress controller, a corporate
+# proxy — and for those the plain HTTP entry point is correct and this file is
+# not. Running both terminators would not be more secure; it would be one more
+# place for a certificate to expire.
+
+log_format vocallens '$time_iso8601 "$request" $status $body_bytes_sent $request_time';
+
+map $http_upgrade $vl_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen ${VL_TLS_PORT} ssl;
+    # nginx >= 1.25.1 spelling. The pinned image is 1.27; the older
+    # `listen ... ssl http2` form is deprecated there and warns. An nginx older
+    # than 1.25.1 does not know this directive at all — `scripts/verify-proxy.sh`
+    # removes it when the local binary is older and says so, rather than
+    # silently exercising a different configuration than the one shipped.
+    http2 on;
+    server_name ${VL_SERVER_NAME};
+
+    ssl_certificate ${VL_TLS_CERT};
+    ssl_certificate_key ${VL_TLS_KEY};
+
+    # --- What is negotiated ------------------------------------------------
+    #
+    # TLS 1.2 and 1.3 only. 1.0 and 1.1 are withdrawn and no browser that can
+    # run this application needs them.
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # `off`, deliberately, and it is not a relaxation. TLS 1.3 negotiates its
+    # own suites regardless, and for 1.2 the client's preference is the better
+    # order to follow: a phone that prefers ChaCha20 prefers it because it has
+    # no AES instructions, and overriding that makes the handshake slower on
+    # exactly the devices this product is used on.
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+
+    ssl_session_cache shared:VocalLensTLS:10m;
+    ssl_session_timeout 1d;
+    # Off: a ticket key that lives for the life of the process is a way to lose
+    # forward secrecy for every session it covers, and the session cache above
+    # already spares the round trip.
+    ssl_session_tickets off;
+
+    # --- The one header that belongs to this file --------------------------
+    #
+    # Set here rather than in the shared partial, so a plaintext listener has no
+    # way to send it. HSTS is a promise a browser *enforces*: once it has seen
+    # this, it will refuse to reach the host over HTTP until the max-age
+    # expires, whatever the user does. A host that then loses its certificate is
+    # unreachable, not degraded.
+    #
+    # `${VL_HSTS}` rather than a literal, for one operational reason: the safe
+    # way to adopt HSTS is to start with a short max-age, confirm every path
+    # works over TLS, and raise it. A value baked into this file would make the
+    # cautious version of that a code change.
+    #
+    # **`preload` is deliberately absent from the default.** It is a one-way
+    # door — removal from the browser preload list takes months — and it commits
+    # every subdomain of the registrable domain, including ones this deployment
+    # does not own. Submitting to the list is the operator's decision to take
+    # knowingly, not a default to inherit.
+    add_header Strict-Transport-Security "${VL_HSTS}" always;
+
+    include ${VL_INCLUDE};
+}
+
+# --- Port 80, which exists for two reasons and serves no application ---------
+server {
+    listen ${VL_LISTEN_PORT};
+    server_name ${VL_SERVER_NAME};
+
+    access_log ${VL_ACCESS_LOG} vocallens;
+
+    # ACME http-01, which is how a certificate gets renewed. It is served
+    # *before* the redirect and from a webroot rather than proxied, so renewal
+    # does not depend on the application being up — the moment you most need to
+    # renew is the moment something is wrong.
+    #
+    # `^~` so this prefix wins outright and no regex location can take it.
+    location ^~ /.well-known/acme-challenge/ {
+        root ${VL_ACME_WEBROOT};
+        default_type text/plain;
+    }
+
+    # Everything else goes to TLS. 308 rather than 301: a permanent redirect
+    # that preserves the method and the body, so a POST that arrives here is not
+    # silently turned into a GET. Nothing should reach this in normal use — the
+    # app is served over TLS and HSTS keeps a returning browser off port 80
+    # entirely — which is exactly why it must not corrupt what does.
+    location / {
+        return 308 https://$host$request_uri;
+    }
+}
