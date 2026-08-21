@@ -94,7 +94,11 @@ export function AudioAnalysisResult({
         </h4>
         <div className="mt-4">
           {timeline && timeline.length > 0 ? (
-            <PitchGraph points={timeline} durationSeconds={summary.duration_seconds} />
+            <PitchGraph
+              points={timeline}
+              durationSeconds={summary.duration_seconds}
+              movedSections={summary.stability.unstable_sections}
+            />
           ) : (
             <p className="text-sm text-muted">
               {timelineError ??

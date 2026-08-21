@@ -1,11 +1,27 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { PitchPoint } from "@/types/api";
+import { movedStretchDefinition } from "@/lib/audio-analysis-metrics";
+import type { PitchPoint, UnstableSection } from "@/types/api";
 
 interface PitchGraphProps {
   points: PitchPoint[];
   durationSeconds: number;
+  /**
+   * Stretches where the pitch moved more than the threshold allows.
+   *
+   * Shaded rather than listed, and that is the whole reason they are here at
+   * all. `docs/ai.md` withholds this measurement from the model because a
+   * timestamped list *reads as a fault list*, and interpreting one safely needs
+   * a musical judgement the measurement does not support. On the graph it is
+   * not a list: the trace inside each band shows what the number is about, so
+   * the reader sees the evidence rather than a verdict — the same argument the
+   * key card makes for showing its twelve pitch classes.
+   *
+   * It was measured, documented and returned from Step 7I onward and reached
+   * nobody until Step 11.6, when an audit compared the payload with the screen.
+   */
+  movedSections?: UnstableSection[];
 }
 
 /** Room on the left for the note names drawn on the canvas. */
@@ -31,7 +47,11 @@ const MIN_MIDI_SPAN = 12;
  * the line it names; the numbers a screen reader needs are in the summary rows
  * above, and the canvas carries a description of what the line does.
  */
-export function PitchGraph({ points, durationSeconds }: PitchGraphProps) {
+export function PitchGraph({
+  points,
+  durationSeconds,
+  movedSections = [],
+}: PitchGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -54,6 +74,7 @@ export function PitchGraph({ points, durationSeconds }: PitchGraphProps) {
       const line = style.getPropertyValue("--graph-line").trim() || "#888";
       const grid = style.getPropertyValue("--graph-grid").trim() || "#ddd";
       const label = style.getPropertyValue("--graph-label").trim() || "#888";
+      const moved = style.getPropertyValue("--graph-moved").trim() || "#b45309";
 
       const [low, high] = midiBounds(points);
       const span = high - low;
@@ -62,6 +83,23 @@ export function PitchGraph({ points, durationSeconds }: PitchGraphProps) {
       const plotWidth = Math.max(width - AXIS_WIDTH, 1);
       const x = (seconds: number) => AXIS_WIDTH + (seconds / duration) * plotWidth;
       const y = (midi: number) => height - ((midi - low) / span) * height;
+
+      // The moved stretches go down first, behind everything, so the trace and
+      // the gridlines stay fully legible on top of them. A band is where the
+      // pitch moved, never a mark against it — a very low alpha rather than a
+      // warning colour at full strength, because this is context and not an
+      // alert, and the caption says so in words.
+      context.save();
+      context.globalAlpha = 0.16;
+      context.fillStyle = moved;
+      for (const section of movedSections) {
+        const start = x(clamp(section.start_seconds, 0, duration));
+        const end = x(clamp(section.end_seconds, 0, duration));
+        // A section shorter than a pixel would vanish; a minimum width keeps a
+        // brief one visible without moving where it starts.
+        context.fillRect(start, 0, Math.max(end - start, 2), height);
+      }
+      context.restore();
 
       // Octave lines, so the vertical axis has a scale rather than a shape.
       // Labels are drawn *on the canvas*, at the same y as the line they name:
@@ -115,7 +153,7 @@ export function PitchGraph({ points, durationSeconds }: PitchGraphProps) {
     const observer = new ResizeObserver(draw);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [points, durationSeconds]);
+  }, [points, durationSeconds, movedSections]);
 
   if (points.length === 0) return null;
 
@@ -124,8 +162,8 @@ export function PitchGraph({ points, durationSeconds }: PitchGraphProps) {
       <canvas
         ref={canvasRef}
         role="img"
-        aria-label={describe(points)}
-        className="h-40 w-full [--graph-grid:var(--border)] [--graph-label:var(--muted)] [--graph-line:var(--accent)] sm:h-48"
+        aria-label={describe(points, movedSections)}
+        className="h-40 w-full [--graph-grid:var(--border)] [--graph-label:var(--muted)] [--graph-line:var(--accent)] [--graph-moved:var(--warning)] sm:h-48"
       />
       <p className="mt-2 text-right text-[10px] text-muted">time →</p>
       <p className="mt-3 text-xs leading-relaxed text-muted">
@@ -133,6 +171,17 @@ export function PitchGraph({ points, durationSeconds }: PitchGraphProps) {
         pitch — silence, breath, or a consonant — and are left empty rather than
         joined up.
       </p>
+      {movedSections.length > 0 && (
+        <p className="mt-2 text-xs leading-relaxed text-muted">
+          The shaded stretches are where the pitch {movedStretchDefinition()}.{" "}
+          <strong className="font-medium">
+            That is where the pitch moved, not where you went wrong.
+          </strong>{" "}
+          Vibrato, a slide, a bend and a laugh all land there — and so does an
+          octave error in the detector. The line inside each band is what the
+          measurement is about; read it rather than the band.
+        </p>
+      )}
     </div>
   );
 }
@@ -165,12 +214,29 @@ function noteName(midi: number): string {
   return `${NOTE_NAMES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`;
 }
 
-function describe(points: PitchPoint[]): string {
+function describe(points: PitchPoint[], movedSections: UnstableSection[]): string {
   const first = points[0];
   const last = points[points.length - 1];
-  return (
+  const shape =
     `A graph of measured pitch over time, from ${first.note_name} at ` +
     `${first.timestamp_seconds.toFixed(1)} seconds to ${last.note_name} at ` +
-    `${last.timestamp_seconds.toFixed(1)} seconds, across ${points.length} measured points.`
+    `${last.timestamp_seconds.toFixed(1)} seconds, across ${points.length} measured points.`;
+
+  if (movedSections.length === 0) return shape;
+
+  // The bands are shading, which assistive technology cannot see. What they
+  // encode goes into the description instead, in the same words the caption
+  // uses — a picture whose meaning is carried only by colour is a picture some
+  // readers do not get.
+  const seconds = movedSections.reduce(
+    (total, section) => total + (section.end_seconds - section.start_seconds),
+    0,
+  );
+  const one = movedSections.length === 1;
+  return (
+    `${shape} ${movedSections.length} stretch${one ? "" : "es"} totalling ` +
+    `${seconds.toFixed(1)} seconds ${one ? "is" : "are"} shaded, where the pitch ` +
+    `${movedStretchDefinition()}. Vibrato, a slide and a bend all land there; it is where ` +
+    "the pitch moved, not where anything went wrong."
   );
 }

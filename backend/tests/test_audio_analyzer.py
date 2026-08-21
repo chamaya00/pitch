@@ -22,6 +22,8 @@ from app.core.errors import ErrorCode
 from app.services.audio_analysis.analyzer import (
     IN_TUNE_CENTS,
     MIN_RANGE_FRAMES,
+    MIN_UNSTABLE_SECONDS,
+    UNSTABLE_CENTS_STD,
     SignalAudioAnalyzer,
 )
 from app.services.audio_analysis.errors import (
@@ -31,9 +33,11 @@ from app.services.audio_analysis.errors import (
 )
 from app.services.audio_analysis.pitch import note_name_for_midi
 from tests.fixtures import (
+    glide_samples,
     harmonic_samples,
     noise_samples,
     silence_samples,
+    vibrato_samples,
     write_signal_wav,
     write_wav,
 )
@@ -416,3 +420,107 @@ def test_time_resolution_is_the_same_whatever_the_sample_rate(
         )
         counts.append(analyzer.analyze(path).metrics.stability.total_frames)
     assert abs(counts[0] - counts[1]) <= 2
+
+
+# --- Where the pitch moved -------------------------------------------------
+#
+# Step 11.6 found that `unstable_sections` had never been non-empty. It was
+# computed, stored, returned and documented as catching "vibrato, a slide, a
+# bend and a laugh" from Step 7I onward, and no signal that could be synthesised
+# produced one — because the threshold sat above what the quantity can reach.
+# The only test that touched it asserted a steady tone produces none, which a
+# function returning `()` unconditionally also passes.
+#
+# These are the tests that would have caught it, and the ones that hold the
+# threshold where the sweep on `UNSTABLE_CENTS_STD` put it. Both directions
+# matter: a measurement that fires on everything is as useless as one that fires
+# on nothing.
+
+
+def vibrato_file(path: Path, *, width_semitones: float, rate_hz: float, midi: float = 69.0) -> Path:
+    return write_signal_wav(
+        path,
+        vibrato_samples(
+            midi,
+            seconds=4.0,
+            sample_rate=SAMPLE_RATE,
+            width_semitones=width_semitones,
+            rate_hz=rate_hz,
+        ),
+        sample_rate=SAMPLE_RATE,
+    )
+
+
+def test_a_wide_vibrato_is_reported_as_a_moved_stretch(
+    analyzer: SignalAudioAnalyzer, tmp_path: Path
+) -> None:
+    """The positive case that did not exist, and whose absence hid the defect."""
+    result = analyzer.analyze(vibrato_file(tmp_path / "wide.wav", width_semitones=0.9, rate_hz=7.0))
+    sections = result.metrics.stability.unstable_sections
+
+    assert len(sections) >= 1
+    longest = max(section.end_seconds - section.start_seconds for section in sections)
+    assert longest >= MIN_UNSTABLE_SECONDS
+    assert all(section.cents_std > UNSTABLE_CENTS_STD for section in sections)
+
+
+def test_ordinary_singing_vibrato_is_not_reported_as_moved(
+    analyzer: SignalAudioAnalyzer, tmp_path: Path
+) -> None:
+    """0.3 semitones at 5 Hz is a normal vibrato, and calling it unstable would be a fault list."""
+    result = analyzer.analyze(
+        vibrato_file(tmp_path / "gentle.wav", width_semitones=0.3, rate_hz=5.0)
+    )
+    assert result.metrics.stability.unstable_sections == ()
+
+
+def test_a_long_glide_is_reported_as_a_moved_stretch(
+    analyzer: SignalAudioAnalyzer, tmp_path: Path
+) -> None:
+    # Two octaves in two seconds — the case the sweep on ``UNSTABLE_CENTS_STD``
+    # measured. A slower glide reads as steadier, and honestly so: the deviation
+    # from the nearest note wraps, so a slide passing cleanly through notes is
+    # under-reported by this quantity. That limitation is recorded rather than
+    # tuned away, because the alternative flags every note change.
+    result = analyzer.analyze(
+        write_signal_wav(
+            tmp_path / "glide.wav",
+            glide_samples(60.0, 84.0, seconds=2.0, sample_rate=SAMPLE_RATE),
+            sample_rate=SAMPLE_RATE,
+        )
+    )
+    assert len(result.metrics.stability.unstable_sections) >= 1
+
+
+def test_a_plain_melody_is_not_moved_at_its_note_changes(
+    analyzer: SignalAudioAnalyzer, tmp_path: Path
+) -> None:
+    """The binding constraint on the threshold, and the one it would be easiest to break.
+
+    A step from one note to the next moves 100 cents between two frames. It is
+    not instability, and a threshold low enough to catch a gentle vibrato would
+    call every note change in every melody unstable.
+    """
+    result = analyzer.analyze(
+        phrase_file(tmp_path / "melody.wav", 261.63, 293.66, 329.63, 392.0, 440.0, 523.25)
+    )
+    assert result.metrics.stability.unstable_sections == ()
+
+
+def test_a_moved_stretch_never_spans_silence(analyzer: SignalAudioAnalyzer, tmp_path: Path) -> None:
+    """A run is broken by a gap, so a section describes audio rather than a pause."""
+    samples = (
+        vibrato_samples(
+            69.0, seconds=1.5, sample_rate=SAMPLE_RATE, width_semitones=0.9, rate_hz=7.0
+        )
+        + silence_samples(seconds=1.0, sample_rate=SAMPLE_RATE)
+        + vibrato_samples(
+            69.0, seconds=1.5, sample_rate=SAMPLE_RATE, width_semitones=0.9, rate_hz=7.0
+        )
+    )
+    result = analyzer.analyze(
+        write_signal_wav(tmp_path / "split.wav", samples, sample_rate=SAMPLE_RATE)
+    )
+    for section in result.metrics.stability.unstable_sections:
+        # The silence sits between 1.5 s and 2.5 s; no section may cover it.
+        assert not (section.start_seconds < 1.6 and section.end_seconds > 2.4)

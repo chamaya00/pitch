@@ -116,6 +116,65 @@ def harmonic_samples(
     return samples
 
 
+def vibrato_samples(
+    midi: float,
+    *,
+    seconds: float,
+    sample_rate: int,
+    width_semitones: float,
+    rate_hz: float,
+    amplitude: float = 0.5,
+    partials: tuple[float, ...] = (1.0, 0.6, 0.4, 0.25, 0.15),
+) -> list[float]:
+    """A harmonic tone whose pitch swings, for the instability measurement.
+
+    Phase is accumulated rather than computed from ``2 pi f t``, because a
+    frequency that changes every sample makes the second form discontinuous —
+    the resulting clicks are broadband, and a pitch detector reads them as
+    anything at all.
+
+    ``width_semitones`` is the swing either side of ``midi``. A width of 0.3 at
+    5 Hz is ordinary singing vibrato and must never be reported as unstable;
+    0.9 at 7 Hz is wide enough that it must be. Both bounds are pinned by tests,
+    and the sweep that placed the threshold between them is recorded on
+    ``UNSTABLE_CENTS_STD``.
+    """
+    total = sum(partials)
+    samples: list[float] = []
+    phase = 0.0
+    for index in range(int(sample_rate * seconds)):
+        moment = index / sample_rate
+        swung = midi + width_semitones * math.sin(2 * math.pi * rate_hz * moment)
+        frequency = 440.0 * 2 ** ((swung - 69.0) / 12.0)
+        phase += 2 * math.pi * frequency / sample_rate
+        value = sum(gain * math.sin((n + 1) * phase) for n, gain in enumerate(partials))
+        samples.append(amplitude * value / total)
+    return samples
+
+
+def glide_samples(
+    from_midi: float,
+    to_midi: float,
+    *,
+    seconds: float,
+    sample_rate: int,
+    amplitude: float = 0.5,
+    partials: tuple[float, ...] = (1.0, 0.6, 0.4, 0.25, 0.15),
+) -> list[float]:
+    """A harmonic tone sliding from one pitch to another. Phase-accumulated, as above."""
+    total = sum(partials)
+    samples: list[float] = []
+    phase = 0.0
+    count = int(sample_rate * seconds)
+    for index in range(count):
+        swept = from_midi + (to_midi - from_midi) * (index / max(count - 1, 1))
+        frequency = 440.0 * 2 ** ((swept - 69.0) / 12.0)
+        phase += 2 * math.pi * frequency / sample_rate
+        value = sum(gain * math.sin((n + 1) * phase) for n, gain in enumerate(partials))
+        samples.append(amplitude * value / total)
+    return samples
+
+
 def sine_samples(
     frequency: float, *, seconds: float, sample_rate: int, amplitude: float = 0.5
 ) -> list[float]:

@@ -233,3 +233,13 @@ Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL`) are never hardcoded or committed.
 - [docs/ai.md](docs/ai.md) — LLM interpretation layer
 - [docs/limitations.md](docs/limitations.md) — what VocalLens cannot tell you
 - [docs/roadmap.md](docs/roadmap.md) — development phases
+
+## Licence
+
+[MIT](LICENSE). Use it, change it, ship it; keep the copyright notice, and
+expect no warranty.
+
+The absence of this file was found by the Step 10.20 audit rather than by anyone
+asking: the repository was public and carried no licence, which meant in law that
+nobody could use it, and nothing had written that down. It was the last of Phase
+10's outstanding items to need a decision rather than an engineer.
