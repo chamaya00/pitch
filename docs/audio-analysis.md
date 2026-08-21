@@ -403,9 +403,9 @@ what happened and the range describes what was sung.
 - **Pitch stability** — voiced ratio, signed and absolute mean cents deviation,
   cents standard deviation, semitone variance, `in_tune_ratio` (share of voiced
   frames within 25 cents), and unstable sections. A section is a run of ≥ 0.25 s
-  whose rolling 5-frame cents standard deviation exceeds 35 cents; runs are
+  whose rolling 5-frame cents standard deviation exceeds **20** cents; runs are
   broken by gaps, so a section never spans silence. **None of these is a skill
-  score.**
+  score**, and see below for what that threshold was and why it moved.
 - **Loudness** — RMS, peak, crest factor, clipped-sample ratio, and a dynamic
   range *estimate* (95th minus 5th percentile of per-frame RMS, in dB —
   percentiles rather than max-minus-min so one clipped sample cannot define it).
@@ -415,6 +415,71 @@ what happened and the range describes what was sung.
   measurable characteristics. **No timbre label is derived from them anywhere**
   — "bright", "dark", "breathy", "nasal" are classifications, and no validated
   classifier exists in this project.
+
+### Where the pitch moved, and the threshold that reported nothing
+
+`unstable_sections` was computed, stored, returned and documented as catching
+"vibrato, a slide, a bend and a laugh" from Step 7I onward. **In Step 11.6 it was
+found never to have been non-empty.** No signal that could be synthesised
+produced a section: not a 0.9-semitone vibrato, not a two-octave glide, not a
+trill, not a 43 Hz wobble.
+
+**Why it could not fire.** The quantity thresholded is the deviation from the
+*nearest note*, which by construction lives in ±50 cents. A five-frame window can
+only exceed 35 by holding values near both extremes at once, which needs the
+pitch to move about a semitone every 23 ms — faster than anything the detector
+can still track. Above 25 cents the flagged frames also stop being consecutive,
+and the minimum run asks for a quarter-second of them in a row.
+
+**Why nobody noticed.** The only test that touched the field asserted that a
+steady tone produces no sections. A function returning `()` unconditionally
+passes that test. The positive case did not exist, and the lesson is the one this
+project has recorded before: a measurement needs a test that makes it *fire*, not
+only one that keeps it quiet.
+
+**The sweep that set 20.** Each cell is the longest consecutive run, in seconds,
+at that threshold. A run reaching 0.25 s becomes a section:
+
+| signal | 15 | 20 | 25 | 30 | 35 |
+| --- | --- | --- | --- | --- | --- |
+| steady tone | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| steady, 8 cents sharp | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| **stepped C major melody** | 0.16 | **0.07** | 0.07 | 0.00 | 0.00 |
+| vibrato 0.2 st at 5 Hz | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| vibrato 0.3 st at 5 Hz | 0.05 | 0.00 | 0.00 | 0.00 | 0.00 |
+| vibrato 0.4 st at 6 Hz | 0.05 | 0.00 | 0.00 | 0.00 | 0.00 |
+| vibrato 0.7 st at 6 Hz | 3.83 | **0.65** | 0.07 | 0.05 | 0.00 |
+| vibrato 0.9 st at 7 Hz | 3.83 | 3.83 | 0.44 | 0.05 | 0.00 |
+| vibrato 1.5 st at 6 Hz | 0.98 | 0.65 | 0.23 | 0.07 | 0.00 |
+| glide 24 st over 2.0 s | 1.93 | 1.93 | 0.09 | 0.05 | 0.00 |
+
+**20 is the only value that separates the two halves with margin.** Above it the
+widest vibrato and a two-octave glide stop reaching a quarter-second; at 15 an
+ordinary 0.3-semitone vibrato begins flagging frames. **The binding constraint is
+the stepped melody, not the steady tone**: its 0.07 s is the note-transition
+frames of ordinary singing, which must never be called unstable, against a 0.25 s
+minimum — while the smallest run from a signal that should fire is 0.65 s.
+
+**The window was checked rather than assumed.** 9, 11, 15 and 21-frame windows
+were swept against the same signals, and none separates them at a threshold that
+5 frames cannot.
+
+**What didn't work, and is kept anyway.** Measuring the rolling deviation of
+*absolute pitch* rather than of the deviation from the nearest note fixes the two
+things this quantity under-reports — a 1.5-semitone vibrato scoring lower than a
+0.9-semitone one, and a fast glide reading as steady — because neither wraps at
+the semitone boundary. It was measured, and it flags the stepped C major melody
+at 105 cents: every note change in every melody anybody will ever sing. The wrap
+is the price of being immune to a clean step between notes, and it is paid
+deliberately.
+
+**Where it is shown.** Shaded on the pitch graph, never as a timestamped list.
+`ai.md` withholds the field from the model because a list reads as a fault list
+and interpreting one safely needs a musical judgement the measurement does not
+support; on the graph the trace inside each band shows what the number is about,
+which is the same argument the key card makes for its twelve pitch classes. What
+the shading encodes is repeated in the canvas description, since a picture whose
+meaning is carried only by colour is a picture some readers do not get.
 
 Every one of these is `null` when the signal could not support it. A recording
 with nothing voiced has no range and no deviation; it does not have a range of

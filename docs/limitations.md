@@ -65,6 +65,27 @@ melody, so it cannot say whether the note was the right one — only how close t
 pitch sat to *some* note. Slides, vibrato, blues bends and non-Western
 intonation systems all lower it without anything being wrong.
 
+### Where the pitch moved
+
+The shaded stretches on the pitch graph are runs of at least a quarter of a
+second whose rolling five-frame deviation from the nearest note exceeds 20 cents.
+Three things about them:
+
+- **It is where the pitch moved, never where anything went wrong.** Vibrato, a
+  slide, a bend and a laugh all land there, and so does an octave error in the
+  detector. It is descriptive, and no wording anywhere treats it as a fault.
+- **A slide is under-reported.** The measurement is the deviation from the
+  *nearest note*, which wraps at the semitone boundary, so a glide passing
+  cleanly through notes reads as steadier than a wide vibrato despite moving
+  further. The alternative — the same window over absolute pitch — catches
+  glides and flags every note change in every melody, which is worse. The wrap
+  is the price of being immune to a clean step between notes.
+- **It reported nothing at all until Step 11.6.** The threshold was 20 cents
+  above what the quantity can reach, so the measurement had been computed,
+  stored and returned since Step 7I and had never once been non-empty. The sweep
+  that corrected it, and the ten signals it was placed against, are recorded in
+  [audio-analysis.md](audio-analysis.md).
+
 ### Loudness and spectrum
 
 RMS and peak are amplitude measurements, **not LUFS**: no loudness weighting, no
@@ -366,14 +387,21 @@ not, and it is worth knowing which:
 
 ## Reclaiming unused identities
 
-An identity that owns **no recordings** and has not been used for the retention
+An identity that owns **nothing at all** and has not been used for the retention
 period (30 days by default) is deleted, along with its keys. What that does
 **not** cover:
 
-- **Identities that own recordings are never deleted, at any age.** Nothing in
+- **Identities that own anything are never deleted, at any age.** Nothing in
   this project specifies how long somebody's singing history should be kept, so
   nothing decides it. An identity abandoned five years ago with one recording in
   it stays forever.
+- **"Owns nothing" is a list, and the list grew.** Until Step 11 a recording was
+  the only thing an identity could hold, so "owns no recordings" and "owns
+  nothing" were the same sentence. Song references made them different: an
+  identity holding songs it described and no recordings is **not** eligible, and
+  both halves of the check — the candidate query and the re-check under the row
+  lock — ask about both kinds. A predicate on one and not the other is how
+  somebody loses data to a race.
 - **Cleanup does not run by itself.** There is no scheduler; it is a command an
   operator runs. Nothing happens until somebody or something runs it.
 - **"Last seen" is coarse.** It is refreshed at most once an hour, so it can lag
@@ -520,22 +548,59 @@ it, and four things are true only of it:
   investigated later. That is the price of the guarantee it is built on:
   microphone audio never leaves the page.
 
-## Song compatibility (Phase 9+)
+## Song compatibility
 
-A compatibility score compares a detected range against an estimated song range.
-It is not an objective statement about whether someone can sing a song. Tessitura
-(where a melody sits most of the time), breath demands, register transitions and
-stylistic technique are not captured by range overlap.
+Built in Step 11, under the input model recorded in
+[phase-9-specification.md §3A](phase-9-specification.md#3a-the-decision-2026-08-20):
+**a reference song is metadata somebody typed.** There is no reference audio
+anywhere in this product, and none is planned.
 
-**None of it is built.** The Phase 9 audit confirmed from source that there is no
-reference input of any kind — no upload, no catalogue, no provider, no stored
-song metadata — and therefore no overlap, difficulty, suitability or
-transposition calculation anywhere. It is blocked on one product decision: where
-a reference song comes from. See
-[phase-9-specification.md](phase-9-specification.md), including
-[the limitations it would have to ship with](phase-9-specification.md#14-limitations-to-ship-with-it)
-and why a single composite compatibility percentage is treated there as a
-product decision rather than a default.
+**The song's numbers were not measured here.** They are the lowest note, the
+highest note and optionally the key that a person entered into a form. Every
+figure derived from them — the overlap, either gap, the shift — is an arithmetic
+consequence of an unverified input. The product's central rule, that a number
+shown is a number measured, is *not* satisfied by the reference side, which is
+why every range carries a `source` of `measured` or `asserted`, why the UI states
+the difference in words rather than in styling, and why the caveat is on every
+result rather than in this file alone.
+
+**Range overlap is not a statement about whether someone can sing a song.**
+Tessitura — where a melody actually sits, rather than where it peaks — breath
+demands, register transitions and stylistic technique are none of them measured
+here, and none is claimed. A song can fall entirely inside a detected range and
+be unsingable, and a song can fall outside it and be sung comfortably on another
+day.
+
+**The singer's side inherits every limit the detected range has.** It is what
+*one recording* contained, bounded by what was performed, by the microphone and
+by the room. A comparison against it is a comparison against that take.
+
+**A transposition figure is arithmetic, not musical advice.** It says a shift
+exists and how large it is. It says nothing about whether the result is singable,
+and nothing about whether it should be performed that way.
+
+**There is no compatibility score, and no field that could hold one.** A single
+figure would have to weight the gap at the top against the gap at the bottom
+against the overlap in the middle, and no measurement anywhere in this repository
+sets those weights. Reported instead: how many of the song's semitones are in
+reach, that as a share of the song's range, the distance out at each end, and the
+shift that closes them.
+
+**Which shift is recommended is a stated convention, not a finding.** When
+several fit, the one nearest zero is offered — the least change to the song. The
+alternative, centring the song in the range, would claim that the middle of a
+detected range is the comfortable part of a voice, and nothing here measures
+comfort.
+
+**No fixture validates any of this against a real song.** The arithmetic is
+exercised over synthesised ranges and boundaries and nothing else, which is a
+smaller and honest claim: the suite says the sums are right, never that a
+compatibility result describes a real person singing a real song.
+
+**Deferred, and named so it is not assumed:** melody match — whether the right
+notes were sung — needs an ordered note sequence on both sides and neither
+exists; song sections, tempo and beat are not computed; and no reference vocal is
+separated from anything, because nothing here decodes a song at all.
 
 ## AI vocal feedback
 

@@ -1,6 +1,6 @@
 # VocalLens
 
-**Hear how you speak.**
+**Hear how you sound.**
 
 Record from your microphone or upload a file. VocalLens measures the recording
 two ways — what you *said* and how you said it (transcript, pace, pauses, filler
@@ -37,7 +37,7 @@ Implemented and working end to end:
   conversion and cents deviation, detected range, pitch stability, loudness
   (RMS, peak, dynamic-range estimate, clipping) and spectral characteristics
   (centroid, bandwidth, rolloff, zero-crossing rate, flatness), plus a pitch
-  timeline for the graph.
+  timeline for the graph with the stretches where the pitch moved shaded on it.
 - **Musical key** — the key implied by what was sung, folded from the same pitch
   timeline. It refuses rather than guesses: a hum, an arpeggio or a wandering
   phrase is reported as "not measured" with the reason and the evidence shown.
@@ -48,6 +48,12 @@ Implemented and working end to end:
 - **Recording history, comparison and progress** — an owner's recordings over
   time, two of them side by side, and their measurements charted. Deterministic
   arithmetic throughout: no grade, no level, no trend line.
+- **Song compatibility** — describe a song by its lowest and highest note and
+  see how much of it falls inside the range a recording covered, the distance
+  out at each end, and the shift that would bring the rest in. **The song's
+  numbers are typed, not measured**, and every range says which it is: there is
+  no reference audio anywhere in this product. No compatibility score, and no
+  field that could hold one.
 - **AI feedback** — an LLM explaining the speech measurements. It never produces
   a number and never produces a score.
 
@@ -60,15 +66,15 @@ audio analysis works on a deployment with no credentials at all. With `mock`
 selected the speech output is demo data, and the UI says so in a banner rather
 than passing it off as analysis.
 
-**Not implemented yet:** vocal/instrument separation, song melody extraction,
-song compatibility, transpose recommendation, tempo and beat tracking, and
-musical transcription. The key estimate above is the key of *what you sang* —
-this product accepts no song, no reference track and no second audio input, so
-there is nothing to compare a recording against. That gap is the reason song
-compatibility (Phase 9) has not started — where a reference song would come from
-is an open product decision, audited and specified in
-[docs/phase-9-specification.md](docs/phase-9-specification.md). See also
-[docs/roadmap.md](docs/roadmap.md).
+**Not implemented, and not planned:** vocal/instrument separation, song melody
+extraction, tempo and beat tracking, and musical transcription. **This product
+accepts no song audio, no reference track and no second audio input** — song
+compatibility works from a range you type, which is the input model chosen in
+[docs/phase-9-specification.md §3A](docs/phase-9-specification.md#3a-the-decision-2026-08-20)
+and whose cost is stated there and on every result. Because there is no melody
+on either side, nothing here can say *which notes* of a song will be hard, or
+whether the notes you sang were the intended ones — the key estimate above is
+the key of *what you sang*. See [docs/roadmap.md](docs/roadmap.md).
 
 Every result is an **audio-based estimate from one recording**. Nothing here has
 been validated against annotated reference data; see

@@ -1,20 +1,23 @@
 # Phase 9 — specification
 
-> **Status: the blocker is answered. Implementation follows.**
+> **Status: superseded. Phase 9 shipped in Step 11.**
 >
-> This file was written as an audit and a specification for **unbuilt** work,
-> and it stayed blocked from the Phase 9 audit until 2026-08-20 because
+> This file is kept as the record of how Phase 9 was decided, not as a
+> description of the running system. It was written as an audit of **unbuilt**
+> work and stayed blocked from the Phase 9 audit until 2026-08-20, because
 > **the product had never said where a reference song comes from**. On
 > 2026-08-20 the owner answered: **Option D**, the user supplies metadata.
 > [§3A](#3a-the-decision-2026-08-20) records the answer, what it settles
-> downstream, and what it costs.
+> downstream, and what it costs. Step 11 built it.
 >
-> Everything below §3A was written *before* the decision and is left as it was.
-> Read §4 as the analysis that informed the choice rather than as a description
-> of the system, and read the options other than D as roads not taken. Where
-> this file and the shipped documents disagree, [api.md](api.md),
-> [audio-analysis.md](audio-analysis.md), [architecture.md](architecture.md)
-> and [limitations.md](limitations.md) are right.
+> Everything below §3A was written *before* the decision and is left exactly as
+> it was: §4 is the analysis that informed the choice, and the options other
+> than D are roads not taken. The drafts in §9 and §10 are drafts — the shipped
+> contracts differ from them in places, and where they disagree
+> [api.md](api.md), [audio-analysis.md](audio-analysis.md),
+> [architecture.md](architecture.md) and [limitations.md](limitations.md) are
+> right. Nothing here is deleted, because what a decision was chosen against is
+> part of the decision.
 
 ## Revision history
 
@@ -22,6 +25,7 @@
 | --- | --- |
 | Phase 9 audit | This file. Re-audited the repository after Phase 8 closed, confirmed the roadmap's Phase 9 row against source, established that no part of it exists, named the blocking product decision, and specified everything that can be specified without answering it. Two stale claims found elsewhere in the docs and corrected in the same commit. |
 | 11.1 (2026-08-20) | The blocker is answered. Option D — the user supplies metadata — chosen by the owner, and recorded in [§3A](#3a-the-decision-2026-08-20) with the five downstream questions it settles or retires. Nothing else in this file changed. |
+| Step 11 | Built. Marked superseded rather than deleted. The shipped contracts are in [api.md](api.md); what differs from the §9 and §10 drafts is recorded there and in [roadmap.md](roadmap.md), notably that the recording side reports no `not_found` and the reference side reports no status at all — both are `404`s, because the recording is a path segment and a reference either exists with a range or does not exist. |
 
 ---
 
