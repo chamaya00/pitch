@@ -31,6 +31,7 @@ import {
   referenceNoteOptions,
   refusalMessage,
   sourceLabel,
+  transpositionNote,
   transpositionSentence,
   windowLabel,
 } from "../lib/song-compatibility.ts";
@@ -285,4 +286,20 @@ test("a song with no artist is labelled by its title alone", () => {
   assert.equal(referenceLabel("A song", null), "A song");
   assert.equal(referenceLabel("A song", "  "), "A song");
   assert.equal(referenceLabel("A song", "Somebody"), "A song — Somebody");
+});
+
+test("the note under a transposition does not claim a shift exists when none does", () => {
+  // It was rendered underneath "no shift brings all of it inside" until the
+  // card was read on screen rather than in a test.
+  const fits = transpositionNote(shift());
+  const does_not = transpositionNote(
+    shift({ possible: false, semitones: null, shortfall_semitones: 4,
+            lowest_workable_semitones: null, highest_workable_semitones: null,
+            resulting_lowest_note: null, resulting_highest_note: null }),
+  );
+  assert.match(fits, /says a shift exists/);
+  assert.doesNotMatch(does_not, /a shift exists/);
+  // Both still refuse the same claim.
+  assert.match(fits, /not that the result is singable/);
+  assert.match(does_not, /not a statement about whether you could sing/);
 });

@@ -173,6 +173,21 @@ export function transpositionSentence(shift: Transposition): string {
   );
 }
 
+/**
+ * The standing note under a transposition, which differs by state.
+ *
+ * Both sentences say the same thing about the method — that this is arithmetic
+ * on two ranges — and they differ in what they refuse to claim, because a
+ * sentence written for one state is not merely redundant in the other: "it says
+ * a shift exists" was rendered underneath "no shift brings all of it inside"
+ * until somebody read the card rather than the tests.
+ */
+export function transpositionNote(shift: Transposition): string {
+  return shift.possible
+    ? "This is arithmetic on two ranges. It says a shift exists — not that the result is singable, and not that it should be performed that way."
+    : "This is arithmetic on two ranges. That no shift fits is a fact about those two numbers — not a statement about whether you could sing the song, and not a limit on your voice.";
+}
+
 /** Where the song would land, or `null` when nothing fits. */
 export function landingLabel(shift: Transposition): string | null {
   if (!shift.possible) return null;

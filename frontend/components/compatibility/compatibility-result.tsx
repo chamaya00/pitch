@@ -8,6 +8,7 @@ import {
   rangeLabel,
   refusalMessage,
   sourceLabel,
+  transpositionNote,
   transpositionSentence,
   windowLabel,
 } from "@/lib/song-compatibility";
@@ -105,8 +106,7 @@ export function CompatibilityResult({ result }: CompatibilityResultProps) {
           </p>
         )}
         <p className="mt-2 max-w-prose text-xs leading-relaxed text-muted">
-          This is arithmetic on two ranges. It says a shift exists — not that
-          the result is singable, and not that it should be performed that way.
+          {transpositionNote(transposition)}
         </p>
       </section>
 
