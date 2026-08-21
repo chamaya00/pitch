@@ -14,6 +14,7 @@ import {
   deletionWarning,
   describeKey,
   formatIssued,
+  holdsNothing,
   isDeletionConfirmed,
   recoveryKeyProblem,
   revocationProblem,
@@ -526,7 +527,11 @@ export function IdentityPanel() {
               <div className="mt-4">
                 <Button
                   variant="secondary"
-                  disabled={state.identity.recordings === 0}
+                  // Disabled only when the key holds *nothing*. A key holding
+                  // songs and no recordings holds something, and a button that
+                  // refused to delete it would be refusing the one thing this
+                  // panel exists to offer.
+                  disabled={holdsNothing(state.identity)}
                   onClick={() => setConfirming(true)}
                 >
                   Delete everything

@@ -187,7 +187,11 @@ def test_a_reference_can_be_read_back_and_deleted(
     url = f"{REFERENCES_URL}/{created['reference_id']}"
 
     assert client.get(url, headers=owner_headers).status_code == 200
-    assert client.delete(url, headers=owner_headers).status_code == 204
+    removed = client.delete(url, headers=owner_headers)
+    assert removed.status_code == 200
+    # The remaining collection, so a client that just changed it needs no
+    # second round trip to learn what is left.
+    assert removed.json() == {"count": 0, "references": []}
     assert client.get(url, headers=owner_headers).status_code == 404
 
 
@@ -198,7 +202,7 @@ def test_deleting_a_reference_twice_reports_the_second_rather_than_pretending(
     created = create_reference(client, owner_headers)
     url = f"{REFERENCES_URL}/{created['reference_id']}"
 
-    assert client.delete(url, headers=owner_headers).status_code == 204
+    assert client.delete(url, headers=owner_headers).status_code == 200
     second = client.delete(url, headers=owner_headers)
     assert second.status_code == 404
     assert second.json()["error_code"] == ErrorCode.REFERENCE_NOT_FOUND

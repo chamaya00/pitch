@@ -160,12 +160,16 @@ async def read_reference(
 
 @router.delete(
     "/references/{reference_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=SongReferenceListResponse,
     summary="Remove one of your song references",
     description=(
-        "Delete a reference. Nothing else is affected: a reference holds no "
-        "audio and no analysis, and the recordings it was compared against are "
-        "untouched.\n\n"
+        "Delete a reference and return the ones that remain.\n\n"
+        "**Returns the remaining list rather than a bare `204`**, the way "
+        "revoking a credential does: a client that has just changed a "
+        "collection needs the collection, and a follow-up `GET` would be a "
+        "second round trip to learn something this response already knows.\n\n"
+        "Nothing else is affected: a reference holds no audio and no analysis, "
+        "and the recordings it was compared against are untouched.\n\n"
         "**Never rate-limited**, for the reason deletion is never rate-limited "
         "here: being told to slow down while removing your own data is the one "
         "moment a limit is indefensible."
@@ -180,9 +184,14 @@ async def delete_reference(
     service: SongReferenceServiceDep,
     owner_id: OwnerIdDep,
     reference_id: ReferenceIdPath,
-) -> None:
-    """Remove one reference belonging to the caller."""
+    limit: Annotated[
+        int,
+        Query(ge=1, le=MAX_REFERENCE_LIMIT, description="Largest number to return."),
+    ] = DEFAULT_REFERENCE_LIMIT,
+) -> SongReferenceListResponse:
+    """Remove one reference belonging to the caller and return the rest."""
     await service.delete(reference_id, owner_id)
+    return SongReferenceListResponse.from_domain(await service.list_for_owner(owner_id, limit))
 
 
 @router.get(
