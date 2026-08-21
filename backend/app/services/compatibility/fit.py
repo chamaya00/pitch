@@ -39,7 +39,6 @@ from app.services.compatibility.models import (
     RangeSource,
     RecordingSideStatus,
     ReferenceKey,
-    ReferenceSideStatus,
     SongCompatibility,
     SongReference,
     Transposition,
@@ -216,7 +215,6 @@ def compare(
     return SongCompatibility(
         comparable=True,
         recording_status=RecordingSideStatus.READY,
-        reference_status=ReferenceSideStatus.READY,
         recording_range=singer,
         reference_range=song,
         reference=reference,

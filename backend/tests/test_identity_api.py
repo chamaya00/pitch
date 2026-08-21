@@ -191,6 +191,7 @@ def test_the_identity_response_carries_no_recording_content(
         "recordings",
         "analysed_recordings",
         "ai_feedback",
+        "song_references",
         "credentials",
     }
     # The added list is a whitelist too: labels and ids, never hash or key.
@@ -376,3 +377,25 @@ def test_no_route_returns_a_key(client: TestClient) -> None:
     for field in identity_schema["properties"]:
         assert "token" not in field
         assert "key" not in field
+
+
+def test_the_identity_summary_counts_song_references(
+    client: TestClient, owner_headers: dict[str, str]
+) -> None:
+    """Deleting an identity deletes these too, so the warning has to name them.
+
+    Not a count of recordings, unlike the three fields beside it: an identity
+    can hold references and have uploaded nothing at all.
+    """
+    for title in ("First song", "Second song"):
+        created = client.post(
+            "/api/v1/references",
+            json={"title": title, "lowest_note": "C4", "highest_note": "C5"},
+            headers=owner_headers,
+        )
+        assert created.status_code == 201, created.text
+
+    body = client.get(IDENTITY_URL, headers=owner_headers).json()
+
+    assert body["song_references"] == 2
+    assert body["recordings"] == 0

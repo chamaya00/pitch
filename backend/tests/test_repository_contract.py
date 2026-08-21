@@ -57,6 +57,8 @@ from app.services.audio_analysis.postgres_repository import (
     AudioAnalysisConflictError,
     PostgresAudioAnalysisRepository,
 )
+from app.services.compatibility.models import SongReference, new_reference_id
+from app.services.compatibility.repository import PostgresSongReferenceRepository
 from app.services.owners.credential_repository import PostgresCredentialRepository
 from app.services.owners.credentials import (
     CredentialExistsError,
@@ -74,6 +76,7 @@ from tests.doubles import (
     InMemoryCredentialRepository,
     InMemoryOwnerRepository,
     InMemoryRecordingRepository,
+    InMemorySongReferenceRepository,
 )
 
 DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
@@ -83,13 +86,20 @@ class Backend:
     """A wired set of repositories, however they happen to be stored."""
 
     def __init__(
-        self, owners: Any, credentials: Any, recordings: Any, analyses: Any, audio: Any
+        self,
+        owners: Any,
+        credentials: Any,
+        recordings: Any,
+        analyses: Any,
+        audio: Any,
+        references: Any,
     ) -> None:
         self.owners = owners
         self.credentials = credentials
         self.recordings = recordings
         self.analyses = analyses
         self.audio = audio
+        self.references = references
 
     async def owner(self) -> Owner:
         owner, token = new_owner()
@@ -105,7 +115,8 @@ async def _memory_backend() -> AsyncIterator[Backend]:
     # The owner double needs the recordings back-reference to answer the data
     # summary and to cascade a deletion — without it, it reports zeroes where
     # SQL reports counts. The contract suite caught exactly that.
-    owners = InMemoryOwnerRepository(recordings)
+    references = InMemorySongReferenceRepository()
+    owners = InMemoryOwnerRepository(recordings, references=references)
     yield Backend(
         owners=owners,
         # Built over the owner double's own store, because in PostgreSQL there
@@ -114,6 +125,7 @@ async def _memory_backend() -> AsyncIterator[Backend]:
         recordings=recordings,
         analyses=analyses,
         audio=audio,
+        references=references,
     )
 
 
@@ -134,6 +146,7 @@ async def _postgres_backend() -> AsyncIterator[Backend]:
             recordings=PostgresRecordingRepository(database),
             analyses=PostgresAnalysisRepository(database),
             audio=PostgresAudioAnalysisRepository(database),
+            references=PostgresSongReferenceRepository(database),
         )
     finally:
         await database.close()
@@ -2191,3 +2204,164 @@ def test_claiming_never_touches_another_owner(backend: Any) -> None:
         assert await prepared.recordings.get(stored.recording_id, keeper.owner_id) is not None
 
     backend(work)
+
+
+# --- Song references -------------------------------------------------------
+
+
+def make_reference(**overrides: Any) -> SongReference:
+    payload: dict[str, Any] = {
+        "reference_id": new_reference_id(),
+        "title": "A song",
+        "artist": "Somebody",
+        "lowest_note": "C4",
+        "highest_note": "C5",
+    }
+    payload.update(overrides)
+    return SongReference.model_validate(payload)
+
+
+def test_a_reference_round_trips_for_its_owner(backend: Any) -> None:
+    async def work(prepared: Backend) -> SongReference | None:
+        owner = await prepared.owner()
+        reference = make_reference(key={"tonic": "D", "mode": "major"})
+        await prepared.references.create(reference, owner.owner_id)
+        return await prepared.references.get(reference.reference_id, owner.owner_id)
+
+    stored = backend(work)
+    assert stored is not None
+    assert stored.title == "A song"
+    assert stored.key is not None and stored.key.tonic == "D"
+    assert stored.source.value == "asserted"
+
+
+def test_another_owners_reference_is_indistinguishable_from_a_missing_one(backend: Any) -> None:
+    async def work(prepared: Backend) -> tuple[Any, Any]:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        reference = make_reference()
+        await prepared.references.create(reference, theirs.owner_id)
+        return (
+            await prepared.references.get(reference.reference_id, mine.owner_id),
+            await prepared.references.get(new_reference_id(), mine.owner_id),
+        )
+
+    stolen, invented = backend(work)
+    assert stolen is None
+    assert invented is None
+
+
+def test_references_come_back_newest_first_and_only_yours(backend: Any) -> None:
+    async def work(prepared: Backend) -> list[str]:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        base = datetime(2026, 3, 1, 12, tzinfo=UTC)
+        for index, title in enumerate(("oldest", "middle", "newest")):
+            await prepared.references.create(
+                make_reference(title=title, created_at=base + timedelta(minutes=index)),
+                mine.owner_id,
+            )
+        await prepared.references.create(make_reference(title="theirs"), theirs.owner_id)
+        listed = await prepared.references.list_for_owner(mine.owner_id, 10)
+        return [one.title for one in listed]
+
+    assert backend(work) == ["newest", "middle", "oldest"]
+
+
+def test_a_reference_listing_respects_its_limit(backend: Any) -> None:
+    async def work(prepared: Backend) -> int:
+        owner = await prepared.owner()
+        for index in range(5):
+            await prepared.references.create(make_reference(title=f"song {index}"), owner.owner_id)
+        return len(await prepared.references.list_for_owner(owner.owner_id, 2))
+
+    assert backend(work) == 2
+
+
+def test_a_reference_can_be_deleted_by_its_owner_and_by_nobody_else(backend: Any) -> None:
+    async def work(prepared: Backend) -> tuple[bool, bool, Any]:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        reference = make_reference()
+        await prepared.references.create(reference, mine.owner_id)
+        refused = await prepared.references.delete(reference.reference_id, theirs.owner_id)
+        removed = await prepared.references.delete(reference.reference_id, mine.owner_id)
+        return (
+            refused,
+            removed,
+            await prepared.references.get(reference.reference_id, mine.owner_id),
+        )
+
+    refused, removed, after = backend(work)
+    assert refused is False
+    assert removed is True
+    assert after is None
+
+
+def test_references_are_counted_per_owner(backend: Any) -> None:
+    async def work(prepared: Backend) -> tuple[int, int]:
+        mine = await prepared.owner()
+        theirs = await prepared.owner()
+        for index in range(3):
+            await prepared.references.create(make_reference(title=f"song {index}"), mine.owner_id)
+        await prepared.references.create(make_reference(), theirs.owner_id)
+        return (
+            await prepared.references.count_for_owner(mine.owner_id),
+            await prepared.references.count_for_owner(theirs.owner_id),
+        )
+
+    assert backend(work) == (3, 1)
+
+
+def test_the_identity_summary_counts_references_as_well_as_recordings(backend: Any) -> None:
+    """The two stores must agree about what an identity holds.
+
+    Step 10.19 found them disagreeing about the feedback count, in different
+    ways, with nothing having asked either of them. This is the same question
+    asked of the field Step 11.3 added.
+    """
+
+    async def work(prepared: Backend) -> tuple[int, int]:
+        owner = await prepared.owner()
+        await prepared.recordings.create(make_recording(), owner.owner_id)
+        for index in range(2):
+            await prepared.references.create(make_reference(title=f"song {index}"), owner.owner_id)
+        summary = await prepared.owners.data_summary(owner.owner_id)
+        return summary.recordings, summary.song_references
+
+    assert backend(work) == (1, 2)
+
+
+def test_an_identity_holding_only_references_is_not_reclaimable(backend: Any) -> None:
+    """The retention predicate, asked of both stores.
+
+    An owner with no recordings and one reference must not be a candidate — the
+    rule is *owns nothing*, and a store that still asked only about recordings
+    would silently delete somebody's references.
+    """
+
+    async def work(prepared: Backend) -> list[uuid.UUID]:
+        owner = await prepared.owner()
+        await prepared.references.create(make_reference(), owner.owner_id)
+        await prepared.owners.touch(owner.owner_id, timedelta(seconds=0))
+        return await prepared.owners.expired_owner_ids(datetime.now(UTC), 10)
+
+    assert backend(work) == []
+
+
+def test_deleting_an_owner_takes_their_references_with_it(backend: Any) -> None:
+    """``ON DELETE CASCADE`` in SQL, and by hand in the double."""
+
+    async def work(prepared: Backend) -> tuple[int, Any]:
+        owner = await prepared.owner()
+        reference = make_reference()
+        await prepared.references.create(reference, owner.owner_id)
+        await prepared.owners.delete_owner(owner.owner_id)
+        return (
+            await prepared.references.count_for_owner(owner.owner_id),
+            await prepared.references.get(reference.reference_id, owner.owner_id),
+        )
+
+    remaining, found = backend(work)
+    assert remaining == 0
+    assert found is None

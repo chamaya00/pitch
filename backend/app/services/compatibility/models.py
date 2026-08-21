@@ -22,6 +22,7 @@ Nothing here reads a provider, a file, a socket or a clock. It is arithmetic
 over two closed intervals of semitones.
 """
 
+import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final, Self
@@ -46,6 +47,41 @@ MAX_ARTIST_LENGTH: Final = 200
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def new_reference_id() -> str:
+    """Return a fresh, server-generated reference identifier.
+
+    ``uuid4().hex``, the same shape every other identifier in this system uses,
+    and generated here rather than accepted from a client for the same reason
+    every other id is.
+    """
+    return uuid.uuid4().hex
+
+
+def validated_range(lowest_note: str, highest_note: str) -> tuple[int, int]:
+    """The two notes as MIDI numbers, or a ``ValueError`` saying which one is wrong.
+
+    **One rule, one place, two entry points.** It guards the stored document
+    (:class:`SongReference`) and the request body
+    (``schemas/compatibility.py``), which is what makes a row read back from
+    storage held to the same rule as one arriving over HTTP — and what makes a
+    malformed request a documented ``422`` rather than a validator raising deep
+    inside a route.
+
+    The field patterns cannot do this on their own: they admit ``B9``, which is
+    spelled correctly and is not a MIDI note, and they cannot see two fields at
+    once to compare them.
+    """
+    low = midi_for_note_name(lowest_note)
+    high = midi_for_note_name(highest_note)
+    if low is None:
+        raise ValueError("lowest note is not a note this project can name")
+    if high is None:
+        raise ValueError("highest note is not a note this project can name")
+    if high < low:
+        raise ValueError("highest note is below the lowest")
+    return low, high
 
 
 class RangeSource(StrEnum):
@@ -106,18 +142,11 @@ class SongReference(BaseModel):
         """The two notes must name a range, and both must be real MIDI notes.
 
         The pattern above admits ``B9``, which is not a MIDI note; the parser is
-        what actually decides. Checking here rather than in the route means a
-        row read back from storage is held to the same rule as one arriving
+        what actually decides. Checking here rather than only in the route means
+        a row read back from storage is held to the same rule as one arriving
         over HTTP.
         """
-        low = midi_for_note_name(self.lowest_note)
-        high = midi_for_note_name(self.highest_note)
-        if low is None:
-            raise ValueError("lowest note is not a note this project can name")
-        if high is None:
-            raise ValueError("highest note is not a note this project can name")
-        if high < low:
-            raise ValueError("highest note is below the lowest")
+        validated_range(self.lowest_note, self.highest_note)
         return self
 
     @property
@@ -324,47 +353,47 @@ NARROW_RANGE_SEMITONES: Final = 12
 
 
 class RecordingSideStatus(StrEnum):
-    """Whether the recording side can take part, and if not, why.
+    """Whether the recording can take part in a comparison, and if not, why.
 
-    Deliberately the same values as ``comparison.models.SideStatus``, and
-    deliberately a separate type: they answer the same question about the same
-    thing, but a compatibility result has one recording rather than two, and
-    coupling the two features so that a value added for one appears in the
-    other's contract would be worse than the duplication.
+    Each value maps to a distinct thing the reader can do about it, which is why
+    they are not collapsed into one "unavailable": "nobody has measured this
+    yet" and "measuring it failed" are different situations.
+
+    Nearly the same values as ``comparison.models.SideStatus``, and deliberately
+    a separate type — coupling the two features so that a value added for one
+    appeared in the other's contract would be worse than the duplication.
+
+    **There is no ``NOT_FOUND``**, and its absence is the contract. This result
+    is reached through ``/recordings/{recording_id}/…``, where an unknown or
+    somebody else's recording is a ``404`` exactly as it is on every sibling
+    route. A comparison has two ids in the query string and no owning path
+    segment, which is why it reports a missing side instead; the difference is
+    in the URL, not in the principle.
+
+    **There is no reference status at all**, for a reason particular to the
+    chosen input model: a reference either exists and has a range, because the
+    range is required to create one and is validated before the row is written,
+    or it does not exist — and that is a ``404`` on the id the caller named.
+    Under an input model that *measured* a reference there would be a third
+    possibility and this type would have a sibling.
     """
 
     READY = "ready"
-    #: Unknown to this owner — the same answer for "never existed" and "belongs
-    #: to somebody else", for the reason the comparison service gives.
-    NOT_FOUND = "not_found"
     ANALYSIS_MISSING = "analysis_missing"
     ANALYSIS_IN_PROGRESS = "analysis_in_progress"
     ANALYSIS_FAILED = "analysis_failed"
     INSUFFICIENT_PITCH_SIGNAL = "insufficient_pitch_signal"
 
 
-class ReferenceSideStatus(StrEnum):
-    """Whether the reference side can take part.
-
-    Two values, and the shortness is a consequence of the input model: a
-    reference is a range or it does not exist, because the range is required to
-    create one and is validated before the row is written. There is no
-    ``NO_RANGE`` here — under an input model that measures a reference there
-    would be, which is why this is an enum rather than a boolean.
-    """
-
-    READY = "ready"
-    NOT_FOUND = "not_found"
-
-
 class SongCompatibility(BaseModel):
     """A recording's detected range placed against a song's asserted one.
 
-    **A refusal is one of these too.** No analysis, a failed one, no reliable
-    pitch, an unknown reference — each is a successful answer with
-    :attr:`comparable` false and a per-side status saying which side, because a
-    client renders each differently and an HTTP error would collapse them into
-    one. Only an id that is not the caller's is a 404.
+    **A refusal is one of these too.** No analysis, one still running, a failed
+    one, no reliable pitch — each is a successful answer with
+    :attr:`comparable` false and a :attr:`recording_status` saying which,
+    because a client renders each of them differently and an HTTP error would
+    collapse them into one. An id that is not the caller's is a ``404``, on
+    either the recording or the reference.
 
     An incomparable result carries **no** fit and **no** transposition. There is
     no half answer for a client to render as if it were whole.
@@ -374,7 +403,6 @@ class SongCompatibility(BaseModel):
 
     comparable: bool
     recording_status: RecordingSideStatus
-    reference_status: ReferenceSideStatus
     recording_range: NoteRange | None = None
     reference_range: NoteRange | None = None
     reference: SongReference | None = None
@@ -387,8 +415,6 @@ class SongCompatibility(BaseModel):
         if self.comparable:
             if self.recording_status is not RecordingSideStatus.READY:
                 raise ValueError("a comparable result needs a ready recording")
-            if self.reference_status is not ReferenceSideStatus.READY:
-                raise ValueError("a comparable result needs a ready reference")
             if self.recording_range is None or self.reference_range is None:
                 raise ValueError("a comparable result needs both ranges")
             if self.fit is None or self.transposition is None:

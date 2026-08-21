@@ -37,7 +37,6 @@ from app.services.compatibility.models import (
     RangeSource,
     RecordingSideStatus,
     ReferenceKey,
-    ReferenceSideStatus,
     SongReference,
 )
 
@@ -395,7 +394,6 @@ def test_a_full_comparison_carries_both_ranges_the_fit_and_the_shift() -> None:
     )
     assert result.comparable is True
     assert result.recording_status is RecordingSideStatus.READY
-    assert result.reference_status is ReferenceSideStatus.READY
     assert result.recording_range is not None and result.reference_range is not None
     assert result.fit is not None and result.transposition is not None
     assert result.transposition.semitones == 0
@@ -441,6 +439,5 @@ def test_an_incomparable_result_may_not_carry_half_an_answer() -> None:
         SongCompatibility(
             comparable=False,
             recording_status=RecordingSideStatus.ANALYSIS_MISSING,
-            reference_status=ReferenceSideStatus.READY,
             fit=compute_fit(note_range("C3", "C6"), note_range("C4", "C5")),
         )

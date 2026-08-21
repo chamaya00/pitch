@@ -6,6 +6,7 @@ from app.api.v1.routes import (
     analysis,
     audio_analysis,
     comparison,
+    compatibility,
     config,
     health,
     identity,
@@ -25,3 +26,7 @@ api_router.include_router(progress.router)
 api_router.include_router(recordings.router)
 api_router.include_router(analysis.router)
 api_router.include_router(audio_analysis.router)
+# Carries both `/references` and `/recordings/{id}/compatibility`. The
+# recording path is a sub-resource of a real id, so it cannot collide with
+# the literal segments the two routers above claim.
+api_router.include_router(compatibility.router)

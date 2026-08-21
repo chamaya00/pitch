@@ -43,6 +43,11 @@ from app.services.audio_analysis.postgres_repository import (
     PostgresAudioAnalysisRepository,
 )
 from app.services.comparison.service import ComparisonService
+from app.services.compatibility.repository import (
+    PostgresSongReferenceRepository,
+    SongReferenceRepository,
+)
+from app.services.compatibility.service import CompatibilityService, SongReferenceService
 from app.services.orchestration.analysis import AnalysisService
 from app.services.orchestration.audio_analysis import AudioAnalysisService
 from app.services.owners.credential_repository import PostgresCredentialRepository
@@ -311,6 +316,49 @@ def get_comparison_service(recordings: RecordingRepositoryDep) -> ComparisonServ
 
 
 ComparisonServiceDep = Annotated[ComparisonService, Depends(get_comparison_service)]
+
+
+def get_song_reference_repository(database: DatabaseDep) -> SongReferenceRepository:
+    """The song-reference store, annotated as its protocol.
+
+    Every method on that protocol takes an owner id, so no route can read a
+    reference without saying whose it is.
+    """
+    return PostgresSongReferenceRepository(database)
+
+
+SongReferenceRepositoryDep = Annotated[
+    SongReferenceRepository, Depends(get_song_reference_repository)
+]
+
+
+def get_song_reference_service(
+    references: SongReferenceRepositoryDep,
+) -> SongReferenceService:
+    """Assemble the reference workflow. One repository; there is nothing else."""
+    return SongReferenceService(references=references)
+
+
+SongReferenceServiceDep = Annotated[SongReferenceService, Depends(get_song_reference_service)]
+
+
+def get_compatibility_service(
+    recordings: RecordingRepositoryDep,
+    references: SongReferenceRepositoryDep,
+    analyses: AudioAnalysisRepositoryDep,
+) -> CompatibilityService:
+    """Assemble the compatibility workflow.
+
+    Three repositories and nothing else: no storage, because there is no
+    reference audio; no analyzer, because both ranges are already stored; and no
+    provider, which is what makes it impossible for a model to reach one of
+    these numbers rather than merely unlikely. The same guarantee the comparison
+    and progress services get from the same absence.
+    """
+    return CompatibilityService(recordings=recordings, references=references, analyses=analyses)
+
+
+CompatibilityServiceDep = Annotated[CompatibilityService, Depends(get_compatibility_service)]
 
 
 def get_progress_service(recordings: RecordingRepositoryDep) -> ProgressService:
