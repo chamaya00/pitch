@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VocalLens — offline</title>
+    <!--
+      Deliberately a static file with no script of any kind.
+
+      Every other page here carries a per-request CSP nonce and cannot be
+      cached, which is the whole reason this page exists. A page with no script
+      needs no nonce, so this one survives being served from a cache — and it is
+      the only page that can.
+
+      Styles are inline because a cached page that reached for a stylesheet it
+      had not cached would be an unstyled page at the worst moment. The colours
+      are the design tokens, in both schemes.
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+        --background: #f7f7f8;
+        --surface: #ffffff;
+        --border: #d9d9de;
+        --foreground: #14141a;
+        --muted: #5c5c68;
+        --accent: #4f46e5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --background: #0b0b0f;
+          --surface: #131319;
+          --border: #2a2a35;
+          --foreground: #ececf1;
+          --muted: #9a9aa8;
+          --accent: #8b7cf6;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+        background: var(--background);
+        color: var(--foreground);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main {
+        max-width: 32rem;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        border-radius: 0.75rem;
+        padding: 2rem;
+      }
+      .mark { display: inline-block; width: 4px; height: 1.25rem; border-radius: 999px; background: var(--accent); vertical-align: -3px; }
+      h1 { font-size: 1.25rem; margin: 0.75rem 0 0; letter-spacing: -0.01em; }
+      p { color: var(--muted); font-size: 0.9375rem; }
+      ul { color: var(--muted); font-size: 0.9375rem; padding-left: 1.1rem; }
+      li { margin: 0.35rem 0; }
+      .retry {
+        display: inline-block;
+        margin-top: 1.25rem;
+        padding: 0.625rem 1.25rem;
+        border: 1px solid var(--border);
+        border-radius: 0.375rem;
+        color: var(--foreground);
+        text-decoration: none;
+        font-size: 0.875rem;
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="mark" aria-hidden="true"></span>
+      <h1>You are offline</h1>
+      <p>
+        VocalLens could not reach the network, so it cannot open. Nothing has
+        been lost — your recordings and their measurements are on the server,
+        and the key that reaches them is stored in this browser.
+      </p>
+      <p>What needs a connection, and why:</p>
+      <ul>
+        <li>Opening the app at all — the page is built per request.</li>
+        <li>Uploading a recording, and every measurement taken from one.</li>
+        <li>Your history, comparisons and progress.</li>
+      </ul>
+      <p>
+        Live Vocal Practice runs entirely in your browser once the page is
+        open, and the audio never leaves it — but the page has to load first.
+      </p>
+      <!-- A link rather than a button: reload is navigation, and a link works
+           without a script. -->
+      <a class="retry" href="/">Try again</a>
+    </main>
+  </body>
+</html>

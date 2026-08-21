@@ -246,3 +246,46 @@ test("the policy applies to every request, with no exceptions list", () => {
   // could leave without a policy.
   assert.ok(!code("proxy.ts").includes("matcher"));
 });
+
+// --- Installability (Step 12) ----------------------------------------------
+
+test("a service worker may be registered, and only from this origin", () => {
+  const parsed = directives(policy());
+  assert.deepEqual(parsed.get("worker-src"), ["'self'"]);
+});
+
+test("worker-src is named rather than left to fall back to script-src", () => {
+  // The fallback would be fatal, not merely loose. `script-src` carries
+  // `'strict-dynamic'`, which makes a browser ignore `'self'` and demand a
+  // nonce — and a worker script has no way to carry one. Naming `worker-src`
+  // is what lets the page keep `'strict-dynamic'` and still register a worker.
+  const parsed = directives(policy());
+  assert.ok(parsed.has("worker-src"));
+  assert.ok(parsed.get("script-src")?.includes("'strict-dynamic'"));
+  assert.ok(!parsed.get("worker-src")?.includes("'strict-dynamic'"));
+});
+
+test("the manifest may be fetched, and only from this origin", () => {
+  const parsed = directives(policy());
+  assert.deepEqual(parsed.get("manifest-src"), ["'self'"]);
+});
+
+test("installability widened the policy by two directives and no sources", () => {
+  // Both new directives are `'self'` alone. Making the app installable must not
+  // have been an excuse to admit an origin, and this is what says so.
+  const parsed = directives(policy());
+  for (const name of ["worker-src", "manifest-src"]) {
+    assert.deepEqual(parsed.get(name), ["'self'"], name);
+  }
+});
+
+test("the AudioWorklet is still governed by script-src, not by worker-src", () => {
+  // `worker-src` covers Worker, SharedWorker and ServiceWorker. An AudioWorklet
+  // has its own fetch destination and stays under `script-src`, where
+  // `'strict-dynamic'` admits it because a trusted script loads it. Both
+  // directives are needed and neither replaces the other; that adding one did
+  // not break the other was measured in Chromium.
+  const parsed = directives(policy());
+  assert.ok(parsed.get("script-src")?.includes("'strict-dynamic'"));
+  assert.deepEqual(parsed.get("worker-src"), ["'self'"]);
+});

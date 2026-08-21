@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="VocalLens">
+  <!--
+    The same mark, drawn for a maskable slot.
+
+    Android may crop a maskable icon to a circle, a squircle or a rounded
+    square, and only the middle 80% — the "safe zone" — is guaranteed to
+    survive. So the background is a full bleed square with no radius of its own,
+    and the bars are scaled to sit inside a 410px circle centred on the canvas.
+    Shipping the ordinary icon as maskable is the common mistake: it gets its
+    corners eaten and the mark clipped.
+  -->
+  <rect width="512" height="512" fill="#0b0b0f"/>
+  <g fill="#8b7cf6" transform="translate(256 256) scale(0.62) translate(-256 -256)">
+    <rect x="104" y="236" width="36" height="120" rx="18"/>
+    <rect x="156" y="196" width="36" height="200" rx="18"/>
+    <rect x="208" y="156" width="36" height="280" rx="18"/>
+    <rect x="260" y="116" width="36" height="360" rx="18"/>
+    <rect x="312" y="156" width="36" height="280" rx="18"/>
+    <rect x="364" y="216" width="36" height="160" rx="18"/>
+  </g>
+</svg>

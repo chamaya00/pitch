@@ -1437,6 +1437,103 @@ because two storage tests skip under root and CI would have been the first thing
 ever to execute them. They pass. What CI runs is a strictly larger suite than
 anything this container can produce.
 
+## Installing it as an app (Step 12)
+
+VocalLens is installable: a manifest, an icon set and a service worker, which is
+all a browser needs to offer "install" and to launch the page in its own window
+with a launcher icon. **Installing changes how it is launched, not what it
+measures.** There is no separate app build, no second code path and no feature
+that exists only when installed.
+
+### What the service worker caches, and what it refuses
+
+Written down in `frontend/lib/service-worker-policy.ts`, which is the
+specification, and implemented in `frontend/public/sw.js`, which is a classic
+script with no bundler in front of it. The rules are unit-tested against the
+module and the running worker is driven through a real Chromium; the split is
+the one `pitch.ts` and `pitch.py` already use.
+
+| Request | Served | Why |
+| --- | --- | --- |
+| `/api/**` | Network, never stored | A cached measurement is presented as current and the client cannot tell that it is not |
+| A document | Network, offline page on failure | See the nonce measurement below |
+| `/_next/static/**` | Cache first | The URL is a content hash, so it cannot go stale |
+| `/icons/**`, the AudioWorklet | Cache, revalidated behind it | A stable URL over bytes that change between deploys |
+| Anything else | Network, never stored | A default of "cache it" is how a cache comes to hold what nobody chose |
+
+The API rule is checked **first**, before any rule that could match on shape. A
+`POST` is never intercepted at all: replaying one from a cache would repeat an
+upload rather than re-read a value. A response that is not `2xx` is never
+stored, because caching a 502 turns a transient failure into a durable one whose
+only cure is clearing site data.
+
+### The nonce and the cached document — a measurement that refuted the argument for it
+
+The obvious reason not to cache the HTML is that every response carries a fresh
+per-request CSP nonce, so a cached document would carry a stale one and the
+browser would refuse every script on the page. **That argument is wrong**, and
+it was written into this repository before it was checked.
+
+A cache stores a response *with its headers*. The nonce in the cached header and
+the nonce in the cached body therefore go stale **together**, which is to say
+they stay in agreement. Measured, by capturing a document exactly as a cache
+would hold it and replaying it later through request interception:
+
+| | |
+| --- | --- |
+| nonce in the cached body | `igmfCgZvsPeMJkiW4LOCkA==` |
+| nonce in the cached header | `igmfCgZvsPeMJkiW4LOCkA==` |
+| CSP violations on replay | **0** |
+| page errors | **0** |
+| hydrated | yes — a client-side control answered a click |
+
+So the shell *can* be precached, and precaching it would give real offline use:
+Live Vocal Practice runs entirely in the browser, and from a cached shell it
+would work with no network at all.
+
+**It is still not cached, for the reason that survives the measurement.** A
+per-request nonce is unguessable because it is fresh every time. A cached shell
+serves one fixed nonce for as long as the entry lives, turning a per-request
+value into a durable per-device one. `app/layout.tsx` gave up the full-route
+cache specifically to keep that property — the reasoning is recorded there — and
+a service worker that quietly took it back would be overturning a decision made
+one layer up without saying so.
+
+That is a trade, not a free choice, and what it costs is offline practice. It is
+recorded in `limitations.md` as something given up rather than something
+overlooked, so that reversing it later is a decision somebody takes on the
+evidence above rather than a gap they discover.
+
+### What the policy had to admit
+
+Two directives, each because something now loads it — the rule `lib/csp.ts`
+already held itself to:
+
+- **`worker-src 'self'`.** Without it the worker's own script falls under
+  `script-src`, which carries `'strict-dynamic'`, which makes a browser ignore
+  `'self'` and demand a nonce that a worker script cannot carry. Naming
+  `worker-src` is what lets the page keep `'strict-dynamic'` and still register
+  a worker.
+- **`manifest-src 'self'`.** It would work as a fallback from `default-src`; it
+  is named because a directive that is present says what is loaded, where a
+  fallback only says what is allowed.
+
+Both are `'self'` alone. **Making the app installable admitted no new origin**,
+and a test asserts that rather than leaving it to review.
+
+The `pcm-capture-worklet.js` AudioWorklet is *not* covered by `worker-src` — it
+has its own fetch destination and stays under `script-src`. That adding one
+directive did not disturb the other was measured rather than read off a
+specification: recording a take in Chromium with the new policy engaged the live
+readout, fetched and cached the worklet, and raised **0 CSP violations**.
+
+### Offline
+
+A navigation that cannot reach the network gets `public/offline.html`: a static
+page with **no script of any kind**, which is what lets it be served from a
+cache when nothing else can be. It says what needs a connection and why, and it
+does not pretend the app is available.
+
 ## Feature allocation, Steps 7A–7M
 
 Where each capability lives, and what it is *not*. Read the "Not" column as
@@ -1469,6 +1566,8 @@ category errors, and this table exists to make them visible.
 | One feedback run | `claim_feedback`, a single conditional `UPDATE` | PostgreSQL | Not a read-then-write |
 | Recording comparison | `services/comparison/` | Deterministic | Measurement comparison, never a score; four of seven metrics have no better direction |
 | Progress over time | `services/progress/` | Deterministic | Measurements over time, never a level or a trend line; `null` is a gap, never a zero |
+| Installability | `app/manifest.ts`, `public/sw.js` | Browser-local | A launcher icon and a window; never a second code path, and never a feature that exists only when installed |
+| What may be cached | `lib/service-worker-policy.ts` | Browser-local | Content-hashed assets only. Never an API response, never a document — the second for what caching does to the nonce, not because it would break |
 | Song references | `services/compatibility/repository.py`, `routes/compatibility.py` | PostgreSQL | **Metadata somebody typed**, never audio; no decoder, no analysis lifecycle, no file to delete; owner-scoped like everything else |
 | Song compatibility | `services/compatibility/fit.py` | Deterministic | Arithmetic on two closed intervals of semitones; never a score, and no field that could hold one; the transposition is a shift, never musical advice |
 | Where a number came from | `RangeSource` on every range | Deterministic | `measured` is from audio, `asserted` is typed; never styled alike, never summed into a third number |

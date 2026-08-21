@@ -57,6 +57,13 @@ Implemented and working end to end:
 - **AI feedback** — an LLM explaining the speech measurements. It never produces
   a number and never produces a score.
 
+**Installable.** A manifest, an icon set and a service worker make VocalLens
+installable to a home screen or a dock, launching in its own window. It caches
+its own static files and **never a measurement** — a cached number would be
+presented as current when it is not. There is no offline mode: the app needs a
+network to open, and says so on a static offline page when it cannot reach one.
+Installing and the microphone both require HTTPS.
+
 The speech and audio analyses are **separate**: separate endpoints, separate
 records, separate sections in the UI. There is no combined "voice score", and
 none is planned — see [docs/architecture.md](docs/architecture.md).

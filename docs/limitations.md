@@ -344,6 +344,35 @@ many costly requests one identity may make. What that does **not** guarantee:
 - **Reading is never limited**, so it is not a defence against someone reading
   their own history repeatedly.
 
+## Installing it, and what offline does not give you
+
+VocalLens can be installed to a home screen or a dock. **Installing changes how
+it is launched, not what it does.** There is no offline mode, no local analysis
+and no feature that appears only in the installed window.
+
+- **The app does not open without a network.** Every page is built per request,
+  and a navigation that cannot reach the server gets a static offline page
+  saying so rather than a broken shell.
+- **Nothing you have made is stored on the device.** Recordings, measurements
+  and history live on the server; what the browser holds is the key that reaches
+  them. Installing does not copy any of it locally, and uninstalling does not
+  delete any of it.
+- **No measurement is ever served from a cache.** A cached number would be
+  presented as current when it is not, and re-analysing a recording or deleting
+  a reference changes the right answer. The cache holds the application's own
+  static files and nothing else.
+- **Live Vocal Practice could work offline and deliberately does not.** It runs
+  entirely in the browser once the page is open, so a cached application shell
+  would let it run with no network. The shell is not cached because caching it
+  would freeze one Content-Security-Policy nonce in place for as long as the
+  cache lived, and the application gives up caching elsewhere to keep that value
+  fresh per request. This is a trade that was measured and taken, not a gap:
+  [architecture.md](architecture.md) records the measurement, including that the
+  first argument written down for it turned out to be false.
+- **Installing needs HTTPS**, as does the microphone. Neither works over plain
+  HTTP except on `localhost`, and the bundled deployment speaks HTTP — see
+  *What the deployment does and does not protect*.
+
 ## When something breaks
 
 The app has deliberate failure states, and they are honest about what they do

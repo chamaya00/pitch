@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="VocalLens">
+  <!--
+    The source every raster icon is rendered from.
+
+    The mark is the site header's accent bar, repeated: eight rounded bars of
+    differing heights, which is the shape this product actually draws — a pitch
+    trace, a level meter, a note breakdown. The brief in IMPLEMENTATION_PLAN.md
+    §31 asks for music-production inspired and data-visualisation focused, and
+    warns against a generic AI appearance, so there is no waveform cliché, no
+    gradient and no microphone glyph.
+
+    Heights are the first six notes of the C major melody the browser checks
+    sing, normalised — C4 D4 E4 G4 A4 C5 — with the two outer bars lower so the
+    silhouette reads as a shape rather than a ramp. Nothing here is a
+    measurement; it is a logo that borrows a measurement's form.
+
+    Colours are the design tokens: the dark surface and the dark-mode accent,
+    which is the pair that stays legible against both a light and a dark home
+    screen.
+  -->
+  <rect width="512" height="512" rx="112" fill="#0b0b0f"/>
+  <g fill="#8b7cf6">
+    <rect x="104" y="236" width="36" height="120" rx="18"/>
+    <rect x="156" y="196" width="36" height="200" rx="18"/>
+    <rect x="208" y="156" width="36" height="280" rx="18"/>
+    <rect x="260" y="116" width="36" height="360" rx="18"/>
+    <rect x="312" y="156" width="36" height="280" rx="18"/>
+    <rect x="364" y="216" width="36" height="160" rx="18"/>
+  </g>
+</svg>

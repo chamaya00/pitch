@@ -58,6 +58,21 @@
  *   font files at build time, and the built CSS contains no `url(data:…)` and
  *   no external origin — both checked against the build output rather than
  *   assumed.
+ * - `worker-src 'self'` because Step 12 registers a service worker. Without it
+ *   the worker's own script is governed by `script-src`, and `script-src`
+ *   carries `'strict-dynamic'` — which makes a browser ignore `'self'` and
+ *   demand a nonce that a worker script has no way to carry. Naming
+ *   `worker-src` separately is what lets the policy keep `'strict-dynamic'` for
+ *   the page and still admit one same-origin worker. It does **not** cover the
+ *   `pcm-capture-worklet.js` AudioWorklet, which has its own fetch destination
+ *   and stays under `script-src`; that both directives are needed, and that
+ *   adding one did not break the other, was measured in Chromium rather than
+ *   read off a specification.
+ * - `manifest-src 'self'` for `app/manifest.ts`. It would fall back to
+ *   `default-src` and work without being named, and it is named anyway: this
+ *   module's rule is that every source is here because something loads it, and
+ *   a directive that is present says what is loaded where a fallback only says
+ *   what is allowed.
  * - `form-action 'none'` because this product submits no form. The upload is a
  *   `fetch` with a `FormData` body, which this does not affect.
  * - No `upgrade-insecure-requests`, for the same reason the proxy advertises no
@@ -140,6 +155,8 @@ export function contentSecurityPolicy(options: PolicyOptions): string {
     "img-src 'self'",
     "font-src 'self'",
     "media-src 'self' blob:",
+    "worker-src 'self'",
+    "manifest-src 'self'",
     `connect-src ${connect.join(" ")}`,
     "object-src 'none'",
     "base-uri 'none'",
