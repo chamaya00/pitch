@@ -32,9 +32,9 @@ const geistMono = Geist_Mono({
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "VocalLens — Hear how you speak",
+  title: "VocalLens — Hear how you sound",
   description:
-    "Upload a recording to see it transcribed, measure your pace and pauses, and get feedback on how it lands.",
+    "Record or upload, and see it measured: pitch, detected range, steadiness and key, plus the transcript, pace and pauses behind what you said.",
 };
 
 export default function RootLayout({

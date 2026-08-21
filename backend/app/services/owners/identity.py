@@ -61,7 +61,7 @@ class OwnerDataRepository(Protocol):
     """
 
     async def data_summary(self, owner_id: uuid.UUID) -> "OwnerDataSummary":
-        """What this owner has accumulated."""
+        """What this owner has accumulated. Counts only, never the content."""
 
     async def recording_ids(self, owner_id: uuid.UUID) -> list[str]:
         """Every recording id this owner has, so the stored audio can be removed."""
@@ -82,12 +82,25 @@ class OwnerDataSummary:
     row and is not part of the domain the analysis services reason about.
     """
 
-    __slots__ = ("ai_feedback", "analysed_recordings", "recordings")
+    __slots__ = ("ai_feedback", "analysed_recordings", "recordings", "song_references")
 
-    def __init__(self, *, recordings: int, analysed_recordings: int, ai_feedback: int) -> None:
+    def __init__(
+        self,
+        *,
+        recordings: int,
+        analysed_recordings: int,
+        ai_feedback: int,
+        song_references: int = 0,
+    ) -> None:
         self.recordings = recordings
         self.analysed_recordings = analysed_recordings
         self.ai_feedback = ai_feedback
+        #: Song references the owner typed (Step 11.3). The first thing an
+        #: identity can hold that is **not** a recording, which is why the first
+        #: three fields' invariant — none of them can exceed ``recordings`` —
+        #: stops at three. Counted because deleting an identity deletes these
+        #: too, and a confirmation that does not name them would be incomplete.
+        self.song_references = song_references
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, OwnerDataSummary):
@@ -96,13 +109,15 @@ class OwnerDataSummary:
             self.recordings == other.recordings
             and self.analysed_recordings == other.analysed_recordings
             and self.ai_feedback == other.ai_feedback
+            and self.song_references == other.song_references
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging convenience
         return (
             f"OwnerDataSummary(recordings={self.recordings}, "
             f"analysed_recordings={self.analysed_recordings}, "
-            f"ai_feedback={self.ai_feedback})"
+            f"ai_feedback={self.ai_feedback}, "
+            f"song_references={self.song_references})"
         )
 
 

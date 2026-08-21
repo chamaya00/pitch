@@ -27,6 +27,7 @@ import {
   KEY_UNMEASURED_MESSAGES,
   MIN_PITCH_CLASS_SHARE,
   NOT_MEASURED,
+  UNSTABLE_CENTS_STD,
   WEAK_KEY_CONFIDENCE,
   hasNoteBreakdown,
   hasPitchClassEvidence,
@@ -35,6 +36,7 @@ import {
   keyLabel,
   keyUnmeasuredMessage,
   loudnessRows,
+  movedStretchDefinition,
   noteRows,
   pitchClassRows,
   rangeLabel,
@@ -771,4 +773,83 @@ test("confidence is never formatted as a percentage", () => {
   assert.ok(rows.every((row) => row.share.endsWith("%")), "shares are percentages");
   assert.equal(typeof estimate().confidence, "number");
   assert.equal(estimate().confidence.toFixed(3), "0.262");
+});
+
+// --- Measurements the payload carried and the screen never showed -----------
+
+test("the crest factor is a row, and an absent one is not a zero", () => {
+  const rows = loudnessRows({
+    rms: 0.18,
+    peak: 0.92,
+    dynamic_range_db: 15,
+    crest_factor_db: 14.2,
+    clipped_sample_ratio: 0,
+  });
+  const crest = rows.find((row) => row.label === "Crest factor");
+  assert.equal(crest?.value, "14.2 dB");
+  assert.equal(crest?.measured, true);
+
+  const absent = loudnessRows({
+    rms: 0,
+    peak: 0,
+    dynamic_range_db: null,
+    crest_factor_db: null,
+    clipped_sample_ratio: 0,
+  }).find((row) => row.label === "Crest factor");
+  assert.equal(absent?.value, NOT_MEASURED);
+  assert.equal(absent?.measured, false);
+});
+
+test("the zero-crossing rate is a row, in both the measured and absent cases", () => {
+  const rows = spectralRows({
+    centroid_hz: 2180,
+    bandwidth_hz: 1900,
+    rolloff_hz: 4200,
+    zero_crossing_rate: 0.08,
+    flatness: 0.12,
+  });
+  assert.equal(rows.find((row) => row.label === "Zero-crossing rate")?.value, "0.080");
+  assert.equal(
+    spectralRows(null).find((row) => row.label === "Zero-crossing rate")?.measured,
+    false,
+  );
+});
+
+test("every spectral characteristic the README names has a row", () => {
+  // The README listed five and the table showed four, which is how the gap was
+  // found: an audit of the payload against the screen, not a bug report.
+  const labels = spectralRows({
+    centroid_hz: 1,
+    bandwidth_hz: 1,
+    rolloff_hz: 1,
+    zero_crossing_rate: 0.1,
+    flatness: 0.1,
+  }).map((row) => row.label);
+  assert.equal(labels.length, 5);
+  assert.equal(new Set(labels).size, 5);
+});
+
+test("semitone variance is still not a row, and that is a decision", () => {
+  // Semitones squared has no plain-language reading, and the deviation spread
+  // answers "how much did it move" in units a person can picture. The same
+  // reason `docs/ai.md` gives for keeping it out of the prompt.
+  const labels = stabilityRows({
+    voiced_ratio: 0.9,
+    total_frames: 100,
+    voiced_frames: 90,
+    mean_cents_deviation: 1,
+    mean_abs_cents_deviation: 3,
+    cents_std: 10,
+    semitone_variance: 0.4,
+    in_tune_ratio: 0.9,
+    unstable_sections: [],
+  }).map((row) => row.label.toLowerCase());
+  assert.ok(!labels.some((label) => label.includes("variance")));
+});
+
+test("the moved-stretch sentence quotes the threshold rather than a literal", () => {
+  // The caption and the screen-reader description drifted from the backend the
+  // first time the threshold moved, because each carried its own copy of "35".
+  assert.match(movedStretchDefinition(), new RegExp(`${UNSTABLE_CENTS_STD} cents`));
+  assert.match(movedStretchDefinition(), /quarter of a second/);
 });

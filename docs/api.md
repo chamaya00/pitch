@@ -57,6 +57,7 @@ What the caller's key holds. Takes no identifier.
   "recordings": 3,
   "analysed_recordings": 3,
   "ai_feedback": 3,
+  "song_references": 2,
   "credentials": [
     {
       "credential_id": "0f2e1a44-6c1b-4f7e-9d2a-8b5c0e1f3a77",
@@ -90,11 +91,16 @@ second permanent handle on the same person into logs and screenshots for no
 benefit. A `credential_id` is not credential material: knowing one grants
 nothing, and revoking needs it.
 
-All three counts are counts of **recordings**, so neither of the last two can
-exceed the first. `ai_feedback` is how many recordings have generated feedback on
-at least one of their analyses, and it is counted separately because generating
-it costs a provider call: measurements can be recomputed from the audio,
-generated prose cannot.
+The first three counts are counts of **recordings**, so neither of the second and
+third can exceed the first. `ai_feedback` is how many recordings have generated
+feedback on at least one of their analyses, and it is counted separately because
+generating it costs a provider call: measurements can be recomputed from the
+audio, generated prose cannot.
+
+`song_references` is **not** a count of recordings, and it is the first field
+here that is not. An identity can hold songs it described and no recordings at
+all; it is counted because deleting the identity deletes them too, and a
+confirmation that did not name them would be incomplete.
 
 Until Step 10.19 that last one counted feedback *runs* rather than recordings, so
 a recording analysed twice with feedback both times contributed two — and the
@@ -573,6 +579,220 @@ The list is **never exhaustive**. Two recordings are only meaningfully
 comparable when captured under reasonably similar conditions, and microphone
 quality, room acoustics, effort and physical condition are not measured by this
 system and are not claimed here.
+
+### `POST /api/v1/references`
+
+Describe a song so a recording can be placed against it. **Phase 9, under the
+input model recorded in [phase-9-specification.md §3A](phase-9-specification.md#3a-the-decision-2026-08-20):
+a reference is metadata somebody typed.**
+
+```jsonc
+{
+  "title": "Landslide",
+  "artist": "Fleetwood Mac",      // optional
+  "lowest_note": "F3",
+  "highest_note": "C5",
+  "key": { "tonic": "C", "mode": "major" }   // optional
+}
+```
+
+`201` with the created reference:
+
+```json
+{
+  "reference_id": "…",
+  "title": "Landslide",
+  "artist": "Fleetwood Mac",
+  "lowest_note": "F3",
+  "highest_note": "C5",
+  "key": { "tonic": "C", "mode": "major" },
+  "created_at": "2026-08-21T09:14:02Z",
+  "source": "asserted"
+}
+```
+
+**Nothing here is measured, and `source` says so on every response that carries
+a reference.** There is no upload, no decoding and no audio at any point. Every
+figure derived from these two notes is an arithmetic consequence of a number
+this system never checked, and the field exists so a client cannot lose that
+distinction by accident. It is always `asserted` today; it is a field rather
+than a constant so that a measured reference would add a *value*, not a key.
+
+**Notes are scientific pitch notation with sharps** — `F#3`, `C4`, `A#5`. Flats
+are refused rather than rewritten: this project spells every pitch class one
+way, and handing a caller back a different name than they sent is worse than
+saying no. A picker over the offered names cannot produce one, which is what the
+frontend does.
+
+**A range of one note is allowed.** A drone and a one-note exercise are songs.
+
+**Duplicates are allowed.** Two entries for the same song are two references,
+the same way uploading the same audio twice is two recordings. Nobody has asked
+for a uniqueness rule, and inventing one would be a product decision.
+
+**Not rate-limited.** The costly-request allowance exists for requests that
+consume disk, CPU or provider budget; this one writes about two hundred bytes
+and decodes nothing.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Missing title, malformed note, highest below lowest, or a note outside MIDI | 422 | `VALIDATION_ERROR` |
+
+`B9` is spelled correctly and is not a MIDI note; it is refused rather than
+clamped, because returning `G9` for it would be inventing a value four semitones
+from what was asked for.
+
+### `GET /api/v1/references`
+
+The caller's own references, newest first. `limit` defaults to 50 and is bounded
+at 200 — a list screen, not a bulk export, the same reasoning the history limits
+carry.
+
+```json
+{ "count": 2, "references": [ /* … */ ] }
+```
+
+`count` is how many are in this response, not how many exist. Ownership is
+enforced in the database and there is no parameter that would let a caller name
+another owner.
+
+### `GET /api/v1/references/{reference_id}`
+
+One reference, if it is the caller's.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Unknown, **or another owner's** | 404 | `REFERENCE_NOT_FOUND` |
+
+One answer for both, so the endpoint cannot be used to discover that an id is
+real — the rule every owned resource here follows.
+
+### `DELETE /api/v1/references/{reference_id}`
+
+Delete a reference and return the ones that remain, in the shape `GET
+/references` returns. **The remaining collection rather than a bare `204`**, the
+way revoking a credential works: a client that has just changed a collection
+needs the collection, and a follow-up `GET` would be a round trip for something
+this response already knows.
+
+Nothing else is affected. A reference holds no audio and no analysis, and the
+recordings it was compared against are untouched. Deleting one that is already
+gone is a `404` rather than a silent success, so "already gone" and "removed
+just now" stay different answers.
+
+**Never rate-limited**, for the reason deletion never is here: being told to slow
+down while removing your own data is the one moment a limit is indefensible.
+
+### `GET /api/v1/recordings/{recording_id}/compatibility?reference_id={id}`
+
+Place the range detected in a recording against the range asserted for a song,
+and report what follows arithmetically. **Derived on read** from two stored
+values, like `/notes` and `/key`: nothing is persisted, there is nothing to
+invalidate, and re-analysing the recording changes the answer immediately.
+
+```jsonc
+{
+  "comparable": true,
+  "recording_status": "ready",
+  "recording_range": {
+    "lowest_note": "G2", "highest_note": "C5",
+    "semitone_span": 29, "source": "measured"
+  },
+  "reference_range": {
+    "lowest_note": "F3", "highest_note": "C5",
+    "semitone_span": 19, "source": "asserted"
+  },
+  "reference": { /* the reference, as above */ },
+  "fit": {
+    "overlap_note_count": 20,
+    "reference_note_count": 20,
+    "percent_of_reference_range": 100.0,
+    "semitones_above_top_note": 0,
+    "semitones_below_bottom_note": 0
+  },
+  "transposition": {
+    "possible": true,
+    "semitones": 0,
+    "lowest_workable_semitones": -10,
+    "highest_workable_semitones": 0,
+    "shortfall_semitones": null,
+    "resulting_lowest_note": "F3",
+    "resulting_highest_note": "C5",
+    "resulting_key": { "tonic": "C", "mode": "major" }
+  },
+  "caveats": [
+    "reference_range_asserted",
+    "detected_range_is_this_recording",
+    "not_a_statement_of_ability"
+  ]
+}
+```
+
+**One side was measured and the other was typed.** `source` is `measured` on the
+recording's range and `asserted` on the song's, and that difference is the whole
+reason the field exists: everything in `fit` and `transposition` follows from a
+number this system never verified.
+
+**There is no compatibility score, and no field could hold one.** A single figure
+would have to weight how far the top is out against how far the bottom is out
+against how much of the middle overlaps, and no measurement in this repository
+sets those weights — the reasoning is recorded in
+[§3A](phase-9-specification.md#3a-the-decision-2026-08-20) and is the same one
+that keeps three comparison metrics `neutral` and draws no trend line on
+progress. The components are the answer.
+
+**Counts and distances are different numbers, and each field's name says which.**
+`overlap_note_count` counts semitone positions and includes both ends;
+`semitones_above_top_note` is a distance. A song running C4–C5 spans **12
+semitones** and contains **13 notes**. The share is taken over counts rather than
+widths so that a song whose range is a single note has no special case.
+
+**The boundary is inclusive.** A song whose top note is exactly the singer's top
+note fits, and two ranges sharing one note overlap by one note. That note is in
+the range because it was sung, and excluding it would assert a safety margin this
+system has no basis for.
+
+**`semitones` is `null` exactly when no shift fits** — never `0` standing in for
+"cannot". When several shifts work they form a contiguous run and the
+recommendation is the one nearest zero: the least change to the song. When none
+fits, `shortfall_semitones` says by how many semitones the song is wider, and
+**no best-effort suggestion is offered**, because a shift that does not fit is
+not a shift.
+
+**A transposition is arithmetic, not musical advice.** It says a shift exists. It
+does not say the result is singable, or that it should be performed that way:
+register transitions, breath demands, vowel placement and the arrangement's own
+constraints are all outside what this system measures.
+
+**A refusal is a `200`.** A recording nobody has measured, one still being
+measured, one whose analysis failed and one with no reliable pitch all return
+successfully with `comparable: false`, no `fit`, no `transposition`, and a
+`recording_status` of `analysis_missing`, `analysis_in_progress`,
+`analysis_failed` or `insufficient_pitch_signal`. Each is a different thing to
+tell somebody, and an HTTP error would collapse them into one.
+
+**There is no `not_found` status and no reference status at all.** This result is
+reached through `/recordings/{id}/…`, where an unknown recording is a `404`
+exactly as on every sibling route; `/recordings/compare` reports a missing side
+instead because it has two ids in the query string and no owning path segment.
+And under this input model a reference either exists with a range — the range is
+required to create one and validated before the row is written — or does not
+exist, which is a `404` on the id the caller named.
+
+**Three caveats are on every response, unconditionally.** They describe the
+method rather than the inputs: the song's numbers were asserted, the detected
+range is what one recording contained, and range overlap is not a statement about
+whether somebody can sing a song. `little_pitched_signal` and
+`narrow_detected_range` are conditional on what was measured.
+
+| Failure | Status | Code |
+| --- | --- | --- |
+| Recording unknown, or another owner's | 404 | `RECORDING_NOT_FOUND` |
+| Reference unknown, or another owner's | 404 | `REFERENCE_NOT_FOUND` |
+| Malformed recording or reference id | 422 | `VALIDATION_ERROR` |
+
+Both ids are checked against the same owner in the same request. Neither is
+checked and the other trusted.
 
 ### `GET /health`
 
@@ -1063,7 +1283,11 @@ real HTTP statuses:
 | `error_code` | HTTP | Meaning |
 | --- | --- | --- |
 | `CREDENTIAL_NOT_FOUND` | 404 | No key with that id belongs to the caller |
+| `REFERENCE_NOT_FOUND` | 404 | No song reference with that id belongs to the caller |
 | `LAST_CREDENTIAL` | 409 | Refusing to revoke an owner's only remaining key |
+
+`REFERENCE_NOT_FOUND` follows the same rule as `CREDENTIAL_NOT_FOUND` below: one
+answer for "no such reference" and "somebody else's reference".
 
 `CREDENTIAL_NOT_FOUND` is deliberately the same answer for "no such key" and
 "somebody else's key", including somebody else's *last* key — so neither the

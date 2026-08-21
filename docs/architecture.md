@@ -1469,6 +1469,9 @@ category errors, and this table exists to make them visible.
 | One feedback run | `claim_feedback`, a single conditional `UPDATE` | PostgreSQL | Not a read-then-write |
 | Recording comparison | `services/comparison/` | Deterministic | Measurement comparison, never a score; four of seven metrics have no better direction |
 | Progress over time | `services/progress/` | Deterministic | Measurements over time, never a level or a trend line; `null` is a gap, never a zero |
+| Song references | `services/compatibility/repository.py`, `routes/compatibility.py` | PostgreSQL | **Metadata somebody typed**, never audio; no decoder, no analysis lifecycle, no file to delete; owner-scoped like everything else |
+| Song compatibility | `services/compatibility/fit.py` | Deterministic | Arithmetic on two closed intervals of semitones; never a score, and no field that could hold one; the transposition is a shift, never musical advice |
+| Where a number came from | `RangeSource` on every range | Deterministic | `measured` is from audio, `asserted` is typed; never styled alike, never summed into a third number |
 
 Two allocations are worth restating because they are the ones most likely to
 erode:
@@ -1480,6 +1483,13 @@ erode:
   measurements** of the same kind of quantity, by different algorithms over
   different windows. Neither validates the other and the UI never implies they
   agree.
+- **A compatibility result mixes a measured number with a typed one**, and that
+  is the only place in the product where it happens. The mixing is legitimate
+  because the arithmetic is exact and the provenance is carried into every
+  response and onto the screen; it would stop being legitimate the moment the
+  two were averaged, summed, or rendered the same way. `RangeSource` exists so
+  that losing the distinction requires deleting a field rather than forgetting a
+  convention.
 
 ### Comparison (7N)
 

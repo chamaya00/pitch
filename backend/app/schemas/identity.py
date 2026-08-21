@@ -107,6 +107,17 @@ class IdentityResponse(BaseModel):
             "one recording included two of them."
         )
     )
+    song_references: int = Field(
+        default=0,
+        description=(
+            "How many song references this identity holds. **Not a count of "
+            "recordings**, unlike the three fields above it: a reference is a "
+            "song's range somebody typed, and an identity can hold references "
+            "and no recordings at all. Counted here because deleting the "
+            "identity deletes these too, and a confirmation that did not name "
+            "them would be incomplete."
+        ),
+    )
     credentials: list[CredentialResponse] = Field(
         default_factory=list,
         description=(
@@ -134,6 +145,7 @@ class IdentityResponse(BaseModel):
             recordings=summary.recordings,
             analysed_recordings=summary.analysed_recordings,
             ai_feedback=summary.ai_feedback,
+            song_references=summary.song_references,
             credentials=[
                 CredentialResponse.from_domain(
                     credential, current=credential.credential_id == current_credential_id

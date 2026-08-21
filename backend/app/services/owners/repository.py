@@ -147,14 +147,24 @@ class PostgresOwnerRepository:
         that could stand in for reading the recordings themselves. Scoped by
         ``owner_id`` in the ``WHERE`` clause like every other read.
 
-        **All three numbers count recordings**, and the lateral is what makes
-        that a property of the statement rather than of a ``DISTINCT`` cleaning
-        up afterwards. A recording may be analysed more than once, so joining
-        recordings to analyses multiplies rows; folding each recording's
+        **The first three numbers count recordings**, and the lateral is what
+        makes that a property of the statement rather than of a ``DISTINCT``
+        cleaning up afterwards. A recording may be analysed more than once, so
+        joining recordings to analyses multiplies rows; folding each recording's
         analyses down to two booleans *first* leaves the outer query one row per
         recording to count. An aggregate with no ``GROUP BY`` always returns a
         row, so a recording with no analyses is a row of two nulls rather than
         no row at all.
+
+        **The fourth number counts something else**, and is a scalar subquery
+        rather than a fourth aggregate for exactly that reason: song references
+        (Step 11.3) do not hang off a recording, so there is no row of the outer
+        query to filter and no ``FILTER`` clause could reach them. It is
+        uncorrelated with that query — it reads the same owner id, not the row —
+        so it is evaluated once against ``song_references_owner_created_idx``,
+        whatever the owner holds. It is also the first field here that is not a
+        count of recordings, which is why the invariant stated above stops at
+        three.
 
         **The third number changed meaning in Step 10.19, because it was
         wrong.** It counted *analyses* whose feedback had completed, and both
@@ -188,7 +198,10 @@ class PostgresOwnerRepository:
                 """
                 SELECT count(*)                                   AS recordings,
                        count(*) FILTER (WHERE a.analysed)         AS analysed,
-                       count(*) FILTER (WHERE a.carries_feedback) AS feedback
+                       count(*) FILTER (WHERE a.carries_feedback) AS feedback,
+                       (SELECT count(*)
+                          FROM song_references sr
+                         WHERE sr.owner_id = %s)                  AS song_references
                   FROM recordings r
                   LEFT JOIN LATERAL (
                       SELECT bool_or(status = 'completed')          AS analysed,
@@ -198,14 +211,17 @@ class PostgresOwnerRepository:
                   ) a ON TRUE
                  WHERE r.owner_id = %s
                 """,
-                (owner_id,),
+                (owner_id, owner_id),
             )
         if row is None:  # pragma: no cover - an aggregate always returns a row
-            return OwnerDataSummary(recordings=0, analysed_recordings=0, ai_feedback=0)
+            return OwnerDataSummary(
+                recordings=0, analysed_recordings=0, ai_feedback=0, song_references=0
+            )
         return OwnerDataSummary(
             recordings=row["recordings"],
             analysed_recordings=row["analysed"],
             ai_feedback=row["feedback"],
+            song_references=row["song_references"],
         )
 
     async def recording_ids(self, owner_id: uuid.UUID) -> list[str]:
@@ -249,7 +265,14 @@ class PostgresOwnerRepository:
             )
 
     async def expired_owner_ids(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
-        """Identities that look reclaimable: no recordings, not seen since ``cutoff``.
+        """Identities that look reclaimable: holding nothing, not seen since ``cutoff``.
+
+        **Holding nothing means holding nothing at all**, not merely no
+        recordings. Step 11.3 gave an identity a second thing it can own — a
+        song reference somebody typed — and an owner who had only those would
+        have been reclaimed by the first predicate alone, silently taking the
+        references with it. The two ``NOT EXISTS`` clauses are the retention
+        policy: *an identity is reclaimed only when it owns nothing.*
 
         ``NOT EXISTS`` rather than a join or a count: it stops at the first
         recording, so an owner with a thousand of them costs the same as an
@@ -266,6 +289,7 @@ class PostgresOwnerRepository:
                   FROM owners o
                  WHERE o.last_seen_at < %s
                    AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.owner_id = o.id)
+                   AND NOT EXISTS (SELECT 1 FROM song_references sr WHERE sr.owner_id = o.id)
                  ORDER BY o.last_seen_at
                  LIMIT %s
                 """,
@@ -294,6 +318,7 @@ class PostgresOwnerRepository:
                  WHERE o.id = %s
                    AND o.last_seen_at < %s
                    AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.owner_id = o.id)
+                   AND NOT EXISTS (SELECT 1 FROM song_references sr WHERE sr.owner_id = o.id)
                    FOR UPDATE OF o SKIP LOCKED
                 """,
                 (owner_id, cutoff),

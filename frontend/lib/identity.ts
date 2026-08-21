@@ -35,22 +35,32 @@ export function recoveryKeyProblem(value: string): string | null {
   return null;
 }
 
-/** What this identity holds, as a sentence. */
+/**
+ * What this identity holds, as a sentence.
+ *
+ * **"Holds nothing" means nothing at all.** Until song references existed, a
+ * recording was the only thing a key could hold, so an early return on
+ * `recordings === 0` said the truth. It does not any more: a key can hold songs
+ * somebody described and no recordings, and telling them it holds nothing would
+ * be false about data this key is the only way back to.
+ */
 export function summarise(identity: Identity): string {
-  if (identity.recordings === 0) {
-    return "This key holds no recordings yet.";
+  const parts: string[] = [];
+  if (identity.recordings > 0) {
+    parts.push(`${identity.recordings} recording${identity.recordings === 1 ? "" : "s"}`);
+    if (identity.analysed_recordings > 0) {
+      parts.push(`${identity.analysed_recordings} measured`);
+    }
+    if (identity.ai_feedback > 0) {
+      parts.push(`${identity.ai_feedback} with generated feedback`);
+    }
   }
-  const parts = [
-    `${identity.recordings} recording${identity.recordings === 1 ? "" : "s"}`,
-  ];
-  if (identity.analysed_recordings > 0) {
-    parts.push(`${identity.analysed_recordings} measured`);
-  }
-  if (identity.ai_feedback > 0) {
+  if (identity.song_references > 0) {
     parts.push(
-      `${identity.ai_feedback} with generated feedback`,
+      `${identity.song_references} song${identity.song_references === 1 ? "" : "s"} you described`,
     );
   }
+  if (parts.length === 0) return "This key holds nothing yet.";
   return `This key holds ${parts.join(", ")}.`;
 }
 
@@ -62,19 +72,41 @@ export function summarise(identity: Identity): string {
  * feedback" is one they consider.
  */
 export function deletionWarning(identity: Identity): string {
+  const songs =
+    identity.song_references > 0
+      ? `${identity.song_references} song${identity.song_references === 1 ? "" : "s"} you described`
+      : "";
+
   if (identity.recordings === 0) {
-    return "There is nothing stored under this key yet, so there is nothing to delete.";
+    // Not "there is nothing to delete". A key holding only songs holds
+    // something, and this is the sentence somebody reads before losing it.
+    return songs === ""
+      ? "There is nothing stored under this key yet, so there is nothing to delete."
+      : `This permanently deletes ${songs}. It cannot be undone.`;
   }
+
   const feedback =
     identity.ai_feedback > 0
       ? ` ${identity.ai_feedback} of them carr${identity.ai_feedback === 1 ? "ies" : "y"} generated feedback, which cannot be recovered.`
       : "";
+  const also = songs === "" ? "" : ` It also deletes ${songs}.`;
   return (
     `This permanently deletes ${identity.recordings} recording` +
     `${identity.recordings === 1 ? "" : "s"}, every measurement taken from ` +
     `${identity.recordings === 1 ? "it" : "them"}, and the stored audio itself.` +
-    `${feedback} It cannot be undone.`
+    `${feedback}${also} It cannot be undone.`
   );
+}
+
+/**
+ * Whether this key holds nothing at all.
+ *
+ * One predicate, so the sentence a reader sees and the button they press cannot
+ * disagree about what "nothing" means — and so a third kind of held thing is a
+ * change in one place rather than in every `=== 0` comparison in the panel.
+ */
+export function holdsNothing(identity: Identity): boolean {
+  return identity.recordings === 0 && identity.song_references === 0;
 }
 
 /** The phrase somebody has to type to confirm deletion. */

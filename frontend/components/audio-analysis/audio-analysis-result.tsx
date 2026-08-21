@@ -4,6 +4,7 @@ import { AudioFeedbackCard } from "@/components/audio-analysis/audio-feedback-ca
 import { MusicalKeyCard } from "@/components/audio-analysis/musical-key-card";
 import { NoteBreakdown } from "@/components/audio-analysis/note-breakdown";
 import { PitchGraph } from "@/components/audio-analysis/pitch-graph";
+import { SongCompatibilityCard } from "@/components/compatibility/song-compatibility-card";
 import {
   loudnessRows,
   rangeLabel,
@@ -93,7 +94,11 @@ export function AudioAnalysisResult({
         </h4>
         <div className="mt-4">
           {timeline && timeline.length > 0 ? (
-            <PitchGraph points={timeline} durationSeconds={summary.duration_seconds} />
+            <PitchGraph
+              points={timeline}
+              durationSeconds={summary.duration_seconds}
+              movedSections={summary.stability.unstable_sections}
+            />
           ) : (
             <p className="text-sm text-muted">
               {timelineError ??
@@ -117,6 +122,12 @@ export function AudioAnalysisResult({
         title="Detected range"
         rows={rangeRows(summary.range)}
       />
+
+      {/* Immediately after the range, deliberately: everything in it is
+          arithmetic on the two notes directly above, so it reads as a
+          consequence of that measurement rather than as a separate finding —
+          the placement the key card takes relative to the note breakdown. */}
+      <SongCompatibilityCard recordingId={recordingId} />
       <MetricGroup
         id="audio-stability"
         title="Pitch stability"

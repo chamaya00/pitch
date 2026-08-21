@@ -246,7 +246,12 @@ Chromium's fake capture device commits to C major within ~4 s at 390 px and
 and stopping the take leaves no key on the page.
 
 
-## Phase 9 — audited, specified, blocked
+## Phase 9 — audited, specified, blocked (10.7)
+
+> **Superseded by [Phase 9 — delivered (Step 11)](#phase-9--delivered-step-11).**
+> This section is the record of the audit that found the blocker, and is left as
+> it was written. The blocker was answered on 2026-08-20 and Phase 9 shipped;
+> read the sentences below in the past tense.
 
 Phase 9 was audited after Phase 8 closed, in the same way 10.7 audited Phase 8:
 inspect the repository first, and write nothing that the source does not support.
@@ -286,6 +291,10 @@ preliminary definition of done.
 
 **One question stands between Phase 9 and implementation, and it is
 [§16 question 1](phase-9-specification.md#16-unresolved-product-decisions).**
+
+*It stood for four steps. It was answered on 2026-08-20 — Option D, the user
+supplies metadata — and what that settled, and what it cost, is in
+[§3A](phase-9-specification.md#3a-the-decision-2026-08-20).*
 
 ## Phase 10 — where it stands
 
@@ -1026,57 +1035,170 @@ Delivered in 10.21 — *a policy on responses that are data*:
   middleware, so moving or disabling a documentation UI cannot leave a stale
   path exempting nothing.
 
+## Phase 9 — delivered (Step 11)
+
+Phase 9 was audited, specified and blocked from Step 10.7 onward on one product
+decision: **where a reference song comes from**. It was answered on 2026-08-20 —
+**Option D, the user supplies metadata** — and Step 11 built it. The decision,
+its reasoning, the five downstream questions it settles or retires, and what it
+costs are recorded in
+[phase-9-specification.md §3A](phase-9-specification.md#3a-the-decision-2026-08-20),
+which is where the definition of done asked for them. The specification is
+marked superseded rather than deleted, so what the decision was chosen *against*
+remains readable.
+
+**What was built**
+
+- **11.1 — the decision, recorded.** No code. Choosing D answers two of the
+  specification's eight open questions and retires four, because all of those
+  were downstream of reference audio that now does not exist. The two remaining
+  were settled on the repository's own precedents rather than on preference: no
+  headline compatibility score, because nothing measured anywhere sets the
+  weights a composite would need; the recommended transposition is the one
+  nearest zero, because the alternative claims the middle of a detected range is
+  the comfortable part of a voice and nothing here measures comfort; and a song
+  that exactly reaches the singer's top note fits, because that note is in the
+  range for the reason that it was sung.
+- **11.2 — the arithmetic.** `services/compatibility/fit.py`: overlap, the gap
+  at each end, the workable transpositions and the one recommended. Pure, with
+  no repository, no settings, no clock and **no provider** in its import list —
+  which is what makes it impossible rather than merely unlikely for a model to
+  produce one of these numbers. Reading a written note back (`midi_for_note_name`)
+  is new: the project could turn a MIDI number into `A4` and never the reverse,
+  because until now every note it handled came from a frequency it had measured.
+  It is asserted over all 128 notes rather than on examples.
+- **11.3 — storage, and what it costs an identity to hold one.** One table, no
+  audio, no analysis lifecycle, no storage directory, no file to delete. **No
+  columns for the two notes**, because nothing queries by range and the document
+  is authoritative — the rule 0001 states. The retention rule changed and that
+  is the part worth reading twice: it reclaimed identities owning *no
+  recordings*, which until now was the same sentence as *owns nothing*. A
+  reference is the second thing an identity can hold, so an owner who had typed
+  one and uploaded nothing would have been reclaimed and taken it with them.
+  `is_eligible` now takes a count for every kind of owned thing, as **required**
+  arguments, so a third kind breaks every call site rather than widening what
+  "empty" means; both halves of the SQL gained the second `NOT EXISTS`, and a
+  test reads both, because a predicate on one and not the other is how somebody
+  loses data to a race.
+- **11.4 — the API.** `POST/GET/DELETE /api/v1/references` and
+  `GET /api/v1/recordings/{id}/compatibility?reference_id=`. Two ids arrive from
+  the client, one in the path and one in the query, and both are checked against
+  the same owner: a row belonging to somebody else is never selected, so it is a
+  `404` identical to an id that never existed. Everything that is not an
+  ownership question is a `200` saying which — nobody measured this yet, a run
+  is going, it failed, there was no reliable pitch.
+- **11.5 — the card.** Under the detected range it is arithmetic on. Every range
+  carries its provenance **as a sentence**, not as a colour, because a colour is
+  not announced by a screen reader and does not survive a screenshot. The notes
+  are pickers over the names this project writes, which makes the flats question
+  disappear rather than answering it twice. Four components and no fifth
+  summarising them; a gap of nothing reads as "Nothing"; a song that does not fit
+  gets its shortfall and no suggestion.
+- **11.6 — the audit findings.** Below.
+
+**Two divergences from the specification's drafts**, both recorded rather than
+silently taken. §9's compatibility response has a per-side `status` on both
+sides; the shipped one has neither a `not_found` for the recording nor a status
+for the reference at all. The recording is a path segment, where every sibling
+route answers `404`; `/recordings/compare` reports a missing side instead
+because it has two ids in a query string and no owning path segment. And under
+this input model a reference either exists with a range — required at creation,
+validated before the row is written — or does not exist. A status enum with one
+member is not a contract, it is a field nobody can act on.
+
+**Verified over the real stack, not only in tests.** A synthesised C major
+melody uploaded through the API reads C4–C5; a song described as D4–A4 needs no
+shift; one at C5–C6 comes down twelve to C4–C5; one at C2–C7 reports a shortfall
+of 48 and offers nothing. In Chromium at 1280 px light and 390 px dark: no
+horizontal overflow, 0 CSP violations, 0 console errors, 0 page errors.
+
+**30 mutations over the arithmetic, 30 caught, 0 survived.** Boundary conditions
+are what mutation testing catches and this feature is almost entirely boundary
+conditions, which is why the specification asked for the run by name. The
+mutations that matter are the ones that would produce a plausible wrong answer:
+dropping the inclusive `+1` from the overlap, taking the share over the singer's
+range instead of the song's, swapping the sides of either gap, making the fit
+boundary exclusive, recommending the far end of the window or its centre instead
+of the end nearest zero, and labelling the recording's own range `asserted`.
+
+## Step 11.6 — the audit, and a measurement that had never fired
+
+Step 10.20 recorded the lesson that an audit of the *list of known gaps* is not
+an audit. This one compared the API payload with the screen, and found three
+measurements the product computes, returns and documents that reached nobody:
+the crest factor, the zero-crossing rate — which the README names among the
+spectral characteristics VocalLens shows — and `unstable_sections`.
+
+The first two are now rows. The third was not a presentation problem.
+
+**`unstable_sections` had never once been non-empty.** Computed, stored,
+returned and documented as catching "vibrato, a slide, a bend and a laugh" since
+Step 7I, and no signal that could be synthesised produced one: not a
+0.9-semitone vibrato, not a two-octave glide, not a trill, not a 43 Hz wobble.
+The threshold sat at 35 cents on a quantity bounded to ±50 — the deviation from
+the *nearest note* — so a five-frame window could only exceed it by holding
+values near both extremes at once, which needs the pitch to move a semitone
+every 23 ms. Nothing the detector can still track moves that fast.
+
+**Nobody noticed because the only test that touched it asserted a steady tone
+produces no sections**, and a function returning `()` unconditionally passes
+that. The positive case did not exist. The lesson is one this project has now
+recorded twice in different words: **a measurement needs a test that makes it
+fire, not only one that keeps it quiet.**
+
+A sweep over ten signals put the threshold at 20, and the full table is in
+[audio-analysis.md](audio-analysis.md). The binding constraint turned out not to
+be the steady tone but the note-transition frames of a plain stepped melody,
+which reach 0.07 s against a 0.25 s minimum; the smallest run from a signal that
+should fire is 0.65 s. The window was checked rather than assumed — 9, 11, 15 and
+21 frames separate nothing that 5 cannot. The alternative quantity, the same
+window over absolute pitch, catches the glides this one under-reports and flags
+every note change in every melody anybody will ever sing; the wrap at the
+semitone boundary is the price of being immune to a clean step, and it is paid
+deliberately.
+
+The stretches are **shaded on the pitch graph, never listed**. `ai.md` withholds
+the field from the model because a timestamped list reads as a fault list; on the
+graph the trace inside each band shows what the number is about, which is the
+same argument the key card makes for showing its twelve pitch classes. What the
+shading encodes is repeated in the canvas description, since a picture whose
+meaning is carried only by colour is a picture some readers do not get.
+
+Two more things the same audit found, neither of them on any list:
+
+- **The landing page described half the product.** Its "what VocalLens measures"
+  section had five entries, every one from the speech half or the live meter,
+  and named neither pitch nor range nor key nor comparison nor progress. It had
+  been stale since Phase 5 and nothing failed, because copy has no test.
+- **The identity panel was saying something false.** "This key holds no
+  recordings yet" and "there is nothing stored under this key yet, so there is
+  nothing to delete" were both written when a recording was the only thing a key
+  could hold. A key holding six described songs and no recordings read both — of
+  data that key is the only way back to.
+
 ## Where this leaves the project
 
-**The performance thread that ran from 10.11 to 10.19 is finished**, in the sense
-that it can name what it did not find rather than what it has not looked at. Every
-read in the product has now been measured at one client and at sixteen, across
-one, two and four workers, at fifty recordings and at five thousand, and with a
-realistic spread of re-analysed recordings and generated feedback. No read stands
-out: the four built on a pitch timeline sit in one band, and the rest are
-single-digit milliseconds. Three things that *were* found on the way are worth separating
-from the milliseconds, because none of them was a performance defect: a page of
-history describing itself as the whole history (10.13), a connection budget sized
-for a deployment that no longer existed (10.17), and a count of analyses rendered
-into a sentence about recordings (10.19).
+**Every phase in [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) §32 is now
+delivered**, Phase 9 last and four steps after it was specified. Phase 10's
+outstanding table had four rows when 10.21 closed; two of them are now closed as
+well. The licence is MIT, chosen by the owner on 2026-08-20 and the last item
+that was waiting on a decision nobody had been asked for rather than on work
+nobody had done. Phase 9's blocker was the other.
 
-**This section said "the next step is a decision, not a commit", and 10.20 is
-what that claim was worth.** It was assembled from the outstanding items the
-roadmap already listed, which is not an audit — it can only ever find what
-somebody has already written down. What it missed was that nothing ran the
-checks: no `.github` directory, no automation of `scripts/check.sh`, and a suite
-that silently skips its 185 SQL tests when no database is configured. The lesson
-is 7P's and 10.7's, and it is now recorded twice: **audit the repository, not the
-list of known gaps.** What follows is therefore what remains *after* an audit
-that went looking, and it should be read as the best current answer rather than
-a closed one.
-
-**It was not closed, either.** The first version of the table below had four
-rows, and one of them — a Content-Security-Policy on API responses — was listed
-as waiting on a decision when its only justification was that `limitations.md`
-recorded its absence. 10.21 built it. Three rows remain, and what separates them
-from that one is that each names a question somebody outside this repository has
-to answer.
-
-**What Phase 10 still needs is not blocked on engineering.** Four things remain,
-and each is waiting on a decision nobody has taken rather than on work nobody has
-done. The last of them was not on any list until an audit went looking for what
-was not written down, which is the third time that has happened in three steps:
+**Two rows remain, and both are outside this repository:**
 
 | Outstanding | What it is waiting on |
 | --- | --- |
 | Real credentials — passwords, email, OAuth, sessions, reset, verification, MFA, account merging | A product decision about what an account *is* here. 10.2 rejected passwords for its own slice on the evidence: adding them while deferring reset and verification is worse than 128 random bits, not better. |
 | TLS termination and HSTS | A deployment decision. The proxy speaks HTTP and claims no HSTS deliberately; a certificate belongs to whoever operates the deployment, and claiming HSTS from a server that cannot serve TLS would break the site. |
-| Retention of identities that **hold recordings** | A product decision. 10.6 reclaims only identities that own nothing, because deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
-| A licence | The owner's decision, and found by the same audit that found 10.20: this repository is public and carries no `LICENSE` file, so nobody may use it and nobody had written that down. Which licence is not an engineering question. |
+| Retention of identities that **hold recordings** | A product decision. Reclaiming covers identities that own *nothing*; deleting somebody's recordings after *n* days of absence is a policy, and this repository contains no policy. |
 
-**Phase 9 is in the same position and has been since 10.7**: audited, specified,
-and waiting on [one question](phase-9-specification.md#16-unresolved-product-decisions)
-— where a reference song comes from. Four options are analysed there and none is
-chosen, because an engineer choosing would be inventing the requirement.
-
-The honest summary is that every remaining item on this list is waiting on a
-decision. What 10.20 showed is that "this list" and "what is left" are not the
-same thing, so the summary worth acting on is the weaker one: **nothing left on
-the list can be built without an answer, and the list is only as good as the last
-audit.**
+**The honest summary is the weaker one, and it has been earned three times
+now.** 10.20 audited the repository rather than the list and found that nothing
+ran the checks. 10.21 found a row on that list that was not actually blocked.
+11.6 compared the payload with the screen and found a measurement that had been
+returning an empty array for four phases while its documentation described what
+it caught. Each of those was invisible to the audit before it. So: **nothing
+left on the list can be built without an answer from outside this repository,
+and the list is only ever as good as the last audit** — which is a reason to
+keep auditing, not a reason to believe the list.

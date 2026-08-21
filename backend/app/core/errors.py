@@ -90,6 +90,13 @@ class ErrorCode(StrEnum):
     #: nobody could ever reach them again.
     LAST_CREDENTIAL = "LAST_CREDENTIAL"
 
+    # Song references (Step 11.3)
+    #: No reference with that id belongs to the caller. Deliberately the same
+    #: answer for "no such reference" and "somebody else's reference", so the
+    #: endpoint cannot be used to discover that an id is real — the rule every
+    #: owned resource here follows.
+    REFERENCE_NOT_FOUND = "REFERENCE_NOT_FOUND"
+
     # Rate limiting (Step 10.3)
     #: Too many requests from this caller, too quickly. Always accompanied by a
     #: ``Retry-After`` header, because a limit a client cannot wait out
@@ -127,6 +134,7 @@ STATUS_BY_CODE: Final[dict[ErrorCode, int]] = {
     ErrorCode.TRANSCRIPT_EMPTY: 422,
     ErrorCode.ANALYSIS_NOT_FOUND: 404,
     ErrorCode.CREDENTIAL_NOT_FOUND: 404,
+    ErrorCode.REFERENCE_NOT_FOUND: 404,
     ErrorCode.LAST_CREDENTIAL: 409,
     ErrorCode.RATE_LIMITED: 429,
 }

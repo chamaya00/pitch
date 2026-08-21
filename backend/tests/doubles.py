@@ -47,6 +47,8 @@ from app.services.audio_analysis.postgres_repository import (
     AudioAnalysisConflictError,
 )
 from app.services.comparison.sources import ComparisonSource
+from app.services.compatibility.models import SongReference
+from app.services.compatibility.repository import ReferenceAlreadyExistsError
 from app.services.owners.credentials import (
     Credential,
     CredentialExistsError,
@@ -129,15 +131,17 @@ class InMemoryOwnerRepository:
         self,
         recordings: "InMemoryRecordingRepository | None" = None,
         credentials: CredentialStore | None = None,
+        references: "InMemorySongReferenceRepository | None" = None,
     ) -> None:
         self._by_id: dict[uuid.UUID, Owner] = {}
         #: The activity signal migration 0003 adds to ``owners``.
         self._last_seen: dict[uuid.UUID, datetime] = {}
         self._credentials = credentials if credentials is not None else CredentialStore()
-        # Optional back-reference so the identity summary and the cascade can be
-        # answered from the same data the other doubles hold, rather than from a
-        # second copy that could disagree with them.
+        # Optional back-references so the identity summary and the cascade can
+        # be answered from the same data the other doubles hold, rather than
+        # from a second copy that could disagree with them.
         self._recordings = recordings
+        self._references = references
 
     @property
     def credentials(self) -> CredentialStore:
@@ -178,7 +182,7 @@ class InMemoryOwnerRepository:
         candidates = [
             owner_id
             for owner_id, seen in self._last_seen.items()
-            if owner_id in self._by_id and seen < cutoff and not self._owns_recordings(owner_id)
+            if owner_id in self._by_id and seen < cutoff and not self._owns_anything(owner_id)
         ]
         candidates.sort(key=lambda owner_id: self._last_seen[owner_id])
         return candidates[:limit]
@@ -192,19 +196,29 @@ class InMemoryOwnerRepository:
         seen = self._last_seen.get(owner_id)
         if owner_id not in self._by_id or seen is None or seen >= cutoff:
             return False
-        if self._owns_recordings(owner_id):
+        if self._owns_anything(owner_id):
             return False
         self._by_id.pop(owner_id, None)
         self._credentials.drop_owner(owner_id)
         self._last_seen.pop(owner_id, None)
         if self._recordings is not None:
             self._recordings.delete_for_owner(owner_id)
+        if self._references is not None:
+            self._references.delete_for_owner(owner_id)
         return True
 
-    def _owns_recordings(self, owner_id: uuid.UUID) -> bool:
-        if self._recordings is None:
-            return False
-        return any(owner == owner_id for owner, _ in self._recordings.records())
+    def _owns_anything(self, owner_id: uuid.UUID) -> bool:
+        """What the two ``NOT EXISTS`` clauses in the retention SQL ask.
+
+        Both kinds, because an identity holding only song references is not
+        empty — and a double that asked about recordings alone would agree with
+        the older rule and disagree with the schema.
+        """
+        if self._recordings is not None and any(
+            owner == owner_id for owner, _ in self._recordings.records()
+        ):
+            return True
+        return self._references is not None and self._references.count_sync(owner_id) > 0
 
     async def data_summary(self, owner_id: uuid.UUID) -> OwnerDataSummary:
         """Counts, taken from the sibling doubles rather than a second store.
@@ -218,9 +232,15 @@ class InMemoryOwnerRepository:
         analysis, so the two stores disagreed and the contract suite had never
         asked.
         """
+        references = 0 if self._references is None else self._references.count_sync(owner_id)
         recordings = self._recordings
         if recordings is None:
-            return OwnerDataSummary(recordings=0, analysed_recordings=0, ai_feedback=0)
+            return OwnerDataSummary(
+                recordings=0,
+                analysed_recordings=0,
+                ai_feedback=0,
+                song_references=references,
+            )
         owned = [record for owner, record in recordings.records() if owner == owner_id]
         analysed = 0
         feedback = 0
@@ -231,7 +251,10 @@ class InMemoryOwnerRepository:
             if any(one.feedback_status is AudioFeedbackStatus.COMPLETED for one in analyses):
                 feedback += 1
         return OwnerDataSummary(
-            recordings=len(owned), analysed_recordings=analysed, ai_feedback=feedback
+            recordings=len(owned),
+            analysed_recordings=analysed,
+            ai_feedback=feedback,
+            song_references=references,
         )
 
     async def recording_ids(self, owner_id: uuid.UUID) -> list[str]:
@@ -248,6 +271,8 @@ class InMemoryOwnerRepository:
         self._credentials.drop_owner(owner_id)
         if self._recordings is not None:
             self._recordings.delete_for_owner(owner_id)
+        if self._references is not None:
+            self._references.delete_for_owner(owner_id)
         return owner is not None
 
 
@@ -666,6 +691,59 @@ class InMemoryAudioAnalysisRepository:
                 del self._records[stored_id]
 
 
+class InMemorySongReferenceRepository:
+    """Song references in a dictionary, keyed by id.
+
+    Ownership is modelled the way ``song_references`` enforces it: the owner is
+    stored beside the row and every read filters on it, so a reference belonging
+    to somebody else is *absent* rather than found-and-refused. A double that
+    looked a row up first and compared owners afterwards would pass tests that
+    the SQL would fail.
+    """
+
+    def __init__(self) -> None:
+        self._by_id: dict[str, tuple[uuid.UUID, SongReference]] = {}
+
+    async def create(self, reference: SongReference, owner_id: uuid.UUID) -> SongReference:
+        if reference.reference_id in self._by_id:  # the PRIMARY KEY
+            raise ReferenceAlreadyExistsError(f"reference {reference.reference_id} already exists")
+        self._by_id[reference.reference_id] = (owner_id, reference)
+        return reference
+
+    async def get(self, reference_id: str, owner_id: uuid.UUID) -> SongReference | None:
+        held = self._by_id.get(reference_id)
+        if held is None or held[0] != owner_id:
+            return None
+        return held[1]
+
+    async def list_for_owner(self, owner_id: uuid.UUID, limit: int) -> list[SongReference]:
+        owned = [reference for owner, reference in self._by_id.values() if owner == owner_id]
+        # The same order the index serves: newest first, id breaking a tie so
+        # two references created in the same instant have a stable order.
+        owned.sort(key=lambda one: (one.created_at, one.reference_id), reverse=True)
+        return owned[:limit]
+
+    async def delete(self, reference_id: str, owner_id: uuid.UUID) -> bool:
+        held = self._by_id.get(reference_id)
+        if held is None or held[0] != owner_id:
+            return False
+        del self._by_id[reference_id]
+        return True
+
+    async def count_for_owner(self, owner_id: uuid.UUID) -> int:
+        return self.count_sync(owner_id)
+
+    def count_sync(self, owner_id: uuid.UUID) -> int:
+        """The same count, callable from the owner double's own reads."""
+        return sum(1 for owner, _ in self._by_id.values() if owner == owner_id)
+
+    def delete_for_owner(self, owner_id: uuid.UUID) -> None:
+        """What ``ON DELETE CASCADE`` does when the owner row goes."""
+        for reference_id, (owner, _) in list(self._by_id.items()):
+            if owner == owner_id:
+                del self._by_id[reference_id]
+
+
 @dataclass(frozen=True, slots=True)
 class Doubles:
     """One wired set of in-memory repositories, plus an owner to use.
@@ -680,6 +758,7 @@ class Doubles:
     recordings: InMemoryRecordingRepository
     analyses: InMemoryAnalysisRepository
     audio_analyses: InMemoryAudioAnalysisRepository
+    references: InMemorySongReferenceRepository
     owner: Owner
     token: str
 
@@ -689,7 +768,8 @@ async def build_doubles() -> Doubles:
     analyses = InMemoryAnalysisRepository()
     audio_analyses = InMemoryAudioAnalysisRepository()
     recordings = InMemoryRecordingRepository(analyses, audio_analyses)
-    owners = InMemoryOwnerRepository(recordings)
+    references = InMemorySongReferenceRepository()
+    owners = InMemoryOwnerRepository(recordings, references=references)
     # Over the same store, not a second one: a key minted through the owner
     # repository has to resolve through the credential repository.
     credentials = InMemoryCredentialRepository(owners)
@@ -701,6 +781,7 @@ async def build_doubles() -> Doubles:
         recordings=recordings,
         analyses=analyses,
         audio_analyses=audio_analyses,
+        references=references,
         owner=owner,
         token=token,
     )
@@ -720,6 +801,7 @@ def override_repositories(app: FastAPI, doubles: Doubles) -> None:
     app.dependency_overrides[deps.get_recording_repository] = lambda: doubles.recordings
     app.dependency_overrides[deps.get_analysis_repository] = lambda: doubles.analyses
     app.dependency_overrides[deps.get_audio_analysis_repository] = lambda: doubles.audio_analyses
+    app.dependency_overrides[deps.get_song_reference_repository] = lambda: doubles.references
 
 
 def _progress_row(recording: Recording, analysis: AudioAnalysis | None) -> ProgressRow:

@@ -1706,3 +1706,85 @@ def test_the_api_opens_the_pool_the_settings_describe(monkeypatch: Any) -> None:
         assert app.state.database is not None
         assert app.state.database.max_size == 3
         assert app.state.database.application_name == APPLICATION_NAME
+
+
+# --- Song references (Step 11.3) -------------------------------------------
+
+
+def test_song_references_cascade_from_their_owner() -> None:
+    """The foreign key, not the application, is what makes deletion complete.
+
+    ``DELETE /identity`` removes one row from ``owners``; every reference that
+    named it has to go with it, or the endpoint's promise is false. Asserted
+    against the schema because a cascade is a statement about PostgreSQL, not
+    about an interface two implementations share.
+    """
+
+    async def work(database: Database) -> None:
+        owner_id = uuid.uuid4()
+        reference_id = uuid.uuid4().hex
+        async with database.transaction() as connection:
+            await connection.execute(
+                "INSERT INTO owners (id, created_at) VALUES (%s, now())", (owner_id,)
+            )
+            await connection.execute(
+                """
+                INSERT INTO song_references (id, owner_id, created_at, document)
+                VALUES (%s, %s, now(), %s)
+                """,
+                (reference_id, owner_id, json.dumps({"title": "A song"})),
+            )
+            await connection.execute("DELETE FROM owners WHERE id = %s", (owner_id,))
+
+        async with database.connection() as connection:
+            row = await fetch_one(
+                connection,
+                "SELECT count(*) AS total FROM song_references WHERE id = %s",
+                (reference_id,),
+            )
+        assert row is not None and row["total"] == 0
+
+    with_db(work)
+
+
+def test_the_reference_index_serves_the_only_read_a_reference_has() -> None:
+    """One owner's references, newest first — and the retention predicate.
+
+    The same shape ``recordings_owner_created_idx`` has, for the same access
+    pattern. Without it, listing an owner's references and asking whether they
+    hold any would both be sequential scans of everybody's.
+    """
+
+    async def work(database: Database) -> None:
+        async with database.connection() as connection:
+            rows = await fetch_all(
+                connection,
+                "SELECT indexdef FROM pg_indexes WHERE tablename = 'song_references'",
+            )
+        defs = [str(row["indexdef"]) for row in rows]
+        assert any(
+            "song_references_owner_created_idx" in one
+            and "owner_id" in one
+            and "created_at DESC" in one
+            for one in defs
+        ), defs
+
+    with_db(work)
+
+
+def test_the_retention_predicate_asks_about_references_as_well_as_recordings() -> None:
+    """An identity is reclaimed only when it owns **nothing**.
+
+    Until Step 11.3 a recording was the only thing an identity could hold, so
+    "no recordings" and "nothing" were the same sentence. They are not any more,
+    and an owner holding only references must not be a candidate. Read from the
+    source of both statements, because the candidate query and the claim under
+    the row lock have to agree — a predicate on one and not the other is how a
+    returning user loses their references to a race.
+    """
+    for source in (
+        inspect.getsource(PostgresOwnerRepository.expired_owner_ids),
+        inspect.getsource(PostgresOwnerRepository.claim_expired_owner),
+    ):
+        assert "FROM recordings r WHERE r.owner_id = o.id" in source, source
+        assert "FROM song_references sr WHERE sr.owner_id = o.id" in source, source

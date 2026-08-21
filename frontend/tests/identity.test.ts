@@ -15,6 +15,7 @@ import {
   deletionWarning,
   describeKey,
   formatIssued,
+  holdsNothing,
   isDeletionConfirmed,
   isRecoveryKey,
   recoveryKeyProblem,
@@ -41,6 +42,7 @@ function identity(overrides: Partial<Identity> = {}): Identity {
     recordings: 5,
     analysed_recordings: 4,
     ai_feedback: 1,
+    song_references: 0,
     credentials: [],
     ...overrides,
   };
@@ -82,7 +84,9 @@ test("an empty field is told what to do, not told it is malformed", () => {
 // --- Saying what is at stake -----------------------------------------------
 
 test("an empty key says so plainly", () => {
-  assert.match(summarise(identity({ recordings: 0 })), /no recordings yet/);
+  // "Nothing", not "no recordings": a recording stopped being the only thing a
+  // key can hold, and the two sentences stopped meaning the same thing.
+  assert.match(summarise(identity({ recordings: 0 })), /nothing yet/);
 });
 
 test("the summary counts what would be lost", () => {
@@ -237,4 +241,51 @@ test("no key wording implies a second identity", () => {
   for (const phrase of ["new account", "second account", "another account", "sign in"]) {
     assert.ok(!surfaces.includes(phrase), `"${phrase}" implies an account system`);
   }
+});
+
+// --- What a key holds, when it holds something that is not a recording ------
+
+test("a key holding only songs does not say it holds nothing", () => {
+  // Until song references existed, "no recordings" and "nothing" were the same
+  // sentence. They are not, and this key is the only way back to those songs.
+  const held = identity({ recordings: 0, analysed_recordings: 0, song_references: 2 });
+  assert.equal(summarise(held), "This key holds 2 songs you described.");
+});
+
+test("a key holding neither says so", () => {
+  const empty = identity({ recordings: 0, analysed_recordings: 0, ai_feedback: 0 });
+  assert.equal(summarise(empty), "This key holds nothing yet.");
+});
+
+test("a key holding both counts both, and songs are not counted as recordings", () => {
+  const held = identity({
+    recordings: 3,
+    analysed_recordings: 2,
+    ai_feedback: 0,
+    song_references: 1,
+  });
+  assert.match(summarise(held), /3 recordings, 2 measured, 1 song you described/);
+});
+
+test("deleting a key that holds only songs is not described as deleting nothing", () => {
+  const held = identity({ recordings: 0, analysed_recordings: 0, song_references: 3 });
+  const warning = deletionWarning(held);
+  assert.doesNotMatch(warning, /nothing to delete/);
+  assert.match(warning, /3 songs you described/);
+});
+
+test("deleting a key that holds recordings names the songs as well", () => {
+  const held = identity({ recordings: 2, song_references: 1 });
+  assert.match(deletionWarning(held), /also deletes 1 song you described/);
+});
+
+test("a key that truly holds nothing still says there is nothing to delete", () => {
+  const empty = identity({ recordings: 0, analysed_recordings: 0, ai_feedback: 0 });
+  assert.match(deletionWarning(empty), /nothing to delete/);
+});
+
+test("holding nothing means holding nothing at all", () => {
+  assert.equal(holdsNothing(identity({ recordings: 0, ai_feedback: 0 })), true);
+  assert.equal(holdsNothing(identity({ recordings: 0, song_references: 1 })), false);
+  assert.equal(holdsNothing(identity({ recordings: 1 })), false);
 });

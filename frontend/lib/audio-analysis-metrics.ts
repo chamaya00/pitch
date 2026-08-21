@@ -33,6 +33,25 @@ export const NOT_MEASURED = "Not measured";
 /** Cents within which a voiced frame counts as on a note. Matches the backend. */
 export const IN_TUNE_CENTS = 25;
 
+/**
+ * The cents threshold behind a "moved" stretch. Matches the backend.
+ *
+ * Here so the graph's caption and its screen-reader description quote one
+ * number rather than two literals that can drift apart — which they did, within
+ * an hour of being written, when the backend value moved and only one of them
+ * followed.
+ *
+ * The quarter-second minimum is a word in the sentence rather than a constant,
+ * because "0.25 of a second" is not how anybody says it. If it moves, this
+ * sentence moves with it.
+ */
+export const UNSTABLE_CENTS_STD = 20;
+
+/** "…moved more than 20 cents over at least a quarter of a second." */
+export function movedStretchDefinition(): string {
+  return `moved more than ${UNSTABLE_CENTS_STD} cents over at least a quarter of a second`;
+}
+
 export interface MetricRow {
   label: string;
   value: string;
@@ -132,6 +151,18 @@ export function stabilityRows(stability: PitchStabilityMetrics): MetricRow[] {
   );
 }
 
+/*
+ * **`semitone_variance` is deliberately not a row**, and this is where that is
+ * written down.
+ *
+ * `docs/ai.md` withholds it from the prompt because semitones squared has no
+ * plain-language reading, and `cents_std` already answers "how much did it
+ * move" in units a person can picture. Every word of that applies to a reader
+ * of this table, and until Step 11.6 the reason existed only for the model —
+ * so the field looked like an oversight here rather than a decision. It stays
+ * in the API for a client that wants it.
+ */
+
 export function loudnessRows(loudness: LoudnessMetrics): MetricRow[] {
   return [
     measured("Level (RMS)", loudness.rms.toFixed(3), "Not a LUFS measurement."),
@@ -152,6 +183,16 @@ export function loudnessRows(loudness: LoudnessMetrics): MetricRow[] {
       percent(loudness.clipped_sample_ratio),
       "Samples at or beyond full scale.",
     ),
+    // Computed, documented and returned since Step 7I, and shown to nobody
+    // until Step 11.6 — found by an audit of the payload against the screen
+    // rather than by anyone asking for it.
+    loudness.crest_factor_db === null
+      ? unmeasured("Crest factor", "Too little audible signal to compare peak with level.")
+      : measured(
+          "Crest factor",
+          `${loudness.crest_factor_db.toFixed(1)} dB`,
+          "Peak over level. A steady tone is low; speech with sharp consonants is high.",
+        ),
   ];
 }
 
@@ -161,6 +202,7 @@ export function spectralRows(spectral: SpectralMetrics | null): MetricRow[] {
       unmeasured("Spectral centroid"),
       unmeasured("Bandwidth"),
       unmeasured("Rolloff"),
+      unmeasured("Zero-crossing rate"),
       unmeasured("Flatness"),
     ];
   }
@@ -168,6 +210,13 @@ export function spectralRows(spectral: SpectralMetrics | null): MetricRow[] {
     measured("Spectral centroid", `${Math.round(spectral.centroid_hz)} Hz`),
     measured("Bandwidth", `${Math.round(spectral.bandwidth_hz)} Hz`),
     measured("Rolloff", `${Math.round(spectral.rolloff_hz)} Hz`, "85% of the energy is below this."),
+    // As with the crest factor: measured all along, named in the README, and
+    // absent from the screen until an audit compared the two.
+    measured(
+      "Zero-crossing rate",
+      spectral.zero_crossing_rate.toFixed(3),
+      "Share of samples where the waveform crosses zero. Higher for noise and for consonants.",
+    ),
     measured("Flatness", spectral.flatness.toFixed(3), "1 is noise-like, 0 is tone-like."),
   ];
 }

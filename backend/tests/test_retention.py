@@ -83,22 +83,22 @@ def recently() -> datetime:
 
 
 def test_a_new_identity_is_never_eligible() -> None:
-    assert policy().is_eligible(last_seen_at=utc_now(), recordings=0) is False
+    assert policy().is_eligible(last_seen_at=utc_now(), recordings=0, song_references=0) is False
 
 
 def test_an_unused_empty_identity_past_the_period_is_eligible() -> None:
-    assert policy().is_eligible(last_seen_at=long_ago(), recordings=0) is True
+    assert policy().is_eligible(last_seen_at=long_ago(), recordings=0, song_references=0) is True
 
 
 def test_an_identity_with_recordings_is_never_eligible_however_old() -> None:
     """The condition that turns this from a judgement call into a safe one."""
     ancient = utc_now() - timedelta(days=3650)
 
-    assert policy().is_eligible(last_seen_at=ancient, recordings=1) is False
+    assert policy().is_eligible(last_seen_at=ancient, recordings=1, song_references=0) is False
 
 
 def test_a_recently_seen_identity_is_never_eligible_however_empty() -> None:
-    assert policy().is_eligible(last_seen_at=recently(), recordings=0) is False
+    assert policy().is_eligible(last_seen_at=recently(), recordings=0, song_references=0) is False
 
 
 def test_the_boundary_is_deterministic() -> None:
@@ -111,15 +111,18 @@ def test_the_boundary_is_deterministic() -> None:
     at = now - RETENTION
     older = at - timedelta(microseconds=1)
 
-    assert policy().is_eligible(last_seen_at=at, recordings=0, now=now) is False
-    assert policy().is_eligible(last_seen_at=older, recordings=0, now=now) is True
+    assert policy().is_eligible(last_seen_at=at, recordings=0, song_references=0, now=now) is False
+    assert (
+        policy().is_eligible(last_seen_at=older, recordings=0, song_references=0, now=now) is True
+    )
 
 
 def test_the_period_is_configuration_not_a_constant() -> None:
     seen = utc_now() - timedelta(days=10)
 
-    assert RetentionPolicy(timedelta(days=30)).is_eligible(last_seen_at=seen, recordings=0) is False
-    assert RetentionPolicy(timedelta(days=7)).is_eligible(last_seen_at=seen, recordings=0) is True
+    empty = {"recordings": 0, "song_references": 0}
+    assert RetentionPolicy(timedelta(days=30)).is_eligible(last_seen_at=seen, **empty) is False
+    assert RetentionPolicy(timedelta(days=7)).is_eligible(last_seen_at=seen, **empty) is True
 
 
 # --- What a run does --------------------------------------------------------
@@ -381,3 +384,18 @@ def test_a_stale_signal_is_always_refreshed(doubles: Doubles, throttle: timedelt
     seen = doubles.owners.last_seen(owner_id)
     assert seen is not None
     assert seen > utc_now() - timedelta(minutes=1)
+
+
+def test_an_identity_holding_only_song_references_is_never_eligible() -> None:
+    """The rule that "empty" means empty, not "has no recordings".
+
+    Step 11.3 gave an identity a second kind of thing it can own. Until then the
+    two sentences were the same one; an owner who had typed a song reference and
+    uploaded nothing would have been reclaimed by the older rule, silently
+    taking the references with it.
+    """
+    assert policy().is_eligible(last_seen_at=long_ago(), recordings=0, song_references=1) is False
+
+
+def test_holding_both_kinds_of_thing_is_still_not_eligible() -> None:
+    assert policy().is_eligible(last_seen_at=long_ago(), recordings=2, song_references=3) is False

@@ -1,27 +1,31 @@
 # Phase 9 — specification
 
-> **Status: blocked, and deliberately so.**
+> **Status: superseded. Phase 9 shipped in Step 11.**
 >
-> This file is an audit and a specification for **unbuilt** work. Nothing in it
-> is implemented, and no part of it should be read as a description of the
-> running system. Where it and the shipped documents disagree,
+> This file is kept as the record of how Phase 9 was decided, not as a
+> description of the running system. It was written as an audit of **unbuilt**
+> work and stayed blocked from the Phase 9 audit until 2026-08-20, because
+> **the product had never said where a reference song comes from**. On
+> 2026-08-20 the owner answered: **Option D**, the user supplies metadata.
+> [§3A](#3a-the-decision-2026-08-20) records the answer, what it settles
+> downstream, and what it costs. Step 11 built it.
+>
+> Everything below §3A was written *before* the decision and is left exactly as
+> it was: §4 is the analysis that informed the choice, and the options other
+> than D are roads not taken. The drafts in §9 and §10 are drafts — the shipped
+> contracts differ from them in places, and where they disagree
 > [api.md](api.md), [audio-analysis.md](audio-analysis.md),
 > [architecture.md](architecture.md) and [limitations.md](limitations.md) are
-> right.
->
-> Phase 9 cannot start. Not for want of engineering: **the product has never
-> said where a reference song comes from**, and every part of the phase —
-> storage, API, algorithm, tests, cost — changes shape depending on the answer.
-> The exact question is in [§3](#3-the-blocker-stated-exactly). Four answers are
-> analysed in [§4](#4-the-four-input-models). **None is chosen here.** Choosing
-> one would be an engineer inventing a requirement, which is the failure mode
-> this file exists to avoid.
+> right. Nothing here is deleted, because what a decision was chosen against is
+> part of the decision.
 
 ## Revision history
 
 | Step | What happened |
 | --- | --- |
 | Phase 9 audit | This file. Re-audited the repository after Phase 8 closed, confirmed the roadmap's Phase 9 row against source, established that no part of it exists, named the blocking product decision, and specified everything that can be specified without answering it. Two stale claims found elsewhere in the docs and corrected in the same commit. |
+| 11.1 (2026-08-20) | The blocker is answered. Option D — the user supplies metadata — chosen by the owner, and recorded in [§3A](#3a-the-decision-2026-08-20) with the five downstream questions it settles or retires. Nothing else in this file changed. |
+| Step 11 | Built. Marked superseded rather than deleted. The shipped contracts are in [api.md](api.md); what differs from the §9 and §10 drafts is recorded there and in [roadmap.md](roadmap.md), notably that the recording side reports no `not_found` and the reference side reports no status at all — both are `404`s, because the recording is a path segment and a reference either exists with a range or does not exist. |
 
 ---
 
@@ -158,6 +162,112 @@ without a re-upload. If it may be stored, all four of those come back.
 
 **This file does not answer any of the seven.** Section 4 is the analysis that
 should inform the answer.
+
+---
+
+## 3A. The decision (2026-08-20)
+
+**Option D. The user supplies the reference as metadata: a title, an artist, a
+lowest note, a highest note, and optionally a key. No reference audio, anywhere,
+ever.**
+
+Taken by the owner of this repository on 2026-08-20, in answer to
+[§16 question 1](#16-unresolved-product-decisions). Recorded here rather than in
+a commit message because [§15](#15-definition-of-done--preliminary) item 1 asks
+for exactly that, and because a decision that lives only in a diff is a decision
+nobody can find.
+
+### What it answers, and what it retires
+
+[§16](#16-unresolved-product-decisions) lists eight questions. Choosing D
+answers two of them, retires four as inapplicable, and leaves two that this
+section now settles because they are no longer contingent on anything.
+
+| # | Question | Status under D |
+| --- | --- | --- |
+| 1 | Where does a reference come from? | **Answered: the user types it.** |
+| 2 | Full mix or isolated vocal? | **Retired.** There is no reference audio to be either. |
+| 3 | May reference audio be stored? | **Retired.** There is none to store. |
+| 4 | A headline compatibility score? | **No.** See below. |
+| 5 | Which shift is recommended? | **The one closest to the original.** See below. |
+| 6 | Does a reference that exactly reaches the top note fit? | **Yes, inclusive.** See below. |
+| 7 | Does the duration ceiling move? | **Retired.** No audio is decoded, so no duration is involved. |
+| 8 | Who curates a catalogue? | **Retired.** There is no catalogue. |
+
+### Question 4 — no headline score
+
+[§6](#6-compatibility-semantics) argued this at length and stopped short of
+deciding, because a score is a product decision. The decision is **no**, and the
+reasoning is the one already in §6: a composite would have to weight how many
+semitones the top is out by against how many the bottom is out by against how
+much of the middle overlaps, and **no measurement anywhere in this repository
+sets those weights**. A number produced that way looks like a measurement and is
+a preference.
+
+The components are reported instead, each with its unit: how much of the song
+falls inside the range, the gap at each end, and the shift that closes them.
+This matches what `comparison/` and `progress/` already do — three metrics
+marked `neutral` rather than summed, and no trend line — and, as there, **the
+guarantee is the absence of a field that could hold such a figure**, not a
+promise not to add one.
+
+### Question 5 — the shift closest to the original
+
+When more than one transposition fits, the recommended one is the **smallest
+absolute shift**, and zero when zero fits.
+
+The alternative §7 names is "centre it in the singer's range", and it was
+rejected on the product's own rule. Centring claims that the middle of a
+detected range is the comfortable part of a voice, and **nothing in this system
+measures comfort**: the detected range is two extremes of what one recording
+happened to contain, tessitura is not computed anywhere, and no fixture here
+could tell the two rules apart on evidence. The smallest shift claims only what
+it is — the least change to the song — which is a statement about the
+arithmetic rather than about the singer.
+
+The choice is unique, so it needs no tie-break: the workable shifts form a
+contiguous range of integers, and exactly one of them is nearest zero.
+
+### Question 6 — the boundary is inclusive
+
+A song whose top note is **exactly** the singer's top note **fits**. The same at
+the bottom. The comparison is `≤` and `≥`, not `<` and `>`.
+
+The reason is that a detected range is a closed interval over notes that were
+actually produced: the top note is in the range because it was sung, not because
+it was extrapolated. Excluding it would be asserting a safety margin, and a
+safety margin is a musical judgement this system has no basis for. The
+convention is stated here before it was tested, as §16 asked, and a fixture pins
+it at each end.
+
+### What it costs, stated plainly
+
+**The reference's numbers were not measured by this system.** They are what
+somebody typed. Every result derived from them is an arithmetic consequence of
+an unverified input, and the product's central rule — *a number shown is a
+number measured* — is not satisfied by them.
+
+This is survivable only because it is made visible rather than smoothed over.
+The mechanism is the one the product already uses for `is_mock` provenance:
+every reference carries `source: "asserted"`, the field is in the payload, and
+the UI shows the distinction rather than merely carrying it
+([§15](#15-definition-of-done--preliminary) item 5). A measured number and a
+typed number are never styled alike, and never summed into a third number that
+would inherit the weaker provenance silently.
+
+**What is bought for that cost** is the whole of the range half of Phase 9 —
+overlap, both gaps, and the transposition — with no copyright position to take,
+no stored audio, no decoder, no provider, no background work, no new dependency,
+and a computation that is unit-testable end to end with no fixture files at all.
+The melody half remains out of scope, as [§5](#5-what-phase-9-actually-needs)
+says it must be under any option that has no reference melody.
+
+**What was given up** is stated so it is not rediscovered as a surprise: nobody
+can be told *which* notes of a song will be hard, because that needs a melody;
+"most people do not know a song's vocal range" ([§4, Option D](#option-d--the-user-supplies-metadata-only))
+is a real product problem and this decision does not solve it, it hands it to
+the user; and no seeded table of song ranges ships with this, because where such
+a table's numbers came from would be the same question again, one level down.
 
 ---
 
@@ -846,8 +956,11 @@ Written now so they are not written later under pressure:
 
 ## 15. Definition of done — preliminary
 
-Preliminary because items 1 and 2 are contingent on a decision nobody has taken.
-It cannot be finalised until [§3](#3-the-blocker-stated-exactly) is answered.
+Written while items 1 and 2 were still contingent on an unanswered decision.
+[§3A](#3a-the-decision-2026-08-20) answers it, and the list below stands as
+written: under Option D, item 2 is a typed reference rather than an uploaded
+one, and the phrase "reference files" in item 8 has nothing to name, because
+Option D stores no file.
 
 1. **The input model is decided and recorded in this file**, with the reasoning
    and the date — the way Phase 8's decision gate was recorded.
@@ -881,8 +994,9 @@ It cannot be finalised until [§3](#3-the-blocker-stated-exactly) is answered.
 
 ## 16. Unresolved product decisions
 
-These block Phase 9. They are questions, and they are deliberately not answered
-here.
+**Answered on 2026-08-20 — see [§3A](#3a-the-decision-2026-08-20).** The list is
+left exactly as it was written, because what a decision was chosen *against* is
+part of the record. Read it as the question set §3A answers, not as an open one.
 
 1. **Where does a reference song come from?** Option A, B, C or D of
    [§4](#4-the-four-input-models). *This is the blocker. Every question below

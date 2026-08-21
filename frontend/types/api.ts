@@ -674,6 +674,12 @@ export interface Identity {
   analysed_recordings: number;
   /** Counted separately: generating it costs a provider call. */
   ai_feedback: number;
+  /**
+   * Song references this identity holds. **Not a count of recordings**, unlike
+   * the three above it: an identity can hold references and have uploaded
+   * nothing. Counted because deleting the identity deletes these too.
+   */
+  song_references: number;
   /** Every way in, oldest first. All resolve to the same recordings. */
   credentials: Credential[];
 }
@@ -684,4 +690,117 @@ export interface DeletionReport {
   audio_files_deleted: number;
   /** Removed from the database but still present on disk. Reported, not hidden. */
   audio_files_failed: number;
+}
+
+/* --- Song compatibility ---------------------------------------------------- */
+
+/**
+ * Where a range's two numbers came from.
+ *
+ * Not decoration, and never to be styled away. `measured` is a number this
+ * system took from audio; `asserted` is a number somebody typed into a form.
+ * Every figure derived from an asserted range is an arithmetic consequence of
+ * an unverified input, and the UI has to show that rather than merely carry it.
+ */
+export type RangeSource = "measured" | "asserted";
+
+export interface ReferenceKey {
+  tonic: string;
+  mode: KeyMode;
+}
+
+/** A song the owner described. Nothing in it was measured by this system. */
+export interface SongReference {
+  reference_id: string;
+  title: string;
+  artist: string | null;
+  lowest_note: string;
+  highest_note: string;
+  key: ReferenceKey | null;
+  created_at: string;
+  /** Always `asserted` today. A field rather than an assumption. */
+  source: RangeSource;
+}
+
+export interface SongReferenceList {
+  /** How many are in this response, not how many exist. */
+  count: number;
+  references: SongReference[];
+}
+
+/** What the caller sends to describe a song. */
+export interface SongReferenceInput {
+  title: string;
+  artist?: string | null;
+  lowest_note: string;
+  highest_note: string;
+  key?: ReferenceKey | null;
+}
+
+export interface NoteRange {
+  lowest_note: string;
+  highest_note: string;
+  /** A *width*: C4–C5 is 12. Distinct from the note counts in `RangeFit`. */
+  semitone_span: number;
+  source: RangeSource;
+}
+
+/**
+ * How much of the song sits inside the detected range.
+ *
+ * Two units, never interchangeable. A `note_count` counts semitone positions
+ * and includes both ends; a figure in `semitones` is a distance. A song running
+ * C4–C5 spans 12 semitones and contains 13 notes.
+ */
+export interface RangeFit {
+  overlap_note_count: number;
+  reference_note_count: number;
+  /** A share of the **song's** range, not of the singer's. */
+  percent_of_reference_range: number;
+  semitones_above_top_note: number;
+  semitones_below_bottom_note: number;
+}
+
+/**
+ * The shift that brings the song inside the range, if one exists.
+ *
+ * Arithmetic, not musical advice. `semitones` is `null` exactly when no shift
+ * fits — never `0` standing in for "cannot".
+ */
+export interface Transposition {
+  possible: boolean;
+  semitones: number | null;
+  lowest_workable_semitones: number | null;
+  highest_workable_semitones: number | null;
+  /** How many semitones wider the song is. Set exactly when nothing fits. */
+  shortfall_semitones: number | null;
+  resulting_lowest_note: string | null;
+  resulting_highest_note: string | null;
+  resulting_key: ReferenceKey | null;
+}
+
+/** Why the recording cannot take part. No `not_found`: that is a 404 here. */
+export type CompatibilityRecordingStatus =
+  | "ready"
+  | "analysis_missing"
+  | "analysis_in_progress"
+  | "analysis_failed"
+  | "insufficient_pitch_signal";
+
+/**
+ * A recording's detected range placed against a song's asserted one.
+ *
+ * Note what has no field here: a compatibility score. The components are
+ * reported instead, each with its unit in its name.
+ */
+export interface SongCompatibility {
+  comparable: boolean;
+  recording_status: CompatibilityRecordingStatus;
+  recording_range: NoteRange | null;
+  reference_range: NoteRange | null;
+  reference: SongReference | null;
+  fit: RangeFit | null;
+  transposition: Transposition | null;
+  /** Always carries the three that describe the method rather than the inputs. */
+  caveats: string[];
 }

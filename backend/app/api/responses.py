@@ -19,6 +19,7 @@ _DESCRIPTIONS: dict[ErrorCode, str] = {
     ErrorCode.CORRUPTED_AUDIO: "The file could not be read as audio.",
     ErrorCode.RECORDING_NOT_FOUND: "No recording exists with that identifier.",
     ErrorCode.ANALYSIS_NOT_FOUND: "That recording has not been analysed.",
+    ErrorCode.REFERENCE_NOT_FOUND: "No song reference exists with that identifier.",
     ErrorCode.VALIDATION_ERROR: "The request was not valid.",
     ErrorCode.INTERNAL_ERROR: "An unexpected error occurred.",
 }

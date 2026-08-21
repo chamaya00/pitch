@@ -18,6 +18,10 @@ import type {
   Recording,
   RecordingComparison,
   RecordingHistory,
+  SongCompatibility,
+  SongReference,
+  SongReferenceInput,
+  SongReferenceList,
 } from "@/types/api";
 
 /** Error thrown for any non-2xx API response or transport failure. */
@@ -485,5 +489,79 @@ export function revokeCredential(
   return apiFetch<Credential[]>(
     `/identity/credentials/${encodeURIComponent(credentialId)}`,
     { method: "DELETE", signal },
+  );
+}
+
+/* --- Song references and compatibility ------------------------------------- */
+
+/**
+ * Describe a song to compare against.
+ *
+ * **Nothing here is measured.** There is no upload and no decoding: the two
+ * notes are what the caller says they are, and the response says so in
+ * `source`. Notes are written with sharps — `F#3`, not `Gb3` — because that is
+ * how this project spells every pitch class, and the server refuses a flat
+ * rather than handing back a different name than it was sent.
+ */
+export function createSongReference(
+  body: SongReferenceInput,
+  signal?: AbortSignal,
+): Promise<SongReference> {
+  return apiFetch<SongReference>("/references", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+/** The caller's own references, newest first. */
+export function listSongReferences(
+  signal?: AbortSignal,
+): Promise<SongReferenceList> {
+  return apiFetch<SongReferenceList>("/references", {
+    signal,
+    cache: "no-store",
+  });
+}
+
+/**
+ * Remove one reference, and return the ones that remain.
+ *
+ * The remaining collection rather than an empty body, the way revoking a
+ * credential works: a client that has just changed a collection needs the
+ * collection, and a follow-up `GET` would be a second round trip for something
+ * this response already knows.
+ */
+export function deleteSongReference(
+  referenceId: string,
+  signal?: AbortSignal,
+): Promise<SongReferenceList> {
+  return apiFetch<SongReferenceList>(
+    `/references/${encodeURIComponent(referenceId)}`,
+    { method: "DELETE", signal },
+  );
+}
+
+/**
+ * Place a recording's detected range against a song's asserted one.
+ *
+ * Derived on the server on every read, so there is nothing to poll and nothing
+ * to refresh: re-analysing the recording changes the answer immediately.
+ *
+ * A `200` carrying `comparable: false` is a **successful** answer describing
+ * why the comparison could not be made — nobody measured this recording yet,
+ * one is running, one failed, there was no reliable pitch — and must not be
+ * handled as a failure. Only a recording or a reference that is not the
+ * caller's rejects, with `RECORDING_NOT_FOUND` or `REFERENCE_NOT_FOUND`.
+ */
+export function getSongCompatibility(
+  recordingId: string,
+  referenceId: string,
+  signal?: AbortSignal,
+): Promise<SongCompatibility> {
+  return apiFetch<SongCompatibility>(
+    `/recordings/${recordingId}/compatibility?reference_id=${encodeURIComponent(referenceId)}`,
+    { signal, cache: "no-store" },
   );
 }

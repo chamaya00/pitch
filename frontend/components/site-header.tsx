@@ -12,7 +12,7 @@ export function SiteHeader() {
           VocalLens
         </Link>
         <p className="hidden text-sm text-muted sm:block">
-          Measure how you speak. Understand what it means.
+          Measure how you sound. Understand what it means.
         </p>
       </div>
     </header>

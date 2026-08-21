@@ -84,7 +84,62 @@ MIN_DURATION_SECONDS: Final = 0.25
 #: Frames either side of a frame, used for the rolling instability window.
 _STABILITY_WINDOW: Final = 5
 #: Rolling cents standard deviation above which a frame is "unstable".
-UNSTABLE_CENTS_STD: Final = 35.0
+#:
+#: **35.0 until Step 11.6, where it was found to fire on nothing at all.** Not a
+#: 0.9-semitone vibrato, not a two-octave glide, not a trill, not a 43 Hz
+#: wobble: no signal that could be synthesised produced a single section. The
+#: measurement had been computed, stored, returned and documented as catching
+#: "vibrato, a slide, a bend and a laugh" since Step 7I, and had never once been
+#: non-empty. No test asserted a populated one, which is why nobody noticed —
+#: ``test_audio_analyzer.py`` asserted only that a steady tone produces none,
+#: and a function that always returns ``()`` passes that.
+#:
+#: The reason it could not fire is the quantity's own bound. This is the
+#: deviation from the *nearest note*, so it lives in ±50 cents and a 5-frame
+#: window can only exceed 35 by alternating near both extremes — which needs the
+#: pitch to move about a semitone every 23 ms, faster than anything the detector
+#: can still track. Above 25 the flagged frames also stop being *consecutive*,
+#: and :data:`MIN_UNSTABLE_SECONDS` asks for a quarter-second of them in a row.
+#:
+#: The sweep that set 20.0. Each cell is the **longest consecutive run**, in
+#: seconds, at that threshold; a run reaching 0.25 s becomes a section:
+#:
+#: ========================  =====  =====  =====  =====  =====
+#: signal                       15     20     25     30     35
+#: ========================  =====  =====  =====  =====  =====
+#: steady tone                0.00   0.00   0.00   0.00   0.00
+#: steady, 8 cents sharp      0.00   0.00   0.00   0.00   0.00
+#: stepped C major melody     0.16   0.07   0.07   0.00   0.00
+#: vibrato 0.2 st at 5 Hz     0.00   0.00   0.00   0.00   0.00
+#: vibrato 0.3 st at 5 Hz     0.05   0.00   0.00   0.00   0.00
+#: vibrato 0.4 st at 6 Hz     0.05   0.00   0.00   0.00   0.00
+#: vibrato 0.7 st at 6 Hz     3.83   0.65   0.07   0.05   0.00
+#: vibrato 0.9 st at 7 Hz     3.83   3.83   0.44   0.05   0.00
+#: vibrato 1.5 st at 6 Hz     0.98   0.65   0.23   0.07   0.00
+#: glide 24 st over 2.0 s     1.93   1.93   0.09   0.05   0.00
+#: ========================  =====  =====  =====  =====  =====
+#:
+#: **20 is the only value that separates the two halves with margin.** Above it,
+#: the widest vibrato and a two-octave glide stop reaching a quarter-second; at
+#: 15 an ordinary 0.3-semitone vibrato starts flagging frames. At 20 the largest
+#: run any signal that must stay quiet produces is 0.07 s — the note-transition
+#: frames of a plain stepped melody, which are the binding constraint here and
+#: not the steady tone — against a 0.25 s minimum, and the smallest run from a
+#: signal that should fire is 0.65 s.
+#:
+#: **The window did not need to change**, which was checked rather than assumed:
+#: 9, 11, 15 and 21-frame windows were swept against the same signals and none
+#: separated them at a threshold that 5 could not.
+#:
+#: **What this quantity under-reports, and why the alternative is worse.** A
+#: 1.5-semitone vibrato scores *lower* than a 0.9-semitone one, because the wider
+#: swing spends time past the semitone boundary where the deviation wraps; the
+#: same wrap makes a fast glide through clean notes look steady. Measuring the
+#: rolling deviation of *absolute pitch* fixes both — and was measured, and flags
+#: the stepped melody at 105 cents, which is every note change in every melody
+#: anybody will ever sing. The wrap is the price of being immune to a clean step,
+#: and it is paid deliberately.
+UNSTABLE_CENTS_STD: Final = 20.0
 #: Unstable runs shorter than this are noise, not a section worth naming.
 MIN_UNSTABLE_SECONDS: Final = 0.25
 

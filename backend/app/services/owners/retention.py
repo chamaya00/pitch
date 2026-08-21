@@ -9,16 +9,24 @@ in the development database had never uploaded anything.
 **The policy is deliberately the narrowest one that solves that.** An identity
 is eligible only when *both* hold:
 
-1. it owns **no recordings**, and
+1. it owns **nothing at all**, and
 2. it has not been seen for the retention period.
 
 The first condition is what makes this safe rather than a judgement call.
 Deleting an empty identity is **invisible to whoever held it**: their key stops
 resolving, the resolver mints them a fresh one on the next request, and the
-thing they lost was nothing. Deleting an identity that owns recordings is a
+thing they lost was nothing. Deleting an identity that owns *anything* is a
 different act entirely — it destroys somebody's singing history — and **no
 retention requirement for that exists anywhere in this repository**. Inventing
 one here would be inventing a product decision, so this module does not.
+
+**"Nothing" is a list, and the list grows.** Until Step 11.3 a recording was the
+only thing an identity could hold, and "owns no recordings" and "owns nothing"
+were the same sentence. Song references made them different, and an identity
+holding only references would have been reclaimed by the older rule — silently
+taking them with it. :func:`is_eligible` therefore takes a count for **every**
+kind of thing an identity can own, and takes them as required arguments: a
+default of zero is exactly the shape a future third kind would slip through.
 
 That gap is recorded in ``docs/limitations.md`` rather than quietly closed.
 
@@ -67,15 +75,24 @@ class RetentionPolicy:
         return (now or utc_now()) - self.retention
 
     def is_eligible(
-        self, *, last_seen_at: datetime, recordings: int, now: datetime | None = None
+        self,
+        *,
+        last_seen_at: datetime,
+        recordings: int,
+        song_references: int,
+        now: datetime | None = None,
     ) -> bool:
         """Whether this identity may be reclaimed.
 
-        Both conditions, always. An identity with recordings is never eligible
+        Both conditions, always. An identity holding anything is never eligible
         however old it is, and an identity seen recently is never eligible
         however empty it is.
+
+        Every count is a required keyword argument, so adding a third kind of
+        owned thing is a compile-time break at every call site rather than a
+        silent widening of what "empty" means.
         """
-        if recordings > 0:
+        if recordings > 0 or song_references > 0:
             return False
         return last_seen_at < self.cutoff(now)
 
@@ -105,7 +122,7 @@ class RetentionRepository(Protocol):
     """The two database operations retention needs."""
 
     async def expired_owner_ids(self, cutoff: datetime, limit: int) -> list[uuid.UUID]:
-        """Identities that *look* eligible: no recordings, last seen before ``cutoff``.
+        """Identities that *look* eligible: holding nothing, last seen before ``cutoff``.
 
         Advisory only. Between this query and the deletion an owner may come
         back, so the answer is re-checked under a lock before anything is
@@ -179,12 +196,14 @@ class IdentityRetentionService:
         for owner_id in candidates:
             try:
                 # The second opinion. The candidate query already said this
-                # owner has no recordings; asking the deletion service's own
-                # read path means two independent statements must agree before
+                # owner holds nothing; asking the deletion service's own read
+                # path means two independent statements must agree before
                 # anything is removed, and it is what would catch a candidate
-                # query that had quietly stopped filtering.
+                # query that had quietly stopped filtering. Both kinds of owned
+                # thing are re-checked here, because checking only one is how
+                # the query and the guard would come to disagree.
                 held = await self._deletion.summary(owner_id)
-                if held.recordings > 0:
+                if held.recordings > 0 or held.song_references > 0:
                     logger.warning("identity_cleanup_refused_non_empty")
                     skipped += 1
                     continue
